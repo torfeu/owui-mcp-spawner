@@ -95,7 +95,7 @@ In OpenWebUI, set the token as Bearer token when adding the MCP connection. In C
 {
   "mcpServers": {
     "my-tool": {
-      "url": "http://192.168.1.100:8104/mcp",
+      "url": "http://<your-server-ip>:8104/mcp",
       "headers": { "Authorization": "Bearer mysecrettoken123" }
     }
   }
