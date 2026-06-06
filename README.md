@@ -264,6 +264,12 @@ deploy/                 systemd service + env file examples
 
 ---
 
+## Credits
+
+- [CodeMirror](https://codemirror.net) — MIT — in-browser code editor
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
