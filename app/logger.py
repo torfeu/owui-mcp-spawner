@@ -1,8 +1,12 @@
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOG_DIR = Path(__file__).parent.parent / "runtime" / "logs"
+
+MANAGER_LOG_MAX_BYTES = 2 * 1024 * 1024
+MANAGER_LOG_BACKUPS = 3
 
 
 def get_manager_logger() -> logging.Logger:
@@ -12,7 +16,11 @@ def get_manager_logger() -> logging.Logger:
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(fmt)
-        fh = logging.FileHandler(LOG_DIR / "manager.log")
+        fh = RotatingFileHandler(
+            LOG_DIR / "manager.log",
+            maxBytes=MANAGER_LOG_MAX_BYTES,
+            backupCount=MANAGER_LOG_BACKUPS,
+        )
         fh.setFormatter(fmt)
         logger.addHandler(sh)
         logger.addHandler(fh)

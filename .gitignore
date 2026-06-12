@@ -17,3 +17,6 @@ tools/
 # keep example files
 !deploy/*.env.example
 !deploy/*.service.example
+
+# local scratch files
+chat.txt

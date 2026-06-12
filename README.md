@@ -1,4 +1,4 @@
-# MCP Framework — v0.0.5
+# MCP Framework — v0.0.6
 
 A local-first manager for running OpenWebUI-compatible tool JSONs as [Model Context Protocol](https://modelcontextprotocol.io) servers.
 
@@ -154,6 +154,123 @@ When auth is active:
 
 ---
 
+## Writing a tool
+
+Every tool is a Python file with a `Tools` class. The framework reads it, installs dependencies, and exposes each method as an MCP tool.
+
+### Minimal structure
+
+```python
+"""
+title: My Tool
+description: What this tool does
+author: Your Name
+version: 0.1.0
+"""
+
+class Tools:
+    def my_function(self, param: str) -> str:
+        """Short description shown in the MCP schema.
+
+        Args:
+            param: Description of this parameter
+        """
+        return f"Result: {param}"
+```
+
+### With configuration (Valves)
+
+```python
+from pydantic import BaseModel, Field
+
+class Tools:
+    class Valves(BaseModel):
+        api_url: str = Field(default="https://api.example.com", description="Base API URL")
+        api_key: str = Field(default="", description="API key")
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    def fetch(self, query: str) -> str:
+        """Fetch data from the configured API.
+
+        Args:
+            query: The search term
+        """
+        # use self.valves.api_url and self.valves.api_key
+        return f"Result for {query}"
+```
+
+Valve fields become configurable values in the web UI (Edit → Values).
+
+### Schema features
+
+| Python | MCP schema |
+|---|---|
+| `Literal["a", "b"]` | `"enum": ["a", "b"]` |
+| `Annotated[str, Field(description="...")]` | `"description": "..."` |
+| `Args:` docstring section | `"description"` per parameter |
+| Default values | `"default"` in schema |
+| `Optional[T]` | field not required |
+
+### JSON upload format
+
+When uploading a tool (via the web UI, `upload_tool()`, or direct API), the JSON must be an **array** containing one object with these fields:
+
+```json
+[
+  {
+    "id": "my_tool",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "name": "My Tool",
+    "meta": {
+      "description": "Short description shown in the UI and to the AI",
+      "manifest": {
+        "title": "My Tool",
+        "author": "Your Name",
+        "version": "0.1.0"
+      }
+    },
+    "specs": [
+      {
+        "name": "my_function",
+        "description": "What this function does",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "param": { "type": "string", "description": "Description" }
+          },
+          "required": ["param"]
+        }
+      }
+    ],
+    "content": "\"\"\"\\ntitle: My Tool\\n...\\n\"\"\"\\n\\nclass Tools:\\n    ..."
+  }
+]
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `id` | yes | Unique snake_case ID — becomes the MCP server ID and URL path |
+| `user_id` | yes | Always `"00000000-0000-0000-0000-000000000000"` |
+| `name` | yes | Display name shown in the UI |
+| `meta.description` | yes | Short description for the UI card |
+| `meta.manifest` | yes | `title`, `author`, `version` |
+| `specs` | yes | List of tool method definitions (name, description, JSON Schema parameters) |
+| `content` | yes | Complete Python source code as a string (use `\n` for newlines) |
+
+The `specs` entries must match the public methods of your `Tools` class. One entry per method.
+
+### Upload
+
+1. Export as OpenWebUI JSON via the **Tool Editor** → **Export JSON**
+2. Upload via **+ Upload JSON** in the web UI
+3. Or use the `mcp-manager-control` MCP tool: `upload_tool(json_content)`
+
+Call `get_tool_template()` on the MCP Manager Control tool to get both the Python template and a complete JSON format example at runtime.
+
+---
+
 ## Tool Editor
 
 The built-in editor lets you write, validate, and export OpenWebUI-compatible tool JSONs directly in the browser:
@@ -219,28 +336,41 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 ```
 app/
   manager.py            Entry point (CLI) — --host, --no-edit, --no-code-edit, --mcp-token, --no-token-edit
-  admin_server.py       FastAPI admin API + web server
+  admin_server.py       FastAPI admin API + web server (+ instance watchdog)
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
   auth.py               Manager auth, edit mode, MCP token helpers
   settings_store.py     Persistent settings (runtime/settings.json)
   config_store.py       Config file I/O + port management
-  process_manager.py    Subprocess lifecycle (start/stop/restart)
-  tool_loader.py        OpenWebUI JSON → MCP tool definitions + schema generation
-  tool_editor.py        Code validation + OpenWebUI JSON export
+  process_manager.py    Subprocess lifecycle (start/stop/restart) + health checks
+  tool_loader.py        OpenWebUI JSON → MCP tool definitions
+  tool_editor.py        Code validation (isolated subprocess) + OpenWebUI JSON export
+  validate_worker.py    Subprocess worker that executes untrusted tool code for validation
+  schema_gen.py         Shared type-hint/docstring → JSON Schema generation
   dependency_manager.py pip install handling
   schema.py             Pydantic models
   security.py           Package validation, secret masking
-  logger.py             Logging setup
+  logger.py             Logging setup (rotating manager log)
 configs/                Per-server JSON configs (one file = one MCP)
 tools/                  Uploaded OpenWebUI tool JSONs
+examples/               Example tool JSON (MCP Manager Control — manage the manager via MCP)
 web/                    Frontend (HTML + JS + CSS)
-runtime/                PIDs + logs + settings.json (gitignored)
+runtime/                PIDs + logs + settings.json + tool-code history (gitignored)
 deploy/                 systemd service + env file examples
 ```
 
 ---
 
 ## Changelog
+
+### v0.0.6
+- **Isolated validation** — tool code is validated in a short-lived subprocess with a timeout; import-time side effects, crashes or endless loops can no longer affect the manager process
+- **Non-blocking API** — dependency installs, instance start/stop/restart and validation run in worker threads; the UI stays responsive during long operations
+- **Health checks** — `start` waits until the instance actually answers on its port (with log tail as error detail on failure); a watchdog marks instances whose process died as `failed`
+- **Log rotation** — rotating manager log, oversized runtime logs rotate on instance start, log endpoints return the last 500 lines instead of the whole file
+- **Tool-code history** — the previous version of a tool JSON is snapshotted to `runtime/history/<id>/` before every save (last 10 kept)
+- **Unified schema generation** — validation, export and runtime now share one implementation (`schema_gen.py`); the editor gains `Literal` → enum and `Annotated`/`Field` descriptions
+- **Hardening** — locked instances can no longer be stopped; timing-safe token comparison (`hmac.compare_digest`); no more `exec()` of uploaded code in the manager process
+- **Cleanup** — removed dead config fields (`enabled`, `runtime`, `requirements_file`, `install_on_upload`) and unused status values; MCP Manager Control tool (v0.0.2: precise 403 error details, fixed `export_tool`) now lives in `examples/`
 
 ### v0.0.5
 - **Settings page** — ⚙ button in the web UI for managing password, edit mode, MCP token and manager restart; all settings persisted in `runtime/settings.json`

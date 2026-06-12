@@ -4,7 +4,6 @@ from enum import Enum
 
 
 class MCPStatus(str, Enum):
-    uploaded = "uploaded"
     installing = "installing"
     installed = "installed"
     starting = "starting"
@@ -13,8 +12,6 @@ class MCPStatus(str, Enum):
     stopped = "stopped"
     failed = "failed"
     dependency_error = "dependency_error"
-    port_error = "port_error"
-    config_error = "config_error"
 
 
 class ServerConfig(BaseModel):
@@ -31,15 +28,8 @@ class ServerConfig(BaseModel):
         return v
 
 
-class RuntimeConfig(BaseModel):
-    venv_mode: str = "shared"
-    python: str = "shared"
-
-
 class InstallConfig(BaseModel):
     dependencies: list[str] = []
-    requirements_file: Optional[str] = None
-    install_on_upload: bool = True
     upgrade: bool = False
 
 
@@ -57,9 +47,8 @@ class MCPConfig(BaseModel):
     id: str
     name: str
     description: str = ""
-    enabled: bool = True
+    locked: bool = False
     server: ServerConfig
-    runtime: RuntimeConfig = RuntimeConfig()
     install: InstallConfig = InstallConfig()
     tool_source: ToolSourceConfig
     values: dict[str, Any] = {}

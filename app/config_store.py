@@ -137,7 +137,7 @@ def is_port_free(port: int, exclude_id: Optional[str] = None) -> bool:
     return _os_port_free(port)
 
 
-def get_instance_state(config_id: str) -> MCPInstance:
+def get_instance_state(config_id: str) -> Optional[MCPInstance]:
     if config_id not in _state:
         cfg = load_config(config_id)
         if cfg:

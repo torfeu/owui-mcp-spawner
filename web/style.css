@@ -233,6 +233,21 @@ tbody tr:last-child td {
 
 .btn-sm { padding: 4px 8px; font-size: 11px; }
 
+.btn-lock { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.btn-lock:hover:not(:disabled) { color: var(--warning); border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.08); }
+
+.version-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
 /* ── Modal ── */
 .modal {
   position: fixed;

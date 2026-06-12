@@ -4,6 +4,7 @@ Usage: python app/mcp_runner.py --config configs/mcp1.json
 """
 import argparse
 import asyncio
+import hmac
 import inspect
 import json
 import logging
@@ -115,7 +116,7 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
             provided = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
-            if provided != mcp_auth_token:
+            if not hmac.compare_digest(provided, mcp_auth_token):
                 from starlette.responses import Response
                 await Response(
                     "Unauthorized", status_code=401,

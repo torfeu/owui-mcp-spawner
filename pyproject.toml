@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "mcp-manager"
-version = "0.0.5"
+version = "0.0.6"
 description = "Local JSON-based MCP server manager"
 requires-python = ">=3.10"
 dependencies = [

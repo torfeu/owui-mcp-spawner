@@ -11,6 +11,7 @@ If neither variable is set:
                              discouraged without a password.
 """
 import hashlib
+import hmac
 import os
 from typing import Optional
 
@@ -53,7 +54,7 @@ def verify_password(plain: str) -> bool:
     """Return True if *plain* matches the active password hash."""
     if _password_hash is None:
         return True  # no auth set — nothing to verify
-    return hashlib.sha256(plain.encode()).hexdigest() == _password_hash
+    return hmac.compare_digest(hashlib.sha256(plain.encode()).hexdigest(), _password_hash)
 
 
 def set_password(plain: str) -> None:
@@ -121,7 +122,7 @@ def require_auth(
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if hashlib.sha256(token.encode()).hexdigest() != _password_hash:
+    if not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), _password_hash):
         raise HTTPException(
             status_code=401,
             detail="Invalid password",

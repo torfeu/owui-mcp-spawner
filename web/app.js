@@ -120,7 +120,7 @@ function renderTable(instances) {
   tbody.innerHTML = instances.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
-      <td>${esc(inst.name)}</td>
+      <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}</td>
       <td>${statusBadge(inst.status, inst.error)}</td>
       <td>${inst.port}</td>
       <td class="url-cell"><a href="${esc(inst.url)}" target="_blank">${esc(inst.url)}</a></td>
@@ -142,21 +142,26 @@ function statusBadge(status, error = "") {
 function actionButtons(inst) {
   const s = inst.status;
   const running = s === "running";
-  const stopped = ["stopped", "installed", "failed", "dependency_error", "port_error", "uploaded"].includes(s);
+  const stopped = ["stopped", "installed", "failed", "dependency_error"].includes(s);
   const busy = ["starting", "stopping", "installing"].includes(s);
+  const locked = !!inst.locked;
 
-  const canUploadOrEdit = editMode !== "readonly";  // upload + config edit allowed
-  const canCodeEdit     = editMode === "full";       // inline code editor allowed
+  const canUploadOrEdit = editMode !== "readonly" && !locked;
+  const canCodeEdit     = editMode === "full" && !locked;
+  const canRestart      = !locked;
+  const canReinstall    = !locked;
 
   const btns = [];
-  if (stopped)  btns.push(ab("start",   inst.id, "Start",   "btn-success btn-sm", busy));
-  if (running)  btns.push(ab("stop",    inst.id, "Stop",    "btn-danger btn-sm", busy));
-  if (running || stopped) btns.push(ab("restart", inst.id, "Restart", "btn-secondary btn-sm", busy));
+  if (stopped)  btns.push(ab("start",    inst.id, "Start",    "btn-success btn-sm", busy));
+  if (running && !locked) btns.push(ab("stop", inst.id, "Stop", "btn-danger btn-sm", busy));
+  if ((running || stopped) && canRestart) btns.push(ab("restart", inst.id, "Restart", "btn-secondary btn-sm", busy));
   if (canUploadOrEdit) btns.push(ab("edit",     inst.id, "Edit",      "btn-secondary btn-sm", busy));
   if (canCodeEdit)     btns.push(ab("editcode", inst.id, "Edit Code", "btn-secondary btn-sm", busy));
-  btns.push(ab("logs",     inst.id, "Logs",      "btn-secondary btn-sm"));
-  btns.push(ab("reinstall", inst.id, "Reinstall", "btn-warning btn-sm", busy));
-  if (canUploadOrEdit) btns.push(ab("delete",   inst.id, "Delete",    "btn-danger btn-sm", running));
+  btns.push(ab("logs",   inst.id, "Logs",   "btn-secondary btn-sm"));
+  btns.push(ab("export", inst.id, "Export", "btn-secondary btn-sm"));
+  if (canReinstall && editMode !== "readonly") btns.push(ab("reinstall", inst.id, "Reinstall", "btn-warning btn-sm", busy));
+  if (canUploadOrEdit) btns.push(ab("delete", inst.id, "Delete", "btn-danger btn-sm", running));
+  btns.push(ab(locked ? "unlock" : "lock", inst.id, locked ? "🔓" : "🔒", "btn-lock btn-sm", busy));
   return btns.join("");
 }
 
@@ -192,6 +197,17 @@ async function handleAction(e) {
         await apiFetch(`${API}/${id}`, { method: "DELETE" });
         showAlert("success", `${id} deleted.`);
         break;
+      case "export":
+        await exportInstance(id);
+        return;
+      case "lock":
+        await apiFetch(`${API}/${id}/lock`, { method: "POST" });
+        showAlert("info", `${id} locked — only Start/Stop allowed.`);
+        break;
+      case "unlock":
+        await apiFetch(`${API}/${id}/unlock`, { method: "POST" });
+        showAlert("success", `${id} unlocked.`);
+        break;
       case "edit":
         await openEdit(id);
         return;
@@ -205,6 +221,26 @@ async function handleAction(e) {
     loadInstances();
   } catch (err) {
     showAlert("error", err.message);
+  }
+}
+
+async function exportInstance(id) {
+  try {
+    const res = await fetch(`${API}/${id}/export`, { headers: authHeaders() });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showAlert("error", body.detail || "Export failed");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showAlert("error", "Export failed: " + e.message);
   }
 }
 
@@ -296,7 +332,6 @@ async function openEdit(id) {
   document.getElementById("edit-host").value = cfg.server.host;
   document.getElementById("edit-port").value = cfg.server.port;
   document.getElementById("edit-endpoint").value = cfg.server.endpoint;
-  document.getElementById("edit-enabled").checked = cfg.enabled;
   document.getElementById("edit-autostart").checked = cfg.lifecycle?.auto_start ?? false;
   document.getElementById("edit-deps").value = (cfg.install?.dependencies || []).join("\n");
 
@@ -328,7 +363,7 @@ async function saveEdit(restart) {
   document.querySelectorAll("[data-val]").forEach(input => {
     const key = input.dataset.val;
     if (input.type === "checkbox") values[key] = input.checked;
-    else if (input.type === "number") values[key] = Number(input.value);
+    else if (input.type === "number") { if (input.value !== "") values[key] = Number(input.value); }
     else if (input.value !== "●●●●●●●●" && input.value !== "") values[key] = input.value;
   });
 
@@ -337,7 +372,6 @@ async function saveEdit(restart) {
 
   const body = {
     name: document.getElementById("edit-name").value,
-    enabled: document.getElementById("edit-enabled").checked,
     server: {
       host: document.getElementById("edit-host").value,
       port: parseInt(document.getElementById("edit-port").value),

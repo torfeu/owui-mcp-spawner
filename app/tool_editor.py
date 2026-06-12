@@ -1,10 +1,25 @@
 """
 Tool editor backend: validation and OpenWebUI-compatible JSON export.
+
+validate_tool_code() runs the untrusted code in a short-lived subprocess
+(app/validate_worker.py) so import-time side effects, crashes or hangs
+cannot affect the manager process. The in-process implementation
+(_validate_in_process) is only executed inside that worker.
 """
 import ast
 import inspect
+import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any
+
+from .schema_gen import build_schema_from_method
+
+BASE_DIR = Path(__file__).parent.parent
+
+VALIDATE_TIMEOUT = 20  # seconds for the validation subprocess
 
 
 STARTER_TEMPLATE = '''\
@@ -41,11 +56,48 @@ class Tools:
 '''
 
 
+def _invalid(errors: list[str], warnings: list[str] | None = None) -> dict:
+    return {"valid": False, "errors": errors, "warnings": warnings or [], "tools": [], "valves": {}}
+
+
 def validate_tool_code(code: str) -> dict:
-    """Validate Python tool code for OpenWebUI compatibility.
+    """Validate Python tool code in an isolated subprocess.
 
     Returns a dict with: valid, errors, warnings, tools (specs), valves.
     """
+    # Cheap syntax check first — no subprocess needed for broken code
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        return _invalid([f"SyntaxError line {e.lineno}: {e.msg}"])
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "app.validate_worker"],
+            input=code,
+            capture_output=True,
+            text=True,
+            timeout=VALIDATE_TIMEOUT,
+            cwd=str(BASE_DIR),
+        )
+    except subprocess.TimeoutExpired:
+        return _invalid([f"Validation timed out after {VALIDATE_TIMEOUT}s — "
+                         "does the code block or wait at import time?"])
+    except Exception as e:
+        return _invalid([f"Validation subprocess failed: {e}"])
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return _invalid([f"Validation subprocess crashed: {detail[-500:]}"])
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return _invalid([f"Validation produced unreadable output: {result.stdout[:200]}"])
+
+
+def _validate_in_process(code: str) -> dict:
+    """Actual validation logic — only run inside the validate_worker subprocess."""
     errors: list[str] = []
     warnings: list[str] = []
     tools: list[dict] = []
@@ -55,21 +107,18 @@ def validate_tool_code(code: str) -> dict:
     try:
         ast.parse(code)
     except SyntaxError as e:
-        errors.append(f"SyntaxError line {e.lineno}: {e.msg}")
-        return {"valid": False, "errors": errors, "warnings": warnings, "tools": [], "valves": {}}
+        return _invalid([f"SyntaxError line {e.lineno}: {e.msg}"])
 
     # 2. Runtime check + class introspection
     try:
         ns: dict = {}
         exec(code, ns)  # noqa: S102
     except Exception as e:
-        errors.append(f"Runtime error: {type(e).__name__}: {e}")
-        return {"valid": False, "errors": errors, "warnings": warnings, "tools": [], "valves": {}}
+        return _invalid([f"Runtime error: {type(e).__name__}: {e}"])
 
     ToolsClass = ns.get("Tools")
     if ToolsClass is None:
-        errors.append("No 'Tools' class found — OpenWebUI requires a class named 'Tools'")
-        return {"valid": False, "errors": errors, "warnings": warnings, "tools": [], "valves": {}}
+        return _invalid(["No 'Tools' class found — OpenWebUI requires a class named 'Tools'"])
 
     # 3. Valves defaults
     try:
@@ -78,7 +127,7 @@ def validate_tool_code(code: str) -> dict:
     except Exception as e:
         warnings.append(f"Could not instantiate Valves: {e}")
 
-    # 4. Method introspection → specs
+    # 4. Method introspection → specs (same schema builder as the MCP runner)
     excluded = {"__init__", "valves", "user_valves"}
     for name, method in inspect.getmembers(ToolsClass, predicate=inspect.isfunction):
         if name.startswith("_") or name in excluded:
@@ -91,37 +140,17 @@ def validate_tool_code(code: str) -> dict:
         if not doc:
             warnings.append(f"'{name}': no docstring — description will be empty in OpenWebUI")
 
-        properties: dict = {}
-        required: list[str] = []
-
         for param_name, param in sig.parameters.items():
             if param_name in ("self", "cls"):
                 continue
-
             if param.annotation is inspect.Parameter.empty:
                 warnings.append(f"'{name}.{param_name}': no type hint, defaulting to string")
 
-            prop = _annotation_to_schema(param.annotation)
-            desc = _extract_param_doc(doc, param_name)
-            if desc:
-                prop["description"] = desc
-
-            if param.default is inspect.Parameter.empty:
-                required.append(param_name)
-            elif param.default is not None:
-                prop["default"] = param.default
-
-            properties[param_name] = prop
-
-        spec: dict = {
+        tools.append({
             "name": name,
             "description": first_line,
-            "parameters": {"type": "object", "properties": properties},
-        }
-        if required:
-            spec["parameters"]["required"] = required
-
-        tools.append(spec)
+            "parameters": build_schema_from_method(method, ns),
+        })
 
     if not tools:
         errors.append("Tools class has no public methods — at least one tool function is required")
@@ -135,12 +164,17 @@ def validate_tool_code(code: str) -> dict:
     }
 
 
-def generate_openwebui_json(code: str, tool_id: str, name: str, description: str) -> list[dict]:
+def generate_openwebui_json(
+    code: str, tool_id: str, name: str, description: str,
+    validation: dict | None = None,
+) -> list[dict]:
     """Generate an OpenWebUI-compatible tool export JSON array.
 
-    Raises ValueError if the code is invalid so callers can return a proper error.
+    Pass an existing validate_tool_code() result as *validation* to avoid
+    validating twice. Raises ValueError if the code is invalid so callers
+    can return a proper error.
     """
-    result = validate_tool_code(code)
+    result = validation if validation is not None else validate_tool_code(code)
     if not result["valid"]:
         raise ValueError(f"Invalid tool code: {'; '.join(result['errors'])}")
     now = int(time.time())
@@ -159,50 +193,3 @@ def generate_openwebui_json(code: str, tool_id: str, name: str, description: str
         "updated_at": now,
         "created_at": now,
     }]
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
-def _annotation_to_schema(annotation: Any) -> dict:
-    import typing
-    if annotation is inspect.Parameter.empty:
-        return {"type": "string"}
-    origin = getattr(annotation, "__origin__", None)
-    args = getattr(annotation, "__args__", ())
-    # Optional[X] / Union[X, None]
-    if origin is typing.Union:
-        non_none = [a for a in args if a is not type(None)]
-        if len(non_none) == 1:
-            return _annotation_to_schema(non_none[0])
-        return {"type": "string"}
-    if origin in (list,):
-        return {"type": "array"}
-    if origin in (dict,):
-        return {"type": "object"}
-    return {
-        str:   {"type": "string"},
-        int:   {"type": "integer"},
-        float: {"type": "number"},
-        bool:  {"type": "boolean"},
-        list:  {"type": "array"},
-        dict:  {"type": "object"},
-    }.get(annotation, {"type": "string"})
-
-
-def _extract_param_doc(docstring: str, param_name: str) -> str:
-    """Extract parameter description from Google-style docstring Args section."""
-    in_args = False
-    for line in docstring.splitlines():
-        stripped = line.strip()
-        if stripped.lower() in ("args:", "arguments:", "parameters:"):
-            in_args = True
-            continue
-        if in_args:
-            if stripped and not line.startswith(" ") and not line.startswith("\t"):
-                break  # left the Args section
-            if stripped.startswith(f"{param_name}:"):
-                return stripped.split(":", 1)[-1].strip()
-            if stripped.startswith(f"{param_name} ("):
-                part = stripped.split(")", 1)
-                return part[1].lstrip(": ").strip() if len(part) > 1 else ""
-    return ""
