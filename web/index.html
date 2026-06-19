@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MCP Manager</title>
+  <title>OWUI MCP Spawner</title>
   <link rel="stylesheet" href="/style.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" crossorigin="anonymous" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css" crossorigin="anonymous" />
@@ -12,11 +12,11 @@
   <header>
     <div class="header-title">
       <span class="logo">⬡</span>
-      <h1>MCP Manager</h1>
+      <h1>OWUI MCP Spawner</h1>
     </div>
     <button class="btn btn-secondary" id="editor-btn">+ New Tool</button>
     <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
-    <button class="btn btn-ghost btn-settings" id="settings-btn" title="Manager Settings">⚙</button>
+    <button class="btn btn-ghost btn-settings" id="settings-btn" title="Settings">⚙</button>
   </header>
 
   <main>
@@ -30,13 +30,14 @@
             <th>Name</th>
             <th>Status</th>
             <th>Port</th>
+            <th>Venv</th>
             <th>URL</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody id="instances-body">
           <tr class="empty-row">
-            <td colspan="6">No MCP instances yet. Upload a JSON to get started.</td>
+            <td colspan="7">No MCP instances yet. Upload a JSON to get started.</td>
           </tr>
         </tbody>
       </table>
@@ -52,6 +53,12 @@
       <div class="file-drop" id="file-drop">
         <span id="file-label">Drop file here or click to select</span>
         <input type="file" id="file-input" accept=".json" />
+      </div>
+      <div class="form-grid" style="margin-top:14px">
+        <label>Venv</label>
+        <select id="upload-venv"></select>
+        <label>Port</label>
+        <input type="number" id="upload-port" min="1024" max="65535" placeholder="auto (leave empty)" />
       </div>
       <div id="upload-progress" class="hidden">
         <div class="spinner"></div>
@@ -82,6 +89,9 @@
 
           <label>Endpoint</label>
           <input type="text" id="edit-endpoint" />
+
+          <label>Venv</label>
+          <select id="edit-venv"></select>
 
           <label>Auto Start</label>
           <input type="checkbox" id="edit-autostart" />
@@ -124,8 +134,8 @@
   <div id="login-modal" class="modal hidden">
     <div class="modal-content modal-login">
       <div class="login-logo">⬡</div>
-      <h2>MCP Manager</h2>
-      <p class="modal-hint">Enter the manager password to continue.</p>
+      <h2>OWUI MCP Spawner</h2>
+      <p class="modal-hint">Enter the password to continue.</p>
       <form id="login-form" autocomplete="on">
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
         <div id="login-error" class="login-error hidden">Wrong password</div>
@@ -155,6 +165,14 @@
         <div class="meta-field meta-field-grow2">
           <label>Description</label>
           <input type="text" id="editor-desc" placeholder="Fetches current weather data" />
+        </div>
+        <div class="meta-field" id="editor-venv-field">
+          <label>Venv</label>
+          <select id="editor-venv"></select>
+        </div>
+        <div class="meta-field" id="editor-port-field">
+          <label>Port</label>
+          <input type="number" id="editor-port" min="1024" max="65535" placeholder="auto" />
         </div>
       </div>
 
@@ -199,7 +217,7 @@
   <div id="settings-modal" class="modal hidden">
     <div class="modal-backdrop" id="settings-backdrop"></div>
     <div class="modal-content modal-wide">
-      <h2>Manager Settings</h2>
+      <h2>Settings</h2>
 
       <div class="settings-section">
         <h3 class="settings-section-title">Security</h3>
@@ -250,6 +268,16 @@
         </div>
       </div>
 
+      <div class="settings-section">
+        <h3 class="settings-section-title">Virtual Environments</h3>
+        <p class="modal-hint">Each instance runs in its own venv so dependencies stay isolated. The <code>default</code> venv is always available.</p>
+        <div id="settings-venv-list" class="venv-list"></div>
+        <div class="venv-create-row">
+          <input type="text" id="settings-venv-new" placeholder="new-venv-name" />
+          <button type="button" class="btn btn-secondary btn-sm" id="settings-venv-create">Create Venv</button>
+        </div>
+      </div>
+
       <div class="settings-section settings-section-last">
         <h3 class="settings-section-title">Server</h3>
         <div class="settings-info-row">
@@ -263,7 +291,7 @@
 
       <div class="modal-actions">
         <button class="btn btn-primary" id="settings-save">Save Settings</button>
-        <button class="btn btn-danger" id="settings-restart">Restart Manager</button>
+        <button class="btn btn-danger" id="settings-restart">Restart Spawner</button>
         <button class="btn btn-ghost" id="settings-cancel">Close</button>
       </div>
     </div>

@@ -3,7 +3,6 @@ import os
 import signal
 import socket
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 from .logger import get_manager_logger, get_runtime_log_path
 from .schema import MCPInstance, MCPStatus
 from .config_store import get_instance_state, set_instance_state, load_config, get_all_states
+from .venv_manager import ensure_venv, python_path
 
 logger = get_manager_logger()
 
@@ -198,13 +198,22 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     inst.error = ""
     set_instance_state(inst)
 
+    # The runner must use the instance's venv so the tool's deps are importable.
+    venv_ok, venv_err = ensure_venv(cfg.venv)
+    if not venv_ok:
+        inst.status = MCPStatus.dependency_error
+        inst.error = venv_err
+        set_instance_state(inst)
+        return False, venv_err
+    runner_python = str(python_path(cfg.venv))
+
     config_path = BASE_DIR / "configs" / f"{instance_id}.json"
     log_path = get_runtime_log_path(instance_id)
     _rotate_runtime_log(log_path)
     log_file = open(log_path, "a")
 
     try:
-        cmd = [sys.executable, str(RUNNER_SCRIPT), "--config", str(config_path)]
+        cmd = [runner_python, str(RUNNER_SCRIPT), "--config", str(config_path)]
         runner_host = os.environ.get("MCP_RUNNER_HOST")
         if runner_host:
             cmd += ["--host", runner_host]

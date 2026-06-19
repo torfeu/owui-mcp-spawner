@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "mcp-manager"
-version = "0.0.6"
-description = "Local JSON-based MCP server manager"
+name = "owui-mcp-spawner"
+version = "0.1.0"
+description = "Spawn OpenWebUI tool JSONs as isolated Model Context Protocol (MCP) servers"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110.0",

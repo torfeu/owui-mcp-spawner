@@ -53,6 +53,7 @@ class MCPConfig(BaseModel):
     tool_source: ToolSourceConfig
     values: dict[str, Any] = {}
     lifecycle: LifecycleConfig = LifecycleConfig()
+    venv: str = "default"
 
     @field_validator("id")
     @classmethod

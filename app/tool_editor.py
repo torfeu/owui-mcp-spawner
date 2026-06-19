@@ -9,6 +9,7 @@ cannot affect the manager process. The in-process implementation
 import ast
 import inspect
 import json
+import re
 import subprocess
 import sys
 import time
@@ -20,6 +21,25 @@ from .schema_gen import build_schema_from_method
 BASE_DIR = Path(__file__).parent.parent
 
 VALIDATE_TIMEOUT = 20  # seconds for the validation subprocess
+
+# Matches a `requirements:` frontmatter line in the tool's leading docstring.
+_REQUIREMENTS_RE = re.compile(r"^\s*requirements:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_requirements(code: str) -> list[str]:
+    """Extract pip dependencies from a `requirements:` frontmatter line.
+
+    OpenWebUI tools declare deps in the module docstring, e.g.
+    `requirements: yfinance, pandas, numpy`. Returns [] if absent. Package specs
+    are validated later by install_dependencies, so this only splits the line.
+    """
+    if not code:
+        return []
+    m = _REQUIREMENTS_RE.search(code[:2000])  # only look at the frontmatter region
+    if not m:
+        return []
+    parts = [p.strip() for p in m.group(1).replace(";", ",").split(",")]
+    return [p for p in parts if p]
 
 
 STARTER_TEMPLATE = '''\
@@ -60,10 +80,14 @@ def _invalid(errors: list[str], warnings: list[str] | None = None) -> dict:
     return {"valid": False, "errors": errors, "warnings": warnings or [], "tools": [], "valves": {}}
 
 
-def validate_tool_code(code: str) -> dict:
+def validate_tool_code(code: str, python_exe: str | None = None) -> dict:
     """Validate Python tool code in an isolated subprocess.
 
     Returns a dict with: valid, errors, warnings, tools (specs), valves.
+
+    *python_exe* selects the interpreter that runs the validation worker — pass
+    an instance's venv Python so import-time checks see the tool's installed
+    dependencies. Defaults to the manager interpreter (sys.executable).
     """
     # Cheap syntax check first — no subprocess needed for broken code
     try:
@@ -73,7 +97,7 @@ def validate_tool_code(code: str) -> dict:
 
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "app.validate_worker"],
+            [str(python_exe or sys.executable), "-m", "app.validate_worker"],
             input=code,
             capture_output=True,
             text=True,
@@ -135,7 +159,15 @@ def _validate_in_process(code: str) -> dict:
 
         sig = inspect.signature(method)
         doc = inspect.getdoc(method) or ""
-        first_line = doc.split("\n")[0].strip() if doc else ""
+
+        # Full docstring up to the Args/Returns section becomes the tool description,
+        # so multi-line usage guidance actually reaches the LLM via MCP.
+        desc_lines: list[str] = []
+        for line in doc.splitlines():
+            if line.strip().rstrip(":").lower() in ("args", "arguments", "parameters", "returns", "raises"):
+                break
+            desc_lines.append(line)
+        description = "\n".join(desc_lines).strip()
 
         if not doc:
             warnings.append(f"'{name}': no docstring — description will be empty in OpenWebUI")
@@ -148,7 +180,7 @@ def _validate_in_process(code: str) -> dict:
 
         tools.append({
             "name": name,
-            "description": first_line,
+            "description": description,
             "parameters": build_schema_from_method(method, ns),
         })
 

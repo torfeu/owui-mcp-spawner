@@ -1,5 +1,5 @@
 """
-Persistent settings for the MCP Manager.
+Persistent settings for OWUI MCP Spawner.
 Stored in runtime/settings.json (gitignored).
 Priority: env vars / CLI flags > this file > built-in defaults.
 """

@@ -7,7 +7,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -37,8 +37,9 @@ from .process_manager import (
 from .schema import MCPConfig, MCPInstance, MCPStatus, ServerConfig, InstallConfig, ToolSourceConfig
 from .auth import require_auth, auth_enabled, edit_mode, mcp_bearer_token, token_edit_enabled
 from .security import mask_secrets
-from .tool_editor import validate_tool_code, generate_openwebui_json, STARTER_TEMPLATE
+from .tool_editor import validate_tool_code, generate_openwebui_json, parse_requirements, STARTER_TEMPLATE
 from .tool_loader import load_openwebui_json
+from .venv_manager import DEFAULT_VENV, delete_venv, ensure_venv, list_venvs, python_path, venv_exists, venv_ready
 
 logger = get_manager_logger()
 
@@ -54,10 +55,58 @@ async def _watchdog_loop() -> None:
             logger.error(f"Watchdog error: {e}")
 
 
+_VENV_MIGRATION_MARKER = BASE_DIR / "runtime" / ".venv_migrated"
+
+
+async def _migrate_existing_venv_deps() -> None:
+    """One-time: install existing instances' deps into their venv.
+
+    Before 0.1 every instance ran in the manager interpreter. On the first 0.1
+    start each instance gets its own venv, so its declared dependencies must be
+    (re)installed there once. Guarded by a marker file so it never repeats.
+    """
+    if _VENV_MIGRATION_MARKER.exists():
+        return
+    configs = load_all_configs()
+    with_deps = [c for c in configs.values() if c.install.dependencies]
+    all_ok = True
+    if with_deps:
+        logger.info(
+            f"First 0.1 start: installing dependencies for {len(with_deps)} "
+            "existing instance(s) into their venvs ..."
+        )
+        for cfg in with_deps:
+            logger.info(f"  migrating deps for '{cfg.id}' → venv '{cfg.venv}'")
+            ok, err = await asyncio.to_thread(
+                install_dependencies, cfg.id, cfg.install.dependencies,
+                cfg.install.upgrade, cfg.venv,
+            )
+            if not ok:
+                all_ok = False
+                logger.error(
+                    f"Migration of deps for '{cfg.id}' into venv '{cfg.venv}' failed: {err}"
+                )
+
+    # Only mark the migration done if every install succeeded; otherwise it is
+    # retried on the next start so tools don't end up in venvs without their deps.
+    if not all_ok:
+        logger.warning(
+            "Venv dependency migration incomplete — will retry on next start"
+        )
+        return
+    try:
+        _VENV_MIGRATION_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _VENV_MIGRATION_MARKER.write_text("done\n")
+    except Exception as e:
+        logger.warning(f"Could not write venv migration marker: {e}")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     sync_state_from_pids()
-    logger.info("MCP Manager started")
+    logger.info("OWUI MCP Spawner started")
+
+    await _migrate_existing_venv_deps()
 
     # Auto-start instances with lifecycle.auto_start = True that aren't already running
     for cfg in load_all_configs().values():
@@ -85,7 +134,7 @@ async def _lifespan(app: FastAPI):
     watchdog.cancel()
 
 
-app = FastAPI(title="MCP Manager", version="0.0.6", lifespan=_lifespan)
+app = FastAPI(title="OWUI MCP Spawner", version="0.1.0", lifespan=_lifespan)
 
 # Version cache: tool file path → (mtime, version)
 _version_cache: dict[str, tuple[float, str]] = {}
@@ -181,6 +230,7 @@ async def list_instances(request: Request) -> list[dict]:
         d = _instance_to_dict(s, display_host)
         d["locked"] = cfg.locked if cfg else False
         d["version"] = _version_from_tool_file(cfg) if cfg else ""
+        d["venv"] = cfg.venv if cfg else DEFAULT_VENV
         result.append(d)
     return result
 
@@ -193,6 +243,7 @@ async def get_instance(instance_id: str, request: Request) -> dict:
     cfg = load_config(instance_id)
     d = _instance_to_dict(inst, _request_host(request))
     d["locked"] = cfg.locked if cfg else False
+    d["venv"] = cfg.venv if cfg else DEFAULT_VENV
     return d
 
 
@@ -207,12 +258,33 @@ async def get_config(instance_id: str) -> dict:
 
 
 @app.post("/api/instances/upload", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
-async def upload_json(file: UploadFile = File(...)) -> dict:
+async def upload_json(
+    file: UploadFile = File(...),
+    port: str | None = Form(None),
+    venv: str | None = Form(None),
+) -> dict:
     content = await file.read()
     try:
         raw = json.loads(content)
     except json.JSONDecodeError as e:
         raise HTTPException(400, f"Invalid JSON: {e}")
+
+    # Optional install-time overrides from the upload dialog
+    port_int: int | None = None
+    if port not in (None, ""):
+        try:
+            port_int = int(port)
+        except ValueError:
+            raise HTTPException(400, "port must be an integer")
+        if not 1024 <= port_int <= 65535:
+            raise HTTPException(400, "port must be between 1024 and 65535")
+    # Only override venv when the upload dialog actually supplied one; otherwise
+    # leave it unset so a venv declared in the JSON stays the default.
+    venv_name: str | None = None
+    if venv not in (None, ""):
+        venv_name = venv.strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_\-]+", venv_name):
+            raise HTTPException(400, f"Invalid venv name '{venv_name}': letters, digits, _ and - only")
 
     # Detect: OpenWebUI export (array or has 'content'+'specs') vs MCP config
     if isinstance(raw, list):
@@ -221,9 +293,10 @@ async def upload_json(file: UploadFile = File(...)) -> dict:
         raw = raw[0]
 
     if "content" in raw and "specs" in raw:
-        return await _import_openwebui_tool(raw)
+        # OpenWebUI tools have no venv field of their own, so fall back to default.
+        return await _import_openwebui_tool(raw, port=port_int, venv=venv_name or DEFAULT_VENV)
     else:
-        return await _import_mcp_config(raw)
+        return await _import_mcp_config(raw, port=port_int, venv=venv_name)
 
 
 @app.put("/api/instances/{instance_id}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
@@ -256,41 +329,73 @@ async def update_config(instance_id: str, body: dict) -> dict:
         cfg.server = new_server
     if "values" in body:
         cfg.values.update(body["values"])
+    deps_changed = False
     if "install" in body:
         i = body["install"]
+        old_deps = list(cfg.install.dependencies)
+        old_upgrade = cfg.install.upgrade
         cfg.install = InstallConfig(
             dependencies=i.get("dependencies", cfg.install.dependencies),
             upgrade=i.get("upgrade", cfg.install.upgrade),
+        )
+        deps_changed = (
+            list(cfg.install.dependencies) != old_deps
+            or cfg.install.upgrade != old_upgrade
         )
     if "lifecycle" in body:
         lc = body["lifecycle"]
         cfg.lifecycle.auto_start = lc.get("auto_start", cfg.lifecycle.auto_start)
         cfg.lifecycle.restart_on_change = lc.get("restart_on_change", cfg.lifecycle.restart_on_change)
 
+    venv_changed = False
+    if "venv" in body:
+        new_venv = str(body["venv"]).strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_\-]+", new_venv):
+            raise HTTPException(400, f"Invalid venv name '{new_venv}': letters, digits, _ and - only")
+        if new_venv != cfg.venv:
+            cfg.venv = new_venv
+            venv_changed = True
+
+    # Install deps before persisting when the venv changed (deps must exist in
+    # the new venv) or the dependency list changed (otherwise the instance would
+    # restart into a venv missing the new packages). A failed install must not
+    # leave the config pointing at an unprepared venv.
+    if venv_changed or deps_changed:
+        ok, err = await asyncio.to_thread(
+            install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
+        )
+        if not ok:
+            raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
+
     save_config(cfg)
 
+    # Restart so the runner picks up the new interpreter / address / deps (below).
     inst = get_instance_state(instance_id)
     server_changed = (cfg.server.host, cfg.server.port, cfg.server.endpoint) != old_server
 
+    needs_restart = (server_changed or venv_changed or deps_changed)
+    restarted = False
     if inst:
         inst.name = cfg.name
-        if server_changed and inst.status == MCPStatus.running:
-            if cfg.lifecycle.restart_on_change:
-                # Restart so the subprocess actually binds to the new address
-                logger.info(f"Server config changed for '{instance_id}', restarting")
+        if needs_restart and inst.status == MCPStatus.running:
+            if cfg.lifecycle.restart_on_change or venv_changed or deps_changed:
+                # Restart so the subprocess binds the new address / uses the new
+                # venv / picks up freshly installed dependencies.
+                reason = "venv" if venv_changed else "dependencies" if deps_changed else "server config"
+                logger.info(f"{reason} changed for '{instance_id}', restarting")
                 await asyncio.to_thread(restart_instance, instance_id)
+                restarted = True
             else:
                 # Keep UI pointing at what is actually running until user restarts manually
                 pass
         else:
-            # Not running or no server change: safe to update displayed URL now
+            # Not running or nothing that needs a restart: safe to update displayed URL now
             inst.port = cfg.server.port
             inst.host = cfg.server.host
             inst.endpoint = cfg.server.endpoint
             inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
             set_instance_state(inst)
 
-    restarted = server_changed and inst and inst.status == MCPStatus.running and cfg.lifecycle.restart_on_change
     return {"ok": True, "restarted": restarted}
 
 
@@ -360,16 +465,48 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
     if not code.strip():
         raise HTTPException(400, "No code provided")
 
-    # Validate before saving
-    result = await asyncio.to_thread(validate_tool_code, code)
+    # Install any newly declared dependencies into the instance venv before
+    # validating, so adding a new import works in one save (B1). Existing deps
+    # are already installed, so we only re-run pip when the set grows.
+    new_reqs = parse_requirements(code)
+    merged_reqs = list(dict.fromkeys([*cfg.install.dependencies, *new_reqs]))
+    if merged_reqs != cfg.install.dependencies:
+        ok, err = await asyncio.to_thread(
+            install_dependencies, instance_id, merged_reqs, False, cfg.venv
+        )
+        if not ok:
+            raise HTTPException(422, {
+                "message": "Dependency installation failed — fix 'requirements' and try again",
+                "errors": [err],
+            })
+        cfg.install = InstallConfig(dependencies=merged_reqs, upgrade=cfg.install.upgrade)
+    else:
+        venv_ok, venv_err = await asyncio.to_thread(ensure_venv, cfg.venv)
+        if not venv_ok:
+            raise HTTPException(422, {"message": "venv unavailable", "errors": [venv_err]})
+
+    # Validate inside the instance venv so third-party imports resolve
+    result = await asyncio.to_thread(validate_tool_code, code, str(python_path(cfg.venv)))
     if not result["valid"]:
         raise HTTPException(422, {"errors": result["errors"]})
+
+    # Sync config.values with the code's Valve defaults so new/changed valves are
+    # editable in the UI; keep user-set values, drop valves no longer in the code (B2).
+    new_defaults = result.get("valves", {}) or {}
+    for k, v in new_defaults.items():
+        cfg.values.setdefault(k, v)
+    valves_introspected = not any(
+        "Could not instantiate Valves" in w for w in result.get("warnings", [])
+    )
+    if valves_introspected:
+        cfg.values = {k: cfg.values[k] for k in cfg.values if k in new_defaults}
 
     # Update the tool JSON file (preserve id/name/description from config)
     tool_path = resolve_tool_path(cfg)
     _backup_tool_file(tool_path, instance_id)
     updated = generate_openwebui_json(code, cfg.id, cfg.name, cfg.description, validation=result)
     tool_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
+    save_config(cfg)
 
     # Restart if running and restart_on_change
     inst = get_instance_state(instance_id)
@@ -393,7 +530,7 @@ async def reinstall(instance_id: str) -> dict:
         inst.status = MCPStatus.installing
         set_instance_state(inst)
     ok, err = await asyncio.to_thread(
-        install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade
+        install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
     )
     if inst:
         if was_running:
@@ -473,6 +610,115 @@ async def tool_export(body: dict) -> JSONResponse:
         content=result,
         headers={"Content-Disposition": f'attachment; filename="{tool_id}.json"'},
     )
+
+
+@app.post("/api/tools/create", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def create_tool(body: dict) -> dict:
+    """Create a new instance from raw Python code in a single step.
+
+    Installs dependencies (from the `requirements:` frontmatter or an explicit
+    list), validates the code in the instance venv, fills config.values from the
+    Valve defaults and saves the config. No placeholder upload, no double JSON
+    escaping. The instance does not auto-start — call start afterwards.
+    """
+    tool_id = body.get("id", "").strip().replace(" ", "_")
+    if not tool_id or not re.fullmatch(r"[a-zA-Z0-9_\-]+", tool_id):
+        raise HTTPException(400, f"Invalid tool ID '{tool_id}': only letters, digits, underscores and hyphens allowed")
+    if config_exists(tool_id):
+        raise HTTPException(
+            409,
+            f"ID '{tool_id}' already exists — use save_tool_code to modify it, or choose a different ID",
+        )
+    code = body.get("code", "")
+    if not code.strip():
+        raise HTTPException(400, "No code provided")
+    name = (body.get("name") or tool_id).strip()
+    description = (body.get("description") or "").strip()
+    venv = (body.get("venv") or DEFAULT_VENV).strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_\-]+", venv):
+        raise HTTPException(400, f"Invalid venv name '{venv}': only letters, digits, underscores and hyphens allowed")
+
+    port = body.get("port")
+    if port not in (None, ""):
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "port must be an integer")
+        if not 1024 <= port <= 65535:
+            raise HTTPException(400, "port must be between 1024 and 65535")
+    else:
+        port = None
+
+    # Requirements: an explicit list/string wins, otherwise parse the frontmatter
+    reqs = body.get("requirements")
+    if isinstance(reqs, str):
+        requirements = [p.strip() for p in reqs.replace(";", ",").split(",") if p.strip()]
+    elif isinstance(reqs, list):
+        requirements = [str(p).strip() for p in reqs if str(p).strip()]
+    else:
+        requirements = parse_requirements(code)
+
+    result = await _provision_new_tool(
+        tool_id=tool_id,
+        name=name,
+        description=description,
+        code=code,
+        requirements=requirements,
+        venv=venv,
+        persist_json=None,
+        port=port,
+    )
+    logger.info(f"Created tool via create_tool: {tool_id}")
+    return result
+
+
+@app.get("/api/venvs", dependencies=[Depends(require_auth)])
+async def list_venvs_endpoint() -> list[dict]:
+    """All venvs with how many instances use each — drives the UI dropdowns."""
+    counts: dict[str, int] = {}
+    for c in load_all_configs().values():
+        counts[c.venv] = counts.get(c.venv, 0) + 1
+    names = set(list_venvs()) | {DEFAULT_VENV} | set(counts)
+    return sorted(
+        (
+            {
+                "name": n,
+                "instances": counts.get(n, 0),
+                "exists": venv_exists(n),
+                "is_default": n == DEFAULT_VENV,
+            }
+            for n in names
+        ),
+        key=lambda d: (not d["is_default"], d["name"]),
+    )
+
+
+@app.post("/api/venvs", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def create_venv_endpoint(body: dict) -> dict:
+    name = (body.get("name") or "").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_\-]+", name):
+        raise HTTPException(400, "Invalid venv name: letters, digits, underscores and hyphens only")
+    # Only block when the venv is fully set up; a half-built one (interpreter but
+    # no ready marker) is repaired by ensure_venv below instead of 409'ing.
+    if venv_ready(name):
+        raise HTTPException(409, f"Venv '{name}' already exists")
+    ok, err = await asyncio.to_thread(ensure_venv, name)
+    if not ok:
+        raise HTTPException(500, err)
+    return {"ok": True, "name": name}
+
+
+@app.delete("/api/venvs/{name}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def delete_venv_endpoint(name: str) -> dict:
+    if name == DEFAULT_VENV:
+        raise HTTPException(400, "Cannot delete the default venv")
+    in_use = [c.id for c in load_all_configs().values() if c.venv == name]
+    if in_use:
+        raise HTTPException(409, f"Venv '{name}' is in use by: {', '.join(in_use)}")
+    ok, err = await asyncio.to_thread(delete_venv, name)
+    if not ok:
+        raise HTTPException(500, err)
+    return {"ok": True}
 
 
 @app.post("/api/instances/{instance_id}/lock", dependencies=[Depends(require_auth)])
@@ -617,86 +863,171 @@ async def delete_instance(instance_id: str) -> dict:
     if not delete_config(instance_id):
         raise HTTPException(404, "Config not found")
     if cfg:
-        tool_path = resolve_tool_path(cfg)
-        if tool_path.exists() and tool_path.is_relative_to(TOOLS_DIR):
+        tool_path = resolve_tool_path(cfg).resolve()
+        # Only delete the tool file if no other instance still references it (B8).
+        # delete_config already removed this instance, so load_all_configs() lists
+        # only the survivors.
+        shared = any(
+            resolve_tool_path(c).resolve() == tool_path
+            for c in load_all_configs().values()
+        )
+        if not shared and tool_path.exists() and tool_path.is_relative_to(TOOLS_DIR.resolve()):
             tool_path.unlink(missing_ok=True)
     return {"ok": True}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _import_openwebui_tool(raw: dict) -> dict:
+async def _provision_new_tool(
+    *,
+    tool_id: str,
+    name: str,
+    description: str,
+    code: str,
+    requirements: list[str],
+    venv: str,
+    persist_json: list | dict | None = None,
+    port: int | None = None,
+) -> dict:
+    """Install deps → validate in the venv → write tool file → save config.
+
+    Shared by the OpenWebUI-JSON upload and the create_tool flow. Dependencies
+    are installed *before* validation so the import-time check sees them (B1).
+    Pass *persist_json* to store the uploaded JSON verbatim (keeps meta/manifest);
+    otherwise the tool JSON is generated from the code. Pass *port* to request a
+    specific port (409 if taken) instead of auto-assigning. Raises HTTPException
+    on dependency or validation failure; returns {ok, id, port, warnings}.
+    """
+    if port is not None:
+        if not is_port_free(port):
+            raise HTTPException(409, f"Port {port} is already in use")
+    else:
+        port = find_free_port()
+
+    # 1. Install dependencies into the instance venv (creates it on first use)
+    ok, err = await asyncio.to_thread(install_dependencies, tool_id, requirements, False, venv)
+    if not ok:
+        raise HTTPException(422, {
+            "message": "Dependency installation failed — fix 'requirements' and try again",
+            "errors": [err],
+        })
+
+    # 2. Validate the code inside that venv, so third-party imports resolve
+    validation = await asyncio.to_thread(validate_tool_code, code, str(python_path(venv)))
+    if not validation.get("valid"):
+        raise HTTPException(422, {
+            "message": "Tool code failed validation — fix these errors and try again",
+            "errors": validation.get("errors", []),
+        })
+
+    # 3. Persist the tool JSON (tool_id is validated by callers — safe as filename)
+    tool_file = TOOLS_DIR / f"{tool_id}.json"
+    if persist_json is not None:
+        payload = persist_json if isinstance(persist_json, list) else [persist_json]
+        tool_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        generated = generate_openwebui_json(code, tool_id, name, description, validation=validation)
+        tool_file.write_text(json.dumps(generated, indent=2, ensure_ascii=False))
+
+    # 4. Save config with deps, venv and Valve defaults pre-filled
+    cfg = MCPConfig(
+        id=tool_id,
+        name=name,
+        description=description,
+        server=ServerConfig(host="127.0.0.1", port=port, endpoint="/mcp"),
+        install=InstallConfig(dependencies=requirements),
+        tool_source=ToolSourceConfig(type="openwebui_json", path=f"./tools/{tool_id}.json"),
+        values=validation.get("valves", {}) or {},
+        venv=venv,
+    )
+    save_config(cfg)
+
+    inst = MCPInstance(
+        id=cfg.id,
+        name=cfg.name,
+        description=cfg.description,
+        status=MCPStatus.installed,
+        port=port,
+        host="127.0.0.1",
+        endpoint="/mcp",
+    )
+    set_instance_state(inst)
+    logger.info(f"Provisioned tool '{tool_id}' (venv={venv}, deps={len(requirements)})")
+    return {"ok": True, "id": tool_id, "port": port, "warnings": validation.get("warnings", [])}
+
+
+async def _import_openwebui_tool(raw: dict, port: int | None = None, venv: str = DEFAULT_VENV) -> dict:
     tool_id = raw.get("id", "").strip().replace(" ", "_")
     if not tool_id or not re.fullmatch(r"[a-zA-Z0-9_\-]+", tool_id):
         raise HTTPException(400, f"Invalid tool ID '{tool_id}': only letters, digits, underscores and hyphens allowed")
     tool_name = raw.get("name", tool_id)
 
     if config_exists(tool_id):
-        raise HTTPException(409, f"ID '{tool_id}' already exists")
+        raise HTTPException(
+            409,
+            f"ID '{tool_id}' already exists — use the code editor / save_tool_code "
+            "to modify the existing tool, or choose a different ID",
+        )
 
-    # Save tool JSON into tools/  (tool_id is validated above — safe for use as filename)
-    tool_file = TOOLS_DIR / f"{tool_id}.json"
-    tool_file.write_text(json.dumps([raw] if not isinstance(raw, list) else raw, indent=2))
-
-    # Extract Valves defaults via the isolated validation worker (no exec in this process)
-    validation = await asyncio.to_thread(validate_tool_code, raw.get("content", ""))
-    values = validation.get("valves", {}) or {}
+    code = raw.get("content", "")
     description = raw.get("meta", {}).get("description", "")
-
-    port = find_free_port()
-
-    cfg = MCPConfig(
-        id=tool_id,
+    requirements = parse_requirements(code)
+    result = await _provision_new_tool(
+        tool_id=tool_id,
         name=tool_name,
         description=description,
-        server=ServerConfig(host="127.0.0.1", port=port, endpoint="/mcp"),
-        tool_source=ToolSourceConfig(type="openwebui_json", path=f"./tools/{tool_id}.json"),
-        values=values,
-    )
-
-    inst = MCPInstance(
-        id=cfg.id,
-        name=cfg.name,
-        description=cfg.description,
-        status=MCPStatus.installing,
+        code=code,
+        requirements=requirements,
+        venv=venv,
+        persist_json=raw,
         port=port,
-        host="127.0.0.1",
-        endpoint="/mcp",
     )
-    set_instance_state(inst)
-
-    ok, err = await asyncio.to_thread(
-        install_dependencies, tool_id, cfg.install.dependencies, cfg.install.upgrade
-    )
-    inst.status = MCPStatus.installed if ok else MCPStatus.dependency_error
-    inst.error = err
-    set_instance_state(inst)
-
-    save_config(cfg)
     logger.info(f"Imported OpenWebUI tool: {tool_id}")
-    return {"ok": True, "id": tool_id, "port": port}
+    return result
 
 
-async def _import_mcp_config(raw: dict) -> dict:
+async def _import_mcp_config(raw: dict, port: int | None = None, venv: str | None = None) -> dict:
     try:
         cfg = MCPConfig.model_validate(raw)
     except Exception as e:
         raise HTTPException(400, f"Invalid MCP config: {e}")
 
     if config_exists(cfg.id):
-        raise HTTPException(409, f"ID '{cfg.id}' already exists")
+        raise HTTPException(
+            409,
+            f"ID '{cfg.id}' already exists — use the code editor / save_tool_code "
+            "to modify the existing tool, or choose a different ID",
+        )
+
+    # Install-time overrides from the upload dialog (JSON values are the default)
+    if venv:
+        cfg.venv = venv
+    if port is not None:
+        # Re-validate via ServerConfig so the port range check still applies
+        # (model_copy would bypass Pydantic validation).
+        try:
+            cfg.server = ServerConfig.model_validate({**cfg.server.model_dump(), "port": port})
+        except Exception as e:
+            raise HTTPException(400, f"Invalid port: {e}")
 
     if not is_port_free(cfg.server.port):
         raise HTTPException(409, f"Port {cfg.server.port} is already in use")
 
-    tool_path = resolve_tool_path(cfg)
+    src_path = resolve_tool_path(cfg)
     # Reject paths that escape the project directory
     try:
-        tool_path.resolve().relative_to(BASE_DIR.resolve())
+        src_path.resolve().relative_to(BASE_DIR.resolve())
     except ValueError:
         raise HTTPException(400, "tool_source.path must be inside the project directory")
-    if not tool_path.exists():
-        raise HTTPException(400, f"Tool source not found: {tool_path}")
+    if not src_path.exists():
+        raise HTTPException(400, f"Tool source not found: {src_path}")
+
+    # Copy into an instance-owned file so two instances never share a tool file —
+    # otherwise deleting one would delete the other's source (B8).
+    own_path = TOOLS_DIR / f"{cfg.id}.json"
+    if src_path.resolve() != own_path.resolve():
+        own_path.write_text(src_path.read_text())
+        cfg.tool_source = ToolSourceConfig(type=cfg.tool_source.type, path=f"./tools/{cfg.id}.json")
 
     inst = MCPInstance(
         id=cfg.id,
@@ -710,7 +1041,7 @@ async def _import_mcp_config(raw: dict) -> dict:
     set_instance_state(inst)
 
     ok, err = await asyncio.to_thread(
-        install_dependencies, cfg.id, cfg.install.dependencies, cfg.install.upgrade
+        install_dependencies, cfg.id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
     )
     inst.status = MCPStatus.installed if ok else MCPStatus.dependency_error
     inst.error = err

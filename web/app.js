@@ -98,6 +98,30 @@ async function apiFetch(url, opts = {}) {
   return res.json().catch(() => ({}));
 }
 
+// ── Venvs ──────────────────────────────────────────────────────────────────────
+
+async function fetchVenvs() {
+  try {
+    return await apiFetch("/api/venvs");
+  } catch {
+    return [{ name: "default", is_default: true, instances: 0, exists: true }];
+  }
+}
+
+function fillVenvSelect(sel, venvs, selected) {
+  sel.innerHTML = venvs.map(v =>
+    `<option value="${esc(v.name)}"${v.name === selected ? " selected" : ""}>${esc(v.name)}${v.is_default ? " (default)" : ""}</option>`
+  ).join("");
+  // Keep the instance's current venv selectable even if it no longer exists
+  if (selected && !venvs.some(v => v.name === selected)) {
+    const o = document.createElement("option");
+    o.value = selected;
+    o.textContent = `${selected} (current)`;
+    o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
 // ── Instances table ──────────────────────────────────────────────────────────
 
 async function loadInstances() {
@@ -113,7 +137,7 @@ function renderTable(instances) {
   const tbody = document.getElementById("instances-body");
 
   if (!instances.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No MCP instances yet. Upload a JSON to get started.</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No MCP instances yet. Upload a JSON to get started.</td></tr>';
     return;
   }
 
@@ -123,6 +147,7 @@ function renderTable(instances) {
       <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}</td>
       <td>${statusBadge(inst.status, inst.error)}</td>
       <td>${inst.port}</td>
+      <td><span class="venv-badge">${esc(inst.venv || 'default')}</span></td>
       <td class="url-cell"><a href="${esc(inst.url)}" target="_blank">${esc(inst.url)}</a></td>
       <td class="actions">${actionButtons(inst)}</td>
     </tr>
@@ -260,7 +285,13 @@ function bindUpload() {
 
   let selectedFile = null;
 
-  openBtn.addEventListener("click", () => { selectedFile = null; resetUpload(); modal.classList.remove("hidden"); });
+  openBtn.addEventListener("click", async () => {
+    selectedFile = null; resetUpload(); modal.classList.remove("hidden");
+    const uploadVenv = document.getElementById("upload-venv");
+    fillVenvSelect(uploadVenv, await fetchVenvs(), "");
+    uploadVenv.prepend(new Option("from JSON / default", ""));
+    uploadVenv.value = "";
+  });
   cancelBtn.addEventListener("click", closeUpload);
   backdrop.addEventListener("click", closeUpload);
 
@@ -288,6 +319,12 @@ function bindUpload() {
     try {
       const form = new FormData();
       form.append("file", selectedFile);
+      // Only send venv when the user picked one, so a venv set in an uploaded
+      // MCP config stays the default instead of being overwritten with "default".
+      const venvVal = document.getElementById("upload-venv").value.trim();
+      if (venvVal) form.append("venv", venvVal);
+      const portVal = document.getElementById("upload-port").value;
+      if (portVal) form.append("port", portVal);
       const res = await fetch(`${API}/upload`, { method: "POST", headers: authHeaders(), body: form });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -309,6 +346,7 @@ function bindUpload() {
   function resetUpload() {
     fileInput.value = "";
     fileLabel.textContent = "Drop file here or click to select";
+    document.getElementById("upload-port").value = "";
     submitBtn.disabled = true;
     progress.classList.add("hidden");
   }
@@ -334,6 +372,7 @@ async function openEdit(id) {
   document.getElementById("edit-endpoint").value = cfg.server.endpoint;
   document.getElementById("edit-autostart").checked = cfg.lifecycle?.auto_start ?? false;
   document.getElementById("edit-deps").value = (cfg.install?.dependencies || []).join("\n");
+  fillVenvSelect(document.getElementById("edit-venv"), await fetchVenvs(), cfg.venv || "default");
 
   const container = document.getElementById("edit-values-container");
   if (cfg.values && Object.keys(cfg.values).length > 0) {
@@ -380,6 +419,7 @@ async function saveEdit(restart) {
     lifecycle: { auto_start: document.getElementById("edit-autostart").checked },
     values,
     install: { dependencies: deps },
+    venv: document.getElementById("edit-venv").value || "default",
   };
 
   try {
@@ -535,6 +575,14 @@ async function openEditor(opts = {}) {
 
   // Lock ID field when editing (can't rename an existing instance)
   document.getElementById("editor-id").disabled = !!editorEditId;
+
+  // Venv + port only apply when creating a new instance
+  document.getElementById("editor-venv-field").classList.toggle("hidden", !!editorEditId);
+  document.getElementById("editor-port-field").classList.toggle("hidden", !!editorEditId);
+  if (!editorEditId) {
+    document.getElementById("editor-port").value = "";
+    fillVenvSelect(document.getElementById("editor-venv"), await fetchVenvs(), opts.venv || "default");
+  }
 }
 
 function closeEditor() {
@@ -666,76 +714,73 @@ async function runExport() {
   URL.revokeObjectURL(url);
 }
 
+// Surface a server-side 422 (validation / dependency errors) in the results panel.
+function showEditorErrors(data) {
+  const detail = (data && data.detail !== undefined) ? data.detail : data;
+  let errors = [];
+  if (detail && typeof detail === "object") {
+    errors = detail.errors || (detail.message ? [detail.message] : []);
+  } else if (detail) {
+    errors = [String(detail)];
+  }
+  if (!errors.length) errors = ["Request failed"];
+  showValidationResults({ valid: false, errors, warnings: [], tools: [], valves: {} });
+  showAlert("error", errors.join("; "));
+}
+
 async function runInstall() {
   const meta = getEditorMeta();
   if (!meta.id) { showAlert("error", "Please enter a Tool ID first"); return; }
   if (!meta.name) { showAlert("error", "Please enter a Tool Name first"); return; }
 
-  // First validate
-  const valRes = await fetch("/api/tools/validate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ code: getEditorCode() }),
-  });
-  const valRaw = await valRes.json();
-  const valData = {
-    valid:    valRaw.valid    ?? false,
-    errors:   valRaw.errors   ?? (valRaw.detail ? [String(valRaw.detail)] : ["Unknown error"]),
-    warnings: valRaw.warnings ?? [],
-    tools:    valRaw.tools    ?? [],
-    valves:   valRaw.valves   ?? {},
-  };
-  showValidationResults(valData);
-  if (!valData.valid) {
-    showAlert("error", "Fix errors before saving");
-    return;
-  }
+  const btn = document.getElementById("editor-install");
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = editorEditId ? "Saving…" : "Installing…";
 
-  if (editorEditId) {
-    // Edit mode: PUT updated code to existing instance
-    const res = await fetch(`${API}/${editorEditId}/tool-code`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ code: getEditorCode() }),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      showAlert("error", err.detail?.errors?.join(", ") || err.detail || "Save failed");
-      return;
+  try {
+    if (editorEditId) {
+      // Edit mode: PUT code; the server validates inside the instance venv.
+      const res = await fetch(`${API}/${editorEditId}/tool-code`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ code: getEditorCode() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showEditorErrors(data); return; }
+      if (data.warnings?.length) showAlert("warning", "Warnings: " + data.warnings.join("; "));
+      showAlert("success", data.restarted
+        ? `Tool '${meta.name}' saved and restarted.`
+        : `Tool '${meta.name}' saved. Restart to apply changes.`);
+    } else {
+      // New tool: create_tool installs deps, validates in the venv and saves — one step.
+      const body = {
+        code: getEditorCode(),
+        id: meta.id,
+        name: meta.name,
+        description: meta.description,
+        venv: document.getElementById("editor-venv").value || "default",
+      };
+      const portVal = document.getElementById("editor-port").value;
+      if (portVal) body.port = Number(portVal);
+      const res = await fetch("/api/tools/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showEditorErrors(data); return; }
+      if (data.warnings?.length) showAlert("warning", "Warnings: " + data.warnings.join("; "));
+      showAlert("success", `Tool '${meta.name}' installed on port ${data.port}!`);
     }
-    const result = await res.json();
-    const msg = result.restarted
-      ? `Tool '${meta.name}' saved and restarted.`
-      : `Tool '${meta.name}' saved. Restart to apply changes.`;
-    if (valData.warnings.length) showAlert("warning", "Warnings: " + valData.warnings.join("; "));
-    showAlert("success", msg);
-  } else {
-    // New tool: generate export JSON and upload
-    const exportRes = await fetch("/api/tools/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ code: getEditorCode(), ...meta }),
-    });
-    if (!exportRes.ok) {
-      const err = await exportRes.json();
-      showAlert("error", err.detail || "Export failed");
-      return;
-    }
-    const exportBlob = await exportRes.blob();
-    const file = new File([exportBlob], `${meta.id}.json`, { type: "application/json" });
-    const form = new FormData();
-    form.append("file", file);
-    const uploadRes = await fetch("/api/instances/upload", { method: "POST", headers: authHeaders(), body: form });
-    if (!uploadRes.ok) {
-      const err = await uploadRes.json();
-      showAlert("error", err.detail || "Install failed");
-      return;
-    }
-    showAlert("success", `Tool '${meta.name}' installed successfully!`);
+    closeEditor();
+    loadInstances();
+  } catch (e) {
+    showAlert("error", "Request failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
-
-  closeEditor();
-  loadInstances();
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -767,6 +812,7 @@ document.getElementById("settings-cancel").addEventListener("click", closeSettin
 document.getElementById("settings-backdrop").addEventListener("click", closeSettings);
 document.getElementById("settings-save").addEventListener("click", saveSettings);
 document.getElementById("settings-restart").addEventListener("click", restartManager);
+document.getElementById("settings-venv-create").addEventListener("click", createVenv);
 
 function openSettings() {
   document.getElementById("settings-modal").classList.remove("hidden");
@@ -838,8 +884,56 @@ async function loadSettingsData() {
     const hint = document.getElementById("settings-bind-hint");
     hint.textContent = hints[data.host] || "";
     hint.style.display = hint.textContent ? "" : "none";
+
+    await renderVenvSettings();
   } catch (e) {
     showAlert("error", "Could not load settings: " + e.message);
+  }
+}
+
+async function renderVenvSettings() {
+  const list = document.getElementById("settings-venv-list");
+  const venvs = await fetchVenvs();
+  list.innerHTML = venvs.map(v => {
+    const meta = `${v.instances} instance${v.instances === 1 ? "" : "s"}${v.exists ? "" : " · not created yet"}`;
+    // Always offer Delete for non-default venvs; the server refuses if any
+    // instance config still points at it (running or stopped).
+    const del = v.is_default
+      ? ""
+      : `<button class="btn btn-danger btn-sm" data-venv-del="${esc(v.name)}"${v.instances ? ' title="In use — reassign or delete the instances first"' : ""}>Delete</button>`;
+    return `<div class="venv-row">
+      <span class="venv-badge">${esc(v.name)}${v.is_default ? " (default)" : ""}</span>
+      <span class="venv-meta">${meta}</span>
+      ${del}
+    </div>`;
+  }).join("");
+  list.querySelectorAll("[data-venv-del]").forEach(btn => {
+    btn.addEventListener("click", () => deleteVenv(btn.dataset.venvDel));
+  });
+}
+
+async function createVenv() {
+  const input = document.getElementById("settings-venv-new");
+  const name = input.value.trim();
+  if (!name) { showAlert("error", "Enter a venv name"); return; }
+  try {
+    await apiFetch("/api/venvs", { method: "POST", body: JSON.stringify({ name }) });
+    input.value = "";
+    showAlert("success", `Venv '${name}' created.`);
+    await renderVenvSettings();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
+async function deleteVenv(name) {
+  if (!confirm(`Delete venv '${name}'? This removes its installed packages.`)) return;
+  try {
+    await apiFetch(`/api/venvs/${encodeURIComponent(name)}`, { method: "DELETE" });
+    showAlert("success", `Venv '${name}' deleted.`);
+    await renderVenvSettings();
+  } catch (e) {
+    showAlert("error", e.message);
   }
 }
 
@@ -906,7 +1000,7 @@ async function saveSettings() {
 }
 
 async function restartManager() {
-  if (!confirm("Restart the MCP Manager?\nThe web UI will be unavailable for a few seconds.")) return;
+  if (!confirm("Restart OWUI MCP Spawner?\nThe web UI will be unavailable for a few seconds.")) return;
   try {
     await apiFetch("/api/server/restart", { method: "POST" });
     showAlert("info", "Restarting… reconnecting in 5 s.");

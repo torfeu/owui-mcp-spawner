@@ -1,5 +1,5 @@
 """
-MCP Manager entry point.
+OWUI MCP Spawner entry point.
 Usage: python app/manager.py [--host HOST] [--port PORT]
 """
 import argparse
@@ -14,7 +14,7 @@ import uvicorn
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MCP Manager")
+    parser = argparse.ArgumentParser(description="OWUI MCP Spawner")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--reload", action="store_true")
@@ -81,7 +81,7 @@ def main() -> None:
     mcp_label = "bearer-token" if mcp_token else "open"
     if mcp_token and args.no_token_edit:
         mcp_label += ", locked"
-    print(f"\nMCP Manager starting on http://{args.host}:{args.port}"
+    print(f"\nOWUI MCP Spawner starting on http://{args.host}:{args.port}"
           f"  [auth: {'enabled' if auth_active else 'disabled'}, edit: {edit_label}, mcp-auth: {mcp_label}]\n")
 
     uvicorn.run(

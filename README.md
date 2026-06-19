@@ -1,16 +1,21 @@
-# MCP Framework — v0.0.6
+# owui-mcp-spawner
 
-A local-first manager for running OpenWebUI-compatible tool JSONs as [Model Context Protocol](https://modelcontextprotocol.io) servers.
+**OWUI MCP Spawner** — a local-first tool that turns OpenWebUI-compatible tool definitions into standalone [Model Context Protocol](https://modelcontextprotocol.io) servers, each spawned in its own isolated virtual environment.
 
-Upload a tool export, install dependencies, start an MCP server, and expose it via Streamable HTTP for OpenWebUI, Claude Code, Codex, or any MCP client. A maintained OpenHAB integration is available separately to expose your smart home as a local MCP server: [openhab-ai-integration](https://github.com/torfeu/openhab-ai-integration).
+Drop in a tool (an OpenWebUI JSON export or plain Python), and the spawner installs its dependencies, validates it, and brings up a dedicated MCP server reachable over Streamable HTTP — ready for OpenWebUI, Claude Code, Codex, or any MCP client. Because every instance gets its own venv, tools with conflicting dependencies never clash, and nothing pollutes the spawner process itself.
 
-![MCP Manager UI](screen.png)
+> A maintained OpenHAB integration that exposes your smart home as a local MCP server is available separately: [openhab-ai-integration](https://github.com/torfeu/openhab-ai-integration).
+
+![OWUI MCP Spawner UI](screen.png)
 
 ---
 
 ## Quickstart
 
 ```bash
+git clone https://github.com/torfeu/owui-mcp-spawner.git
+cd owui-mcp-spawner
+
 # Python 3.10+ required
 python3 -m venv .venv
 .venv/bin/pip install fastapi "uvicorn[standard]" pydantic python-multipart mcp packaging starlette httpx
@@ -35,7 +40,7 @@ export MCP_MANAGER_PASSWORD=changeme
 MCP endpoints are then reachable at `http://<your-ip>:<port>/mcp`.
 
 > **Security note:** Never bind to `0.0.0.0` without setting `MCP_MANAGER_PASSWORD`.
-> The manager warns at startup if you do.
+> The spawner warns at startup if you do.
 
 ---
 
@@ -43,12 +48,26 @@ MCP endpoints are then reachable at `http://<your-ip>:<port>/mcp`.
 
 The web UI includes a **⚙ Settings** page (top-right button) for managing common runtime options:
 
-- **Password** — set or change the manager password (requires current password if one is already set); persisted as SHA-256 hash in `runtime/settings.json`
+- **Password** — set or change the password (requires current password if one is already set); persisted as SHA-256 hash in `runtime/settings.json`
 - **Edit mode** — switch between full / upload-only / readonly at runtime
 - **MCP Bearer Token** — set, reveal (👁), generate (⟳), or remove the token that protects all MCP endpoints; stored in `runtime/settings.json`
-- **Restart Manager** — restart the manager process from the UI
+- **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
+- **Restart** — restart the spawner process from the UI
 
 All settings survive restarts. CLI flags always take precedence over saved settings.
+
+---
+
+## Virtual environments
+
+Every instance runs in its own Python virtual environment under `runtime/venvs/<name>/`, so a tool's third-party dependencies are fully isolated — conflicting versions across tools no longer collide, and nothing pollutes the spawner process itself.
+
+- Instances default to the **`default`** venv, which is created on first use with the base packages the runner needs (`mcp`, `uvicorn`, `starlette`, `pydantic`, `httpx`).
+- A venv is **created on demand**: assigning an instance to a new venv name (or creating a tool with one) builds it automatically. You can also create/delete venvs explicitly on the Settings page.
+- Validation, dependency installs and the runtime all use the instance's venv interpreter, so an import-time check sees exactly the packages the tool will have at runtime.
+- The dashboard shows each instance's venv in a **Venv** column; the **Edit** dialog has a venv dropdown to move an instance (deps are reinstalled into the target venv and the instance restarts if running).
+
+> **Upgrading from ≤ v0.0.6:** on the first start, existing instances' dependencies are installed into the `default` venv once (a one-time migration, guarded by `runtime/.venv_migrated`). The first start therefore takes longer and needs network access for pip. Already-running instances keep using the old interpreter until restarted.
 
 ---
 
@@ -66,7 +85,7 @@ Use `--no-edit` on a server where you want to prevent anyone from injecting arbi
 
 The current mode is reported at startup:
 ```
-MCP Manager starting on http://0.0.0.0:7860  [auth: enabled, edit: upload-only, mcp-auth: bearer-token]
+OWUI MCP Spawner starting on http://0.0.0.0:7860  [auth: enabled, edit: upload-only, mcp-auth: bearer-token]
 ```
 
 Both flags also enforce their restrictions at the API level — the corresponding routes return `403` even if someone bypasses the UI.
@@ -124,17 +143,21 @@ When auth is active:
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/api/auth-check` | Token validation endpoint |
-| `GET` | `/api/settings` | Manager settings (auth, edit mode, MCP token status) |
+| `GET` | `/api/settings` | Spawner settings (auth, edit mode, MCP token status) |
 | `PUT` | `/api/settings` | Update settings |
 | `GET` | `/api/settings/mcp-token` | Retrieve current MCP token value *(blocked by `--no-token-edit`)* |
-| `POST` | `/api/server/restart` | Restart the manager process |
+| `POST` | `/api/server/restart` | Restart the spawner process |
 | `GET` | `/api/instances/{id}/config` | Full config including values |
 | `GET` | `/api/instances/{id}/tool-code` | Python source of a tool *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/instances/{id}/logs/install` | Install log |
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
-| `POST` | `/api/instances/upload` | Upload & install a new tool *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}` | Edit config *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code *(blocked by `--no-code-edit`)* |
+| `POST` | `/api/instances/upload` | Upload & install a new tool; accepts optional `venv` and `port` form fields *(blocked by `--no-edit`)* |
+| `POST` | `/api/tools/create` | Create & install a new tool from raw Python code in one step (installs deps, validates in the venv, fills values) *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}` | Edit config — `name`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts) *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code; installs newly declared `requirements:` and syncs Valve values *(blocked by `--no-code-edit`)* |
+| `GET` | `/api/venvs` | List virtual environments with instance counts |
+| `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
+| `DELETE` | `/api/venvs/{name}` | Delete an unused venv (refused if in use; `default` protected) *(blocked by `--no-edit`)* |
 | `POST` | `/api/instances/{id}/start` | Start |
 | `POST` | `/api/instances/{id}/stop` | Stop |
 | `POST` | `/api/instances/{id}/restart` | Restart |
@@ -156,7 +179,7 @@ When auth is active:
 
 ## Writing a tool
 
-Every tool is a Python file with a `Tools` class. The framework reads it, installs dependencies, and exposes each method as an MCP tool.
+Every tool is a Python file with a `Tools` class. The spawner reads it, installs dependencies, and exposes each method as an MCP tool.
 
 ### Minimal structure
 
@@ -202,6 +225,20 @@ class Tools:
 ```
 
 Valve fields become configurable values in the web UI (Edit → Values).
+
+### Dependencies
+
+Declare third-party packages with a `requirements:` line in the module docstring — they are installed into the instance's venv before the code is validated, so heavy imports (numpy, pandas, yfinance, …) work on the very first upload:
+
+```python
+"""
+title: Stock Analysis
+requirements: yfinance, pandas, numpy
+"""
+import yfinance, pandas, numpy
+```
+
+You can also pass dependencies explicitly to `create_tool`, or edit them later via **Edit → Dependencies** (or `update_instance_dependencies`). Changing dependencies reinstalls them into the instance's venv.
 
 ### Schema features
 
@@ -263,11 +300,11 @@ The `specs` entries must match the public methods of your `Tools` class. One ent
 
 ### Upload
 
-1. Export as OpenWebUI JSON via the **Tool Editor** → **Export JSON**
-2. Upload via **+ Upload JSON** in the web UI
-3. Or use the `mcp-manager-control` MCP tool: `upload_tool(json_content)`
+1. Write code in the **Tool Editor** → **Install as MCP** (one step: installs deps, validates in the venv, fills values)
+2. Or upload an OpenWebUI JSON export via **+ Upload JSON** in the web UI (with optional venv/port)
+3. Or use the bundled control tool (`mcp_manager_control`): `create_tool(code, id, …)` for raw code, or `upload_tool(json_content)` for a JSON export
 
-Call `get_tool_template()` on the MCP Manager Control tool to get both the Python template and a complete JSON format example at runtime.
+Call `get_tool_template()` on the control tool to get both the Python template and a complete JSON format example at runtime.
 
 ---
 
@@ -277,6 +314,7 @@ The built-in editor lets you write, validate, and export OpenWebUI-compatible to
 
 - Python syntax highlighting (CodeMirror)
 - Live validation: syntax check, runtime inspection, type-hint → JSON Schema generation
+- **Install as MCP** — create a new instance in one step (pick a venv and optional port; deps install and validation run in that venv)
 - Export as `.json` (importable into OpenWebUI)
 - **Edit Code** on any existing MCP server to modify it in-place
 
@@ -284,7 +322,7 @@ The built-in editor lets you write, validate, and export OpenWebUI-compatible to
 
 ### Schema generation
 
-The framework inspects the actual Python code to build accurate MCP tool schemas:
+The spawner inspects the actual Python code to build accurate MCP tool schemas:
 
 - `typing.Literal["a", "b"]` → `"enum": ["a", "b"]` in the MCP schema
 - `Annotated[T, Field(description="...")]` → `"description"` per parameter
@@ -301,16 +339,16 @@ Example files are in `deploy/`. Never put secrets directly into the service file
 **1. Create the environment file**
 
 ```bash
-sudo cp deploy/mcp-manager.env.example /etc/mcp-manager.env
-sudo chmod 600 /etc/mcp-manager.env
-sudo nano /etc/mcp-manager.env   # set MCP_MANAGER_PASSWORD and optionally MCP_BEARER_TOKEN
+sudo cp deploy/owui-mcp-spawner.env.example /etc/owui-mcp-spawner.env
+sudo chmod 600 /etc/owui-mcp-spawner.env
+sudo nano /etc/owui-mcp-spawner.env   # set MCP_MANAGER_PASSWORD and optionally MCP_BEARER_TOKEN
 ```
 
 **2. Create the service file**
 
 ```bash
-sudo cp deploy/mcp-manager.service.example /etc/systemd/system/mcp-manager.service
-sudo nano /etc/systemd/system/mcp-manager.service
+sudo cp deploy/owui-mcp-spawner.service.example /etc/systemd/system/owui-mcp-spawner.service
+sudo nano /etc/systemd/system/owui-mcp-spawner.service
 # Replace YOUR_USER and adjust WorkingDirectory / ExecStart to your actual paths
 # Add --no-edit, --no-code-edit, --mcp-token, --no-token-edit to ExecStart as needed
 ```
@@ -319,8 +357,8 @@ sudo nano /etc/systemd/system/mcp-manager.service
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now mcp-manager
-sudo journalctl -u mcp-manager -f
+sudo systemctl enable --now owui-mcp-spawner
+sudo journalctl -u owui-mcp-spawner -f
 ```
 
 ---
@@ -338,7 +376,7 @@ app/
   manager.py            Entry point (CLI) — --host, --no-edit, --no-code-edit, --mcp-token, --no-token-edit
   admin_server.py       FastAPI admin API + web server (+ instance watchdog)
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
-  auth.py               Manager auth, edit mode, MCP token helpers
+  auth.py               Auth, edit mode, MCP token helpers
   settings_store.py     Persistent settings (runtime/settings.json)
   config_store.py       Config file I/O + port management
   process_manager.py    Subprocess lifecycle (start/stop/restart) + health checks
@@ -346,15 +384,16 @@ app/
   tool_editor.py        Code validation (isolated subprocess) + OpenWebUI JSON export
   validate_worker.py    Subprocess worker that executes untrusted tool code for validation
   schema_gen.py         Shared type-hint/docstring → JSON Schema generation
-  dependency_manager.py pip install handling
+  dependency_manager.py pip install handling (into the instance venv)
+  venv_manager.py       On-demand per-instance virtual environments (runtime/venvs/)
   schema.py             Pydantic models
   security.py           Package validation, secret masking
-  logger.py             Logging setup (rotating manager log)
+  logger.py             Logging setup (rotating log)
 configs/                Per-server JSON configs (one file = one MCP)
 tools/                  Uploaded OpenWebUI tool JSONs
-examples/               Example tool JSON (MCP Manager Control — manage the manager via MCP)
+examples/               Example tool JSON (control tool — manage the spawner via MCP)
 web/                    Frontend (HTML + JS + CSS)
-runtime/                PIDs + logs + settings.json + tool-code history (gitignored)
+runtime/                PIDs + logs + venvs + settings.json + tool-code history (gitignored)
 deploy/                 systemd service + env file examples
 ```
 
@@ -362,18 +401,29 @@ deploy/                 systemd service + env file examples
 
 ## Changelog
 
+### v0.1.0
+- **Renamed to `owui-mcp-spawner`** (formerly "MCP Framework" / "MCP Manager") — the focus is spawning OpenWebUI tools as isolated MCP servers. Environment variable names (`MCP_MANAGER_PASSWORD`, …) are unchanged for compatibility.
+- **Per-instance virtual environments** — every instance runs in its own venv under `runtime/venvs/<name>/`; dependencies are fully isolated and never pollute the spawner. Created on demand with base packages; validation, installs and runtime all use the instance venv. New `app/venv_manager.py`, `MCPConfig.venv` field, and a one-time migration of existing instances on first start.
+- **Dependencies actually install from `requirements:`** — the docstring `requirements:` line is parsed and installed *before* validation, so tools importing numpy/pandas/yfinance/… upload in one go (previously rejected with `ModuleNotFoundError`).
+- **One-step `create_tool`** — `POST /api/tools/create` and the editor's **Install as MCP** create an instance from raw Python in a single step (install → validate in venv → fill Valve values → save); no more placeholder + export + upload dance.
+- **Valve values sync on code save** — saving edited code merges new Valve defaults into the editable config (keeps user-set values, drops removed valves), so valves stay editable in the UI after a code change.
+- **Safe delete** — deleting an instance no longer removes a tool file still referenced by another instance (reference-counted); MCP-config uploads copy into an instance-owned file instead of sharing.
+- **Venv management UI** — dashboard **Venv** column, venv dropdowns in the upload/editor/edit dialogs, and a Settings section to create/delete venvs (in-use protection, `default` protected).
+- **Port choice at install** — optional fixed port on upload / `create_tool`; a clash returns `409` instead of being silently reassigned.
+- **Control tool v0.0.4+** — new tools: `create_tool`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv` (value changes report a hint to ask before restarting).
+
 ### v0.0.6
-- **Isolated validation** — tool code is validated in a short-lived subprocess with a timeout; import-time side effects, crashes or endless loops can no longer affect the manager process
+- **Isolated validation** — tool code is validated in a short-lived subprocess with a timeout; import-time side effects, crashes or endless loops can no longer affect the spawner process
 - **Non-blocking API** — dependency installs, instance start/stop/restart and validation run in worker threads; the UI stays responsive during long operations
 - **Health checks** — `start` waits until the instance actually answers on its port (with log tail as error detail on failure); a watchdog marks instances whose process died as `failed`
-- **Log rotation** — rotating manager log, oversized runtime logs rotate on instance start, log endpoints return the last 500 lines instead of the whole file
+- **Log rotation** — rotating log, oversized runtime logs rotate on instance start, log endpoints return the last 500 lines instead of the whole file
 - **Tool-code history** — the previous version of a tool JSON is snapshotted to `runtime/history/<id>/` before every save (last 10 kept)
 - **Unified schema generation** — validation, export and runtime now share one implementation (`schema_gen.py`); the editor gains `Literal` → enum and `Annotated`/`Field` descriptions
-- **Hardening** — locked instances can no longer be stopped; timing-safe token comparison (`hmac.compare_digest`); no more `exec()` of uploaded code in the manager process
-- **Cleanup** — removed dead config fields (`enabled`, `runtime`, `requirements_file`, `install_on_upload`) and unused status values; MCP Manager Control tool (v0.0.2: precise 403 error details, fixed `export_tool`) now lives in `examples/`
+- **Hardening** — locked instances can no longer be stopped; timing-safe token comparison (`hmac.compare_digest`); no more `exec()` of uploaded code in the spawner process
+- **Cleanup** — removed dead config fields (`enabled`, `runtime`, `requirements_file`, `install_on_upload`) and unused status values; the control tool (v0.0.2: precise 403 error details, fixed `export_tool`) now lives in `examples/`
 
 ### v0.0.5
-- **Settings page** — ⚙ button in the web UI for managing password, edit mode, MCP token and manager restart; all settings persisted in `runtime/settings.json`
+- **Settings page** — ⚙ button in the web UI for managing password, edit mode, MCP token and restart; all settings persisted in `runtime/settings.json`
 - **MCP Bearer Token auth** — optional token protecting all MCP endpoints; `--mcp-token` and `--no-token-edit` CLI flags; token visible/hidden with 👁 toggle and ⟳ generator in the UI
 - **Improved schema generation** — `Literal[...]` → `enum`, `Annotated[T, Field(description=...)]` and Google-style `Args:` docstrings → `description`, defaults → `default`; built from live Python code, not the pre-built specs
 
@@ -382,7 +432,7 @@ deploy/                 systemd service + env file examples
 - Edit mode reported at startup and exposed via `/api/auth-status`
 
 ### v0.0.3
-- systemd deploy examples (`deploy/mcp-manager.service.example`, `deploy/mcp-manager.env.example`)
+- systemd deploy examples
 - Password via `EnvironmentFile` — no secrets in the service file
 
 ### v0.0.2

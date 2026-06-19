@@ -1,8 +1,8 @@
 import subprocess
-import sys
 
 from .logger import get_install_log_path, get_manager_logger
 from .security import validate_package_spec
+from .venv_manager import DEFAULT_VENV, ensure_venv, python_path
 
 logger = get_manager_logger()
 
@@ -18,10 +18,18 @@ def install_dependencies(
     instance_id: str,
     dependencies: list[str],
     upgrade: bool = False,
+    venv: str = DEFAULT_VENV,
 ) -> tuple[bool, str]:
-    """Install dependencies. Returns (success, error_message)."""
+    """Install dependencies into the instance's venv. Returns (success, error_message)."""
     log_path = get_install_log_path(instance_id)
     log_path.write_text("")  # clear log
+
+    # Make sure the target venv exists (creates it + base packages on first use).
+    ok, err = ensure_venv(venv, log=lambda m: _log(instance_id, m))
+    if not ok:
+        return False, err
+
+    py = python_path(venv)
 
     if not dependencies:
         _log(instance_id, "No dependencies to install.")
@@ -33,10 +41,10 @@ def install_dependencies(
         _log(instance_id, f"[ERROR] {msg}")
         return False, msg
 
-    _log(instance_id, f"Installing {len(dependencies)} dependencies...")
+    _log(instance_id, f"Installing {len(dependencies)} dependencies into venv '{venv}'...")
 
     for dep in dependencies:
-        cmd = [sys.executable, "-m", "pip", "install", dep]
+        cmd = [str(py), "-m", "pip", "install", dep]
         if upgrade:
             cmd.append("--upgrade")
 

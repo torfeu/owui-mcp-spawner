@@ -248,6 +248,45 @@ tbody tr:last-child td {
   vertical-align: middle;
 }
 
+.venv-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+/* ── Venv settings ── */
+.venv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.venv-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.venv-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex: 1;
+}
+.venv-create-row {
+  display: flex;
+  gap: 8px;
+}
+.venv-create-row input {
+  flex: 1;
+}
+
 /* ── Modal ── */
 .modal {
   position: fixed;
