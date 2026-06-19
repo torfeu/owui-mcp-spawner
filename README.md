@@ -332,6 +332,21 @@ The spawner inspects the actual Python code to build accurate MCP tool schemas:
 
 ---
 
+## Managing the spawner over MCP (control tool)
+
+`owui-mcp-spawner` ships with a **control tool** — an MCP server that lets an AI agent (Claude Code, OpenWebUI, …) operate the spawner itself: list, start, stop, restart and reinstall instances, read install/runtime logs, create and edit tools, change Valve values, dependencies or venvs, and even restart the spawner. It's the same interface used throughout this project to manage a remote deployment without opening the web UI.
+
+The definition lives in `examples/mcp-manager-control.json` (instance id `mcp_manager_control`). Set it up like any other tool, then point your MCP client at it:
+
+1. Upload `examples/mcp-manager-control.json` (or paste it into the editor) to create and install the `mcp_manager_control` instance, then start it.
+2. In your client add it as an MCP server at `http://<host>:<port>/mcp`, with the Bearer token if MCP auth is enabled.
+
+**Available tools (22):** `list_instances`, `get_instance`, `get_instance_config`, `get_settings`, `get_install_log`, `get_runtime_log`, `get_tool_code`, `get_tool_template`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `restart_manager`, `create_tool`, `upload_tool`, `save_tool_code`, `validate_tool_code`, `export_tool`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv`, `delete_instance`.
+
+**Security — enforced server-side, granular per action.** The control instance carries one `allow_*` Valve per action (`allow_delete`, `allow_create_tool`, `allow_restart`, `allow_manager_restart`, …). Read-only actions are on by default; destructive ones (e.g. `delete_instance`) stay disabled until you flip their Valve in **Edit → Values** and restart the instance — so an agent can never do more than you've allowed. Write operations also need the spawner password, supplied to the control instance via the `auth_token` Valve; `manager_url` points it at the spawner API. The global edit mode (`--no-edit` / `--no-code-edit`) still applies on top.
+
+---
+
 ## systemd (optional)
 
 Example files are in `deploy/`. Never put secrets directly into the service file.
