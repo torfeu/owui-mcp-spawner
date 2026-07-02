@@ -178,7 +178,7 @@ function actionButtons(inst) {
 
   const btns = [];
   if (stopped)  btns.push(ab("start",    inst.id, "Start",    "btn-success btn-sm", busy));
-  if (running && !locked) btns.push(ab("stop", inst.id, "Stop", "btn-danger btn-sm", busy));
+  if (running) btns.push(ab("stop", inst.id, "Stop", "btn-danger btn-sm", busy));
   if ((running || stopped) && canRestart) btns.push(ab("restart", inst.id, "Restart", "btn-secondary btn-sm", busy));
   if (canUploadOrEdit) btns.push(ab("edit",     inst.id, "Edit",      "btn-secondary btn-sm", busy));
   if (canCodeEdit)     btns.push(ab("editcode", inst.id, "Edit Code", "btn-secondary btn-sm", busy));
@@ -610,7 +610,8 @@ async function runValidate() {
     const res = await fetch("/api/tools/validate", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ code: getEditorCode() }),
+      // Pass the instance so the server validates in its venv (installed deps resolve)
+      body: JSON.stringify({ code: getEditorCode(), ...(editorEditId ? { instance_id: editorEditId } : {}) }),
     });
     const data = await res.json();
     // Normalise: API errors come back as {detail:…} without the expected fields

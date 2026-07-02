@@ -1,7 +1,7 @@
 """
 title: Test Tool
 description: Minimaler Test-MCP-Server mit einer konfigurierbaren Einstellung (Valve).
-author: Torsten
+author: Torsten Feustel
 version: 0.1.0
 """
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "owui-mcp-spawner"
-version = "0.1.0"
+version = "0.1.1"
 description = "Spawn OpenWebUI tool JSONs as isolated Model Context Protocol (MCP) servers"
 requires-python = ">=3.10"
 dependencies = [

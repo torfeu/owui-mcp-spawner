@@ -36,7 +36,7 @@ from .process_manager import (
 )
 from .schema import MCPConfig, MCPInstance, MCPStatus, ServerConfig, InstallConfig, ToolSourceConfig
 from .auth import require_auth, auth_enabled, edit_mode, mcp_bearer_token, token_edit_enabled
-from .security import mask_secrets
+from .security import mask_secrets, SECRET_MASK
 from .tool_editor import validate_tool_code, generate_openwebui_json, parse_requirements, STARTER_TEMPLATE
 from .tool_loader import load_openwebui_json
 from .venv_manager import DEFAULT_VENV, delete_venv, ensure_venv, list_venvs, python_path, venv_exists, venv_ready
@@ -134,7 +134,7 @@ async def _lifespan(app: FastAPI):
     watchdog.cancel()
 
 
-app = FastAPI(title="OWUI MCP Spawner", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="OWUI MCP Spawner", version="0.1.1", lifespan=_lifespan)
 
 # Version cache: tool file path → (mtime, version)
 _version_cache: dict[str, tuple[float, str]] = {}
@@ -155,7 +155,8 @@ def _version_from_tool_file(cfg) -> str:
             raw = raw[0] if raw else {}
         # Try Python docstring first: version: x.y.z
         code = raw.get("content", "")
-        m = re.search(r'version:\s*([0-9][^\s\n]*)', code[:800])
+        # Anchor to line start so "version: ..." inside a description line doesn't match
+        m = re.search(r'^\s*version:\s*([0-9][^\s\n]*)', code[:800], re.MULTILINE)
         if m:
             version = m.group(1).strip()
         else:
@@ -328,7 +329,9 @@ async def update_config(instance_id: str, body: dict) -> dict:
             raise HTTPException(409, f"Port {new_server.port} is already in use")
         cfg.server = new_server
     if "values" in body:
-        cfg.values.update(body["values"])
+        # GET /config masks secrets; a client echoing the config back must not
+        # overwrite the real values with the mask.
+        cfg.values.update({k: v for k, v in body["values"].items() if v != SECRET_MASK})
     deps_changed = False
     if "install" in body:
         i = body["install"]
@@ -422,7 +425,8 @@ async def start(instance_id: str) -> dict:
 
 @app.post("/api/instances/{instance_id}/stop", dependencies=[Depends(require_auth)])
 async def stop(instance_id: str) -> dict:
-    require_not_locked(instance_id)
+    # Deliberately allowed on locked instances: lock means "don't modify",
+    # but a misbehaving instance must always be stoppable.
     ok, err = await asyncio.to_thread(stop_instance, instance_id)
     if not ok:
         raise HTTPException(500, err)
@@ -585,7 +589,15 @@ async def tool_validate(body: dict) -> dict:
     code = body.get("code", "")
     if not code.strip():
         raise HTTPException(400, "No code provided")
-    return await asyncio.to_thread(validate_tool_code, code)
+    # Validate inside the instance's venv when one is given, so third-party
+    # imports of already-installed dependencies resolve instead of false-failing.
+    python_exe = None
+    instance_id = body.get("instance_id")
+    if instance_id:
+        cfg = load_config(instance_id)
+        if cfg and venv_exists(cfg.venv):
+            python_exe = str(python_path(cfg.venv))
+    return await asyncio.to_thread(validate_tool_code, code, python_exe)
 
 
 @app.post("/api/tools/export", dependencies=[Depends(require_auth), Depends(require_code_edit)])
@@ -842,7 +854,6 @@ async def get_mcp_token_value() -> dict:
 
 
 def _restart_after_delay() -> None:
-    import time
     time.sleep(0.8)
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -858,7 +869,7 @@ async def delete_instance(instance_id: str) -> dict:
     require_not_locked(instance_id)
     inst = get_instance_state(instance_id)
     if inst and inst.status == MCPStatus.running:
-        stop_instance(instance_id)
+        await asyncio.to_thread(stop_instance, instance_id)
     cfg = load_config(instance_id)
     if not delete_config(instance_id):
         raise HTTPException(404, "Config not found")
@@ -1048,6 +1059,14 @@ async def _import_mcp_config(raw: dict, port: int | None = None, venv: str | Non
     set_instance_state(inst)
 
     save_config(cfg)
+    if not ok:
+        # Config and instance are kept (status dependency_error) so the user can
+        # fix the dependencies and hit Reinstall — but the upload must not claim success.
+        raise HTTPException(
+            422,
+            f"Instance '{cfg.id}' was created, but dependency installation failed: {err} "
+            "— fix the dependencies and use Reinstall.",
+        )
     return {"ok": True, "id": cfg.id, "port": cfg.server.port}
 
 

@@ -81,6 +81,7 @@ main {
 .alert-success { background: rgba(34,197,94,.15); border: 1px solid rgba(34,197,94,.3); color: var(--success); }
 .alert-error   { background: rgba(239,68,68,.15);  border: 1px solid rgba(239,68,68,.3);  color: var(--danger); }
 .alert-info    { background: rgba(59,130,246,.15); border: 1px solid rgba(59,130,246,.3); color: var(--info); }
+.alert-warning { background: rgba(245,158,11,.15); border: 1px solid rgba(245,158,11,.3); color: var(--warning); }
 
 /* ── Table ── */
 .table-wrapper {
@@ -185,9 +186,6 @@ tbody tr:last-child td {
 .badge-installed  { background: rgba(34,197,94,.1);  color: #86efac; }
 .badge-failed   { background: rgba(239,68,68,.15);  color: var(--danger); }
 .badge-dependency_error { background: rgba(239,68,68,.15); color: var(--danger); }
-.badge-port_error       { background: rgba(239,68,68,.15); color: var(--danger); }
-.badge-config_error     { background: rgba(239,68,68,.15); color: var(--danger); }
-.badge-uploaded { background: rgba(99,102,241,.15); color: #a5b4fc; }
 
 /* ── Action Buttons in table ── */
 .actions {

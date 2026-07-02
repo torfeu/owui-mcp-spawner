@@ -6,6 +6,9 @@ from .venv_manager import DEFAULT_VENV, ensure_venv, python_path
 
 logger = get_manager_logger()
 
+# Per-package pip timeout — large wheels (torch, scipy, ...) can take minutes.
+PIP_TIMEOUT = 600
+
 
 def _log(instance_id: str, msg: str) -> None:
     log_path = get_install_log_path(instance_id)
@@ -54,7 +57,7 @@ def install_dependencies(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=PIP_TIMEOUT,
             )
             if result.stdout:
                 for line in result.stdout.strip().splitlines():

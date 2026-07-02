@@ -30,9 +30,6 @@ def _get_tools_class_methods(content: str) -> set[str]:
 
 class OpenWebUITool:
     def __init__(self, raw: dict):
-        self.id: str = raw.get("id", "unknown")
-        self.name: str = raw.get("name", "Unknown Tool")
-        self.description: str = raw.get("meta", {}).get("description", "")
         self.content: str = raw.get("content", "")
         self.specs: list[dict] = raw.get("specs", [])
 

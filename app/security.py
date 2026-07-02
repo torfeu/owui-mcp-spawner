@@ -4,6 +4,11 @@ from packaging.requirements import Requirement, InvalidRequirement
 _SAFE_PACKAGE_RE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
 _SECRET_FIELDS = {"api_key", "token", "secret", "password", "key", "auth"}
 
+# Placeholder returned instead of secret values; update endpoints must treat an
+# incoming value equal to this as "unchanged", or round-tripping a fetched
+# config would overwrite real secrets with the mask.
+SECRET_MASK = "********"
+
 
 def validate_package_spec(spec: str) -> bool:
     """Return True if spec is a safe PyPI requirement string."""
@@ -24,7 +29,7 @@ def mask_secrets(values: dict) -> dict:
         key_lower = k.lower()
         is_secret = any(s in key_lower for s in _SECRET_FIELDS)
         if is_secret and isinstance(v, str) and v:
-            result[k] = "********"
+            result[k] = SECRET_MASK
         else:
             result[k] = v
     return result
