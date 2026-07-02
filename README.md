@@ -165,9 +165,12 @@ When auth is active:
 | `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
 | `DELETE` | `/api/venvs/{name}` | Delete an unused venv (refused if in use; `default` protected) *(blocked by `--no-edit`)* |
 | `POST` | `/api/instances/{id}/start` | Start |
-| `POST` | `/api/instances/{id}/stop` | Stop |
+| `POST` | `/api/instances/{id}/stop` | Stop (allowed even when locked) |
 | `POST` | `/api/instances/{id}/restart` | Restart |
 | `POST` | `/api/instances/{id}/reinstall` | Reinstall dependencies |
+| `POST` | `/api/instances/{id}/lock` | Lock the instance (blocks modifications, see *Instance locking*) |
+| `POST` | `/api/instances/{id}/unlock` | Unlock the instance |
+| `GET` | `/api/instances/{id}/export` | Download an OpenWebUI MCP-connection JSON for this instance |
 | `POST` | `/api/tools/validate` | Validate tool code; pass an optional `instance_id` to validate in that instance's venv so its installed dependencies resolve *(blocked by `--no-code-edit`)* |
 | `POST` | `/api/tools/export` | Export tool as OpenWebUI JSON *(blocked by `--no-code-edit`)* |
 | `DELETE` | `/api/instances/{id}` | Delete *(blocked by `--no-edit`)* |
