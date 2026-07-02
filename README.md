@@ -94,6 +94,12 @@ Edit mode can also be changed at runtime via the Settings page and persists acro
 
 ---
 
+## Instance locking
+
+Each instance can be locked with the 🔒 button in the dashboard. A locked instance can still be **started and stopped** (a misbehaving instance must always be stoppable), and its logs and export stay accessible — but config edits, code edits, restart, reinstall and delete return `403` until it is unlocked. Locking is meant as a guard against accidental changes to production instances, especially when an AI agent manages the spawner via the control tool.
+
+---
+
 ## MCP endpoint authentication
 
 By default MCP endpoints are open. To require a Bearer token on all MCP endpoints:
@@ -153,7 +159,7 @@ When auth is active:
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
 | `POST` | `/api/instances/upload` | Upload & install a new tool; accepts optional `venv` and `port` form fields *(blocked by `--no-edit`)* |
 | `POST` | `/api/tools/create` | Create & install a new tool from raw Python code in one step (installs deps, validates in the venv, fills values) *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}` | Edit config — `name`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts) *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}` | Edit config — `name`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts). `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
 | `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code; installs newly declared `requirements:` and syncs Valve values *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/venvs` | List virtual environments with instance counts |
 | `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
@@ -162,7 +168,7 @@ When auth is active:
 | `POST` | `/api/instances/{id}/stop` | Stop |
 | `POST` | `/api/instances/{id}/restart` | Restart |
 | `POST` | `/api/instances/{id}/reinstall` | Reinstall dependencies |
-| `POST` | `/api/tools/validate` | Validate tool code *(blocked by `--no-code-edit`)* |
+| `POST` | `/api/tools/validate` | Validate tool code; pass an optional `instance_id` to validate in that instance's venv so its installed dependencies resolve *(blocked by `--no-code-edit`)* |
 | `POST` | `/api/tools/export` | Export tool as OpenWebUI JSON *(blocked by `--no-code-edit`)* |
 | `DELETE` | `/api/instances/{id}` | Delete *(blocked by `--no-edit`)* |
 
