@@ -40,17 +40,22 @@ def main() -> None:
     os.environ["MCP_RUNNER_HOST"] = args.host
     os.environ["MCP_MANAGER_PORT"] = str(args.port)
 
-    # Edit mode: CLI flags > settings file > default "full"
+    # Edit mode: CLI flags > settings file > default "full". A CLI-set mode is
+    # locked so the web UI / API cannot lift it at runtime.
     from app.settings_store import load_settings
     _file_settings = load_settings()
     if args.no_edit:
         os.environ["MCP_EDIT_MODE"] = "readonly"
+        os.environ["MCP_EDIT_MODE_LOCKED"] = "1"
     elif args.no_code_edit:
         os.environ["MCP_EDIT_MODE"] = "upload"
+        os.environ["MCP_EDIT_MODE_LOCKED"] = "1"
     elif _file_settings.get("edit_mode") and _file_settings["edit_mode"] != "full":
         os.environ["MCP_EDIT_MODE"] = _file_settings["edit_mode"]
+        os.environ.pop("MCP_EDIT_MODE_LOCKED", None)
     else:
         os.environ.pop("MCP_EDIT_MODE", None)
+        os.environ.pop("MCP_EDIT_MODE_LOCKED", None)
 
     # MCP Bearer Token: CLI > settings file > off
     if args.mcp_token:

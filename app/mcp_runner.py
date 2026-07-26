@@ -61,7 +61,8 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
         sys.exit(1)
 
     mcp_tool_defs = tool.get_mcp_tool_defs()
-    logger.info(f"Loaded {len(mcp_tool_defs)} tools: {[t['name'] for t in mcp_tool_defs]}")
+    allowed_tools = {t["name"] for t in mcp_tool_defs}
+    logger.info(f"Loaded {len(mcp_tool_defs)} tools: {sorted(allowed_tools)}")
 
     server = Server(cfg.id)
 
@@ -81,6 +82,10 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
         name: str, arguments: dict | None
     ) -> list[types.TextContent]:
         arguments = arguments or {}
+        # Only methods advertised via list_tools are callable — getattr alone
+        # would also expose private helpers and inherited methods.
+        if name not in allowed_tools:
+            return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
         method = getattr(tools_instance, name, None)
         if method is None:
             return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
@@ -115,7 +120,8 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
         if mcp_auth_token:
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
-            provided = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+            # RFC 7235: the auth scheme is case-insensitive
+            provided = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
             if not hmac.compare_digest(provided, mcp_auth_token):
                 from starlette.responses import Response
                 await Response(

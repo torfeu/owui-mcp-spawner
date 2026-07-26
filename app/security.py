@@ -13,7 +13,7 @@ SECRET_MASK = "********"
 def validate_package_spec(spec: str) -> bool:
     """Return True if spec is a safe PyPI requirement string."""
     spec = spec.strip()
-    if not spec or spec.startswith(("#", "-", "git+", "http")):
+    if not spec or spec.startswith(("#", "-", "git+", "http://", "https://")):
         return False
     try:
         req = Requirement(spec)
@@ -22,13 +22,17 @@ def validate_package_spec(spec: str) -> bool:
         return False
 
 
+def is_secret_field(key: str) -> bool:
+    """True when *key* names a credential-like value that must be masked."""
+    key_lower = key.lower()
+    return any(s in key_lower for s in _SECRET_FIELDS)
+
+
 def mask_secrets(values: dict) -> dict:
     """Return a copy of values with secret fields masked."""
     result = {}
     for k, v in values.items():
-        key_lower = k.lower()
-        is_secret = any(s in key_lower for s in _SECRET_FIELDS)
-        if is_secret and isinstance(v, str) and v:
+        if is_secret_field(k) and isinstance(v, str) and v:
             result[k] = SECRET_MASK
         else:
             result[k] = v

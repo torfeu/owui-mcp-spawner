@@ -31,7 +31,8 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
+  gap: 8px;
+  padding: 14px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -58,8 +59,8 @@ h1 {
 
 /* ── Main ── */
 main {
-  padding: 24px;
-  max-width: 1200px;
+  padding: 16px;
+  max-width: 1600px;
   margin: 0 auto;
 }
 
@@ -145,10 +146,10 @@ tbody tr:last-child td {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--primary);
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 180px;
+  max-width: 280px;
+  overflow-wrap: break-word;  /* wrap anywhere inside the URL — no truncation */
+  word-break: break-all;
 }
 
 .url-cell a {
@@ -791,4 +792,86 @@ textarea { resize: vertical; font-family: var(--mono); font-size: 12px; }
   background: var(--surface2);
   border-radius: var(--radius);
   border: 1px solid var(--border);
+}
+
+/* ── Guest mode & filter bar ── */
+
+body.guest .admin-col { display: none; }
+
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.filter-bar input[type="search"] {
+  flex: 1;
+  max-width: 340px;
+  padding: 7px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.filter-bar select {
+  max-width: 220px;
+  padding: 7px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.category-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.cell-muted { color: var(--text-muted); }
+
+.app-version {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
+/* ── Small screens ── */
+@media (max-width: 700px) {
+  header {
+    flex-wrap: wrap;
+    padding: 10px 8px;
+  }
+
+  .header-title {
+    flex: 1 0 100%;
+  }
+
+  main {
+    padding: 10px 8px;
+  }
+
+  .filter-bar {
+    flex-wrap: wrap;
+  }
+
+  .filter-bar input[type="search"],
+  .filter-bar select {
+    width: 100%;
+    max-width: none;
+  }
+
+  th,
+  td {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
 }

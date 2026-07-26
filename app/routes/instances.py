@@ -1,0 +1,314 @@
+import asyncio
+import re
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from .. import shared_proxy
+from ..api_helpers import (TOOLS_DIR, _instance_to_dict, _request_host, _version_from_tool_file, require_not_locked, require_upload_or_edit)
+from ..auth import is_request_authenticated, mcp_bearer_token, require_auth
+from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
+from ..dependency_manager import install_dependencies
+from ..logger import get_manager_logger
+from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
+from ..schema import MCPStatus, ServerConfig, InstallConfig
+from ..security import is_secret_field, mask_secrets, SECRET_MASK
+from ..venv_manager import DEFAULT_VENV
+router = APIRouter()
+logger = get_manager_logger()
+_GUEST_FIELDS = ("id", "name", "description", "category", "status", "version")
+def _guest_view(d: dict) -> dict:
+    return {k: d[k] for k in _GUEST_FIELDS if k in d}
+
+def _config_fields(cfg) -> dict:
+    """Config-derived display fields shared by the list and detail endpoints."""
+    return {
+        "locked": cfg.locked if cfg else False,
+        "version": _version_from_tool_file(cfg) if cfg else "",
+        "venv": cfg.venv if cfg else DEFAULT_VENV,
+    }
+
+@router.get("/api/instances")
+async def list_instances(request: Request) -> list[dict]:
+    display_host = _request_host(request)
+    guest = not await is_request_authenticated(request)
+
+    def _build() -> list[dict]:
+        # One directory scan feeds both the states and the enrichment, and the
+        # whole disk walk stays off the event loop — the UI polls this endpoint
+        # every few seconds per open tab.
+        configs = load_all_configs()
+        shared = shared_proxy.configured_port()  # one settings read for the whole list
+        result = []
+        for s in get_all_states(configs):
+            d = _instance_to_dict(s, display_host, shared)
+            d.update(_config_fields(configs.get(s.id)))
+            result.append(_guest_view(d) if guest else d)
+        return result
+
+    return await asyncio.to_thread(_build)
+
+@router.get("/api/instances/{instance_id}")
+async def get_instance(instance_id: str, request: Request) -> dict:
+    inst = get_instance_state(instance_id)
+    if not inst:
+        raise HTTPException(404, f"Instance '{instance_id}' not found")
+    cfg = load_config(instance_id)
+    d = _instance_to_dict(inst, _request_host(request), shared_proxy.configured_port())
+    d.update(_config_fields(cfg))
+    if not await is_request_authenticated(request):
+        return _guest_view(d)
+    return d
+
+@router.get("/api/instances/{instance_id}/config", dependencies=[Depends(require_auth)])
+async def get_config(instance_id: str) -> dict:
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+    d = cfg.model_dump()
+    d["values"] = mask_secrets(d.get("values", {}))
+    # The edit dialog must not guess which fields are credentials — ship the
+    # server's classification with the payload so client and server can't drift.
+    d["secret_fields"] = sorted(k for k in cfg.values if is_secret_field(k))
+    return d
+
+@router.put("/api/instances/{instance_id}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def update_config(instance_id: str, body: dict) -> dict:
+    require_not_locked(instance_id)
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+
+    old_server = (cfg.server.host, cfg.server.port, cfg.server.endpoint)
+
+    # Sub-objects come from arbitrary JSON — reject wrong shapes with a 422
+    # instead of crashing on .get()/.items() below.
+    for key in ("server", "values", "install", "lifecycle"):
+        if key in body and not isinstance(body[key], dict):
+            raise HTTPException(422, f"'{key}' must be an object")
+
+    # Only allow updating safe fields
+    if "name" in body:
+        cfg.name = str(body["name"])
+    if "description" in body:
+        cfg.description = str(body["description"])
+    if "category" in body:
+        cfg.category = str(body["category"]).strip()
+    if "server" in body:
+        s = body["server"]
+        new_port = s.get("port", cfg.server.port)
+        try:
+            new_server = ServerConfig(
+                host=s.get("host", cfg.server.host),
+                port=new_port,
+                endpoint=s.get("endpoint", cfg.server.endpoint),
+            )
+        except Exception as e:
+            raise HTTPException(422, f"Invalid server config: {e}")
+        if new_server.port != cfg.server.port and not is_port_free(new_server.port, exclude_id=instance_id):
+            raise HTTPException(409, f"Port {new_server.port} is already in use")
+        cfg.server = new_server
+    values_changed = False
+    if "values" in body:
+        # GET /config masks secrets; a client echoing the config back must not
+        # overwrite the real values with the mask.
+        old_values = dict(cfg.values)
+        cfg.values.update({k: v for k, v in body["values"].items() if v != SECRET_MASK})
+        values_changed = cfg.values != old_values
+    deps_changed = False
+    if "install" in body:
+        i = body["install"]
+        old_deps = list(cfg.install.dependencies)
+        old_upgrade = cfg.install.upgrade
+        cfg.install = InstallConfig(
+            dependencies=i.get("dependencies", cfg.install.dependencies),
+            upgrade=i.get("upgrade", cfg.install.upgrade),
+        )
+        deps_changed = (
+            list(cfg.install.dependencies) != old_deps
+            or cfg.install.upgrade != old_upgrade
+        )
+    if "lifecycle" in body:
+        lc = body["lifecycle"]
+        cfg.lifecycle.auto_start = lc.get("auto_start", cfg.lifecycle.auto_start)
+        cfg.lifecycle.restart_on_change = lc.get("restart_on_change", cfg.lifecycle.restart_on_change)
+
+    venv_changed = False
+    if "venv" in body:
+        new_venv = str(body["venv"]).strip()
+        if not re.fullmatch(r"[a-zA-Z0-9_\-]+", new_venv):
+            raise HTTPException(400, f"Invalid venv name '{new_venv}': letters, digits, _ and - only")
+        if new_venv != cfg.venv:
+            cfg.venv = new_venv
+            venv_changed = True
+
+    # Install deps before persisting when the venv changed (deps must exist in
+    # the new venv) or the dependency list changed (otherwise the instance would
+    # restart into a venv missing the new packages). A failed install must not
+    # leave the config pointing at an unprepared venv.
+    if venv_changed or deps_changed:
+        ok, err = await asyncio.to_thread(
+            install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
+        )
+        if not ok:
+            raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
+
+    save_config(cfg)
+
+    # Restart so the runner picks up the new interpreter / address / deps (below).
+    inst = get_instance_state(instance_id)
+    server_changed = (cfg.server.host, cfg.server.port, cfg.server.endpoint) != old_server
+
+    # Values only take effect at runner startup, so a changed value needs a
+    # restart just like a changed address — gated by restart_on_change below.
+    needs_restart = (server_changed or venv_changed or deps_changed or values_changed)
+    restarted = False
+    if inst:
+        inst.name = cfg.name
+        inst.category = cfg.category
+        if needs_restart and inst.status == MCPStatus.running:
+            if cfg.lifecycle.restart_on_change or venv_changed or deps_changed:
+                # Restart so the subprocess binds the new address / uses the new
+                # venv / picks up freshly installed dependencies.
+                reason = "venv" if venv_changed else "dependencies" if deps_changed \
+                    else "server config" if server_changed else "values"
+                logger.info(f"{reason} changed for '{instance_id}', restarting")
+                await asyncio.to_thread(restart_instance, instance_id)
+                restarted = True
+            else:
+                # Keep UI pointing at what is actually running until user restarts manually
+                pass
+        else:
+            # Not running or nothing that needs a restart: safe to update displayed URL now
+            inst.port = cfg.server.port
+            inst.host = cfg.server.host
+            inst.endpoint = cfg.server.endpoint
+            inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
+            set_instance_state(inst)
+
+    return {"ok": True, "restarted": restarted}
+
+@router.post("/api/instances/{instance_id}/start", dependencies=[Depends(require_auth)])
+async def start(instance_id: str) -> dict:
+    if not config_exists(instance_id):
+        raise HTTPException(404, "Config not found")
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(422, f"Config file for '{instance_id}' exists but could not be parsed")
+    # A running instance holds its own port open — the OS-level check below
+    # would see that listener as "busy" and reassign the port of a healthy
+    # instance. Bail out first instead (only when the process really is alive;
+    # a stale 'running' state with a dead pid must still be startable).
+    inst = get_instance_state(instance_id)
+    if inst and inst.status == MCPStatus.running and inst.pid and _is_pid_alive(inst.pid):
+        raise HTTPException(409, f"Instance '{instance_id}' is already running")
+    if not is_port_free(cfg.server.port, exclude_id=instance_id):
+        new_port = find_free_port(cfg.server.port + 1)
+        logger.warning(f"Port {cfg.server.port} busy for '{instance_id}', reassigning to {new_port}")
+        cfg.server = cfg.server.model_copy(update={"port": new_port})
+        save_config(cfg)
+        inst = get_instance_state(instance_id)
+        if inst:
+            inst.port = new_port
+            inst.url = f"http://{inst.host}:{new_port}{inst.endpoint}"
+            set_instance_state(inst)
+    ok, err = await asyncio.to_thread(start_instance, instance_id)
+    if not ok:
+        raise HTTPException(500, err)
+    return {"ok": True}
+
+@router.post("/api/instances/{instance_id}/stop", dependencies=[Depends(require_auth)])
+async def stop(instance_id: str) -> dict:
+    # Deliberately allowed on locked instances: lock means "don't modify",
+    # but a misbehaving instance must always be stoppable.
+    ok, err = await asyncio.to_thread(stop_instance, instance_id)
+    if not ok:
+        raise HTTPException(500, err)
+    return {"ok": True}
+
+@router.post("/api/instances/{instance_id}/restart", dependencies=[Depends(require_auth)])
+async def restart(instance_id: str) -> dict:
+    require_not_locked(instance_id)
+    ok, err = await asyncio.to_thread(restart_instance, instance_id)
+    if not ok:
+        raise HTTPException(500, err)
+    return {"ok": True}
+
+@router.post("/api/instances/{instance_id}/lock", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def lock_instance(instance_id: str) -> dict:
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+    cfg.locked = True
+    save_config(cfg)
+    return {"ok": True, "locked": True}
+
+@router.post("/api/instances/{instance_id}/unlock", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def unlock_instance(instance_id: str) -> dict:
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+    cfg.locked = False
+    save_config(cfg)
+    return {"ok": True, "locked": False}
+
+@router.get("/api/instances/{instance_id}/export", dependencies=[Depends(require_auth)])
+async def export_instance(instance_id: str, request: Request) -> JSONResponse:
+    inst = get_instance_state(instance_id)
+    if not inst:
+        raise HTTPException(404, f"Instance '{instance_id}' not found")
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+
+    display_host = _request_host(request) or cfg.server.host
+    host_in_url = f"[{display_host}]" if ":" in display_host else display_host
+    shared = shared_proxy.configured_port()
+    if shared:
+        url = f"http://{host_in_url}:{shared}/mcp/{instance_id}"
+    else:
+        url = f"http://{host_in_url}:{inst.port}{inst.endpoint}"
+
+    token = mcp_bearer_token()
+    result = [{
+        "type": "mcp",
+        "url": url,
+        "spec_type": "url",
+        "spec": "",
+        "path": "openapi.json",
+        "auth_type": "bearer" if token else "none",
+        "key": token or "",
+        "info": {
+            "id": instance_id,
+            "name": cfg.name,
+            "description": cfg.description or cfg.name,
+        }
+    }]
+    return JSONResponse(
+        content=result,
+        headers={"Content-Disposition": f'attachment; filename="{instance_id}-mcp-server.json"'},
+    )
+
+@router.delete("/api/instances/{instance_id}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def delete_instance(instance_id: str) -> dict:
+    require_not_locked(instance_id)
+    inst = get_instance_state(instance_id)
+    if inst and inst.status == MCPStatus.running:
+        ok, err = await asyncio.to_thread(stop_instance, instance_id)
+        if not ok:
+            # Deleting the config while the process is still alive would orphan
+            # it — nothing would know its PID or port anymore.
+            raise HTTPException(500, f"Delete aborted — stop failed: {err}")
+    cfg = load_config(instance_id)
+    if not delete_config(instance_id):
+        raise HTTPException(404, "Config not found")
+    if cfg:
+        tool_path = resolve_tool_path(cfg).resolve()
+        # Only delete the tool file if no other instance still references it (B8).
+        # delete_config already removed this instance, so load_all_configs() lists
+        # only the survivors.
+        shared = any(
+            resolve_tool_path(c).resolve() == tool_path
+            for c in load_all_configs().values()
+        )
+        if not shared and tool_path.exists() and tool_path.is_relative_to(TOOLS_DIR.resolve()):
+            tool_path.unlink(missing_ok=True)
+    return {"ok": True}

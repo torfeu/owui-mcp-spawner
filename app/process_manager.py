@@ -10,6 +10,7 @@ from pathlib import Path
 from .logger import get_manager_logger, get_runtime_log_path
 from .schema import MCPInstance, MCPStatus
 from .config_store import get_instance_state, set_instance_state, load_config, get_all_states
+from .settings_store import atomic_write_text
 from .venv_manager import ensure_venv, python_path
 
 logger = get_manager_logger()
@@ -39,7 +40,7 @@ def _load_pids() -> dict:
 
 def _save_pids(pids: dict) -> None:
     PIDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PIDS_FILE.write_text(json.dumps(pids, indent=2))
+    atomic_write_text(PIDS_FILE, json.dumps(pids, indent=2))
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -48,6 +49,25 @@ def _is_pid_alive(pid: int) -> bool:
         return True
     except (ProcessLookupError, PermissionError):
         return False
+
+
+def _wait_pid_gone(pid: int, timeout: float) -> bool:
+    """Wait until *pid* is gone, reaping it if it is our zombie child.
+
+    A killed subprocess stays as a zombie until waited on, and os.kill(pid, 0)
+    reports zombies as alive — without reaping, a successfully killed runner
+    would look unkillable.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass  # not our child (e.g. adopted after a manager restart)
+        if not _is_pid_alive(pid):
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def _port_answering(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -214,7 +234,12 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
 
     try:
         cmd = [runner_python, str(RUNNER_SCRIPT), "--config", str(config_path)]
-        runner_host = os.environ.get("MCP_RUNNER_HOST")
+        # Shared-port mode: instances stay on localhost, only the proxy is public
+        from .settings_store import load_settings
+        if load_settings().get("shared_port"):
+            runner_host = "127.0.0.1"
+        else:
+            runner_host = os.environ.get("MCP_RUNNER_HOST")
         if runner_host:
             cmd += ["--host", runner_host]
 
@@ -230,17 +255,32 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
         set_instance_state(inst)
         return False, str(e)
 
+    # Expose the PID while still 'starting' so a concurrent stop_instance can
+    # actually kill the process instead of silently missing it.
+    inst.pid = proc.pid
+    set_instance_state(inst)
+
+    def _stopped_concurrently() -> bool:
+        # _state holds live object references, so a stop_instance() running in
+        # another thread is visible here as a status change on our own inst.
+        return inst.status in (MCPStatus.stopping, MCPStatus.stopped)
+
     # Health check: wait until the runner answers on its port instead of
     # blindly assuming success after a fixed delay.
     check_host = runner_host or cfg.server.host
     deadline = time.monotonic() + START_TIMEOUT
     port_open = False
     while time.monotonic() < deadline:
+        if _stopped_concurrently():
+            return False, "Instance was stopped during startup"
         if proc.poll() is not None:
+            if _stopped_concurrently():
+                return False, "Instance was stopped during startup"
             tail = _log_tail(log_path)
             inst.status = MCPStatus.failed
             inst.error = f"Process exited during startup. Log tail:\n{tail}" if tail \
                 else "Process exited during startup"
+            inst.pid = None
             set_instance_state(inst)
             with _pids_lock:
                 pids = _load_pids()
@@ -251,6 +291,9 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
             port_open = True
             break
         time.sleep(0.25)
+
+    if _stopped_concurrently():
+        return False, "Instance was stopped during startup"
 
     if not port_open:
         # Process is alive but slow to bind — keep it, but leave a trace in the log
@@ -287,16 +330,26 @@ def stop_instance(instance_id: str) -> tuple[bool, str]:
         if not _pid_is_our_runner(pid):
             logger.warning(f"PID {pid} for '{instance_id}' is not our runner — skipping kill")
         else:
+            dead = False
             try:
                 os.kill(pid, signal.SIGTERM)
-                for _ in range(10):
-                    time.sleep(0.5)
-                    if not _is_pid_alive(pid):
-                        break
-                else:
+                dead = _wait_pid_gone(pid, 5.0)
+                if not dead:
                     os.kill(pid, signal.SIGKILL)
+                    dead = _wait_pid_gone(pid, 2.0)
             except Exception as e:
                 logger.warning(f"Error killing {instance_id} (pid={pid}): {e}")
+                dead = not _is_pid_alive(pid)
+            # Never report "stopped" while the process is still alive: the
+            # orphan would keep the port and escape the watchdog (status
+            # stopped + pid None is invisible to it).
+            if not dead:
+                inst.status = MCPStatus.running
+                inst.pid = pid
+                inst.error = f"Could not stop process {pid} — it survived SIGTERM and SIGKILL"
+                set_instance_state(inst)
+                logger.error(f"Failed to stop {instance_id}: pid {pid} still alive after SIGKILL")
+                return False, inst.error
 
     inst.status = MCPStatus.stopped
     inst.pid = None
@@ -312,6 +365,8 @@ def stop_instance(instance_id: str) -> tuple[bool, str]:
 
 
 def restart_instance(instance_id: str) -> tuple[bool, str]:
-    stop_instance(instance_id)
+    ok, err = stop_instance(instance_id)
+    if not ok:
+        return False, f"Restart aborted — stop failed: {err}"
     time.sleep(0.5)
     return start_instance(instance_id)

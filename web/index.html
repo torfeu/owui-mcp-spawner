@@ -5,22 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OWUI MCP Spawner</title>
   <link rel="stylesheet" href="/style.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" integrity="sha512-uf06llspW44/LZpHzHT6qBOIVODjWtv4MxCricRxkzvopAlSWnTf6hpZTFxuuZcuNE9CBQhqE0Seu1CoRk84nQ==" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css" integrity="sha512-gFMl3u9d0xt3WR8ZeW05MWm3yZ+ZfgsBVXLSOiFz2xeVrZ8Neg0+V1kkRIo9LikyA/T9HuS91kDfc2XWse0K0A==" crossorigin="anonymous" />
 </head>
 <body>
   <header>
     <div class="header-title">
       <span class="logo">⬡</span>
-      <h1>OWUI MCP Spawner</h1>
+      <h1>OWUI MCP Spawner <span class="app-version" id="app-version"></span></h1>
     </div>
     <button class="btn btn-secondary" id="editor-btn">+ New Tool</button>
     <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
+    <button class="btn btn-primary hidden" id="login-btn">Login</button>
+    <button class="btn btn-ghost hidden" id="logout-btn" title="Log out">Logout</button>
     <button class="btn btn-ghost btn-settings" id="settings-btn" title="Settings">⚙</button>
   </header>
 
   <main>
     <div id="alert-area"></div>
+
+    <div class="filter-bar">
+      <input type="search" id="filter-search" placeholder="Search name, ID or description…" />
+      <select id="filter-category">
+        <option value="">All categories</option>
+      </select>
+    </div>
 
     <div class="table-wrapper">
       <table id="instances-table">
@@ -28,16 +37,17 @@
           <tr>
             <th>ID</th>
             <th>Name</th>
+            <th>Category</th>
             <th>Status</th>
-            <th>Port</th>
-            <th>Venv</th>
-            <th>URL</th>
-            <th>Actions</th>
+            <th class="admin-col">Port</th>
+            <th class="admin-col">Venv</th>
+            <th class="admin-col">URL</th>
+            <th class="admin-col">Actions</th>
           </tr>
         </thead>
         <tbody id="instances-body">
           <tr class="empty-row">
-            <td colspan="7">No MCP instances yet. Upload a JSON to get started.</td>
+            <td colspan="8">No MCP instances yet. Upload a JSON to get started.</td>
           </tr>
         </tbody>
       </table>
@@ -55,6 +65,8 @@
         <input type="file" id="file-input" accept=".json" />
       </div>
       <div class="form-grid" style="margin-top:14px">
+        <label>Category</label>
+        <input type="text" id="upload-category" placeholder="e.g. Smart Home, Search, Utilities" />
         <label>Venv</label>
         <select id="upload-venv"></select>
         <label>Port</label>
@@ -80,6 +92,9 @@
         <div class="form-grid">
           <label>Name</label>
           <input type="text" id="edit-name" />
+
+          <label>Category</label>
+          <input type="text" id="edit-category" placeholder="e.g. Smart Home, Search, Utilities" />
 
           <label>Host</label>
           <input type="text" id="edit-host" />
@@ -140,6 +155,7 @@
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
         <div id="login-error" class="login-error hidden">Wrong password</div>
         <button type="submit" class="btn btn-primary" style="width:100%">Unlock</button>
+        <button type="button" class="btn btn-ghost" id="login-cancel" style="width:100%;margin-top:8px">Continue as guest</button>
       </form>
     </div>
   </div>
@@ -165,6 +181,10 @@
         <div class="meta-field meta-field-grow2">
           <label>Description</label>
           <input type="text" id="editor-desc" placeholder="Fetches current weather data" />
+        </div>
+        <div class="meta-field meta-field-grow">
+          <label>Category</label>
+          <input type="text" id="editor-category" placeholder="e.g. Utilities" />
         </div>
         <div class="meta-field" id="editor-venv-field">
           <label>Venv</label>
@@ -269,6 +289,21 @@
       </div>
 
       <div class="settings-section">
+        <h3 class="settings-section-title">Shared MCP Port</h3>
+        <div class="settings-status" id="settings-shared-status"></div>
+        <p class="modal-hint">Expose all MCPs through one port as <code>/mcp/&lt;id&gt;</code> instead of one port per instance. Instances then bind to localhost only; already running instances pick this up on their next restart.</p>
+        <div class="form-grid">
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-shared-enable" />
+            Enable shared port
+          </label>
+          <label>Port</label>
+          <input type="number" id="settings-shared-port" min="1024" max="65535" placeholder="e.g. 8100" />
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3 class="settings-section-title">Virtual Environments</h3>
         <p class="modal-hint">Each instance runs in its own venv so dependencies stay isolated. The <code>default</code> venv is always available.</p>
         <div id="settings-venv-list" class="venv-list"></div>
@@ -297,8 +332,8 @@
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js" crossorigin="anonymous"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" crossorigin="anonymous"></script>
-  <script src="/app.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js" integrity="sha512-OeZ4Yrb/W7d2W4rAMOO0HQ9Ro/aWLtpW9BUSR2UOWnSV2hprXLkkYnnCGc9NeLUxxE4ZG7zN16UuT1Elqq8Opg==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" integrity="sha512-Vs2GKxnxnTQBRW7o2xXZ9A28njjmu5RToS42efiKNEWmikov0inZY522EtGVK5CcVo0M/FQwmXsTfl9skgRnvw==" crossorigin="anonymous"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .schema import MCPConfig, MCPInstance, MCPStatus
+from .settings_store import atomic_write_text
 from .logger import get_manager_logger
 
 logger = get_manager_logger()
@@ -57,7 +58,7 @@ def load_config(config_id: str) -> Optional[MCPConfig]:
 
 def save_config(cfg: MCPConfig) -> None:
     path = CONFIGS_DIR / f"{cfg.id}.json"
-    path.write_text(json.dumps(cfg.model_dump(), indent=2))
+    atomic_write_text(path, json.dumps(cfg.model_dump(), indent=2))
     logger.info(f"Saved config: {cfg.id}")
 
 
@@ -120,6 +121,16 @@ def _os_port_free(port: int) -> bool:
 
 def find_free_port(start: int = 8101) -> int:
     used = {cfg.server.port for cfg in load_all_configs().values()}
+    # The shared proxy owns its configured port even though it is not an MCP
+    # instance. Reserve it during allocation so a new instance can never be
+    # assigned the proxy's external listener port.
+    try:
+        from .settings_store import load_settings
+        shared_port = load_settings().get("shared_port")
+        if isinstance(shared_port, int):
+            used.add(shared_port)
+    except Exception:
+        pass
     for port in range(start, start + 200):
         if port in used:
             continue
@@ -129,6 +140,12 @@ def find_free_port(start: int = 8101) -> int:
 
 
 def is_port_free(port: int, exclude_id: Optional[str] = None) -> bool:
+    try:
+        from .settings_store import load_settings
+        if load_settings().get("shared_port") == port:
+            return False
+    except Exception:
+        pass
     for cfg_id, cfg in load_all_configs().items():
         if cfg_id == exclude_id:
             continue
@@ -145,6 +162,7 @@ def get_instance_state(config_id: str) -> Optional[MCPInstance]:
                 id=cfg.id,
                 name=cfg.name,
                 description=cfg.description,
+                category=cfg.category,
                 status=MCPStatus.stopped,
                 port=cfg.server.port,
                 host=cfg.server.host,
@@ -157,8 +175,10 @@ def set_instance_state(instance: MCPInstance) -> None:
     _state[instance.id] = instance
 
 
-def get_all_states() -> list[MCPInstance]:
-    configs = load_all_configs()
+def get_all_states(configs: dict[str, MCPConfig] | None = None) -> list[MCPInstance]:
+    """Pass preloaded *configs* to avoid a second directory scan."""
+    if configs is None:
+        configs = load_all_configs()
     result = []
     for cfg in configs.values():
         inst = get_instance_state(cfg.id)

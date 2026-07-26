@@ -99,6 +99,19 @@ def set_mcp_bearer_token(token: Optional[str]) -> None:
     save_settings({"mcp_bearer_token": token})
 
 
+async def is_request_authenticated(request) -> bool:
+    """True when auth is disabled or the request carries a valid Bearer token.
+
+    Used by public routes that serve a reduced guest view to anonymous callers.
+    Parses the header through the same HTTPBearer instance as require_auth so
+    both paths accept exactly the same tokens.
+    """
+    if _password_hash is None:
+        return True
+    credentials = await _bearer(request)
+    return credentials is not None and verify_password(credentials.credentials)
+
+
 def auth_enabled() -> bool:
     return _password_hash is not None
 
@@ -106,6 +119,15 @@ def auth_enabled() -> bool:
 def edit_mode() -> str:
     """Returns 'full' (default), 'upload' (no code editing), or 'readonly' (no mutations)."""
     return os.environ.get("MCP_EDIT_MODE", "full")
+
+
+def edit_mode_locked() -> bool:
+    """True when the edit mode was fixed by a CLI flag (--no-edit / --no-code-edit).
+
+    A CLI-set mode is an operator guarantee — the web UI / API must not be able
+    to lift it at runtime.
+    """
+    return os.environ.get("MCP_EDIT_MODE_LOCKED") == "1"
 
 
 def require_auth(
@@ -122,7 +144,7 @@ def require_auth(
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), _password_hash):
+    if not verify_password(token):
         raise HTTPException(
             status_code=401,
             detail="Invalid password",

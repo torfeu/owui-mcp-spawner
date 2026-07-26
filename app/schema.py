@@ -47,6 +47,8 @@ class MCPConfig(BaseModel):
     id: str
     name: str
     description: str = ""
+    # UI-only grouping label; never part of OpenWebUI tool JSON import/export
+    category: str = ""
     locked: bool = False
     server: ServerConfig
     install: InstallConfig = InstallConfig()
@@ -70,6 +72,7 @@ class MCPInstance(BaseModel):
     id: str
     name: str
     description: str = ""
+    category: str = ""
     status: MCPStatus = MCPStatus.stopped
     port: int
     host: str
