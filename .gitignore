@@ -22,6 +22,7 @@ tools/
 # local scratch files
 chat.txt
 docs/plan-*.md
+docs/bug-*.md
 
 # Claude Code's local settings: the allow-list quotes whole curl commands,
 # tokens and internal addresses included. It was only kept out by
