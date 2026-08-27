@@ -3,13 +3,14 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from .. import shared_proxy
-from ..api_helpers import (TOOLS_DIR, _instance_to_dict, _request_host, _version_from_tool_file, require_not_locked, require_upload_or_edit)
-from ..auth import is_request_authenticated, mcp_bearer_token, require_auth
+from ..activity import forget as forget_usage, read_usage
+from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
+from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
 from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
-from ..schema import MCPStatus, ServerConfig, InstallConfig
+from ..schema import IdentityMode, MCPStatus, ServerConfig, InstallConfig
 from ..security import is_secret_field, mask_secrets, SECRET_MASK
 from ..venv_manager import DEFAULT_VENV
 router = APIRouter()
@@ -20,16 +21,26 @@ def _guest_view(d: dict) -> dict:
 
 def _config_fields(cfg) -> dict:
     """Config-derived display fields shared by the list and detail endpoints."""
+    # Version of the copy in examples/ when it is newer, "" otherwise. Cheap
+    # enough for the polled list: the examples index and both version reads are
+    # mtime-cached, and the installed version is read for this row anyway.
+    bundled = _bundled_version_info(cfg) if cfg else None
     return {
         "locked": cfg.locked if cfg else False,
         "version": _version_from_tool_file(cfg) if cfg else "",
         "venv": cfg.venv if cfg else DEFAULT_VENV,
+        "bundled_update": bundled["version"] if bundled and bundled["update_available"] else "",
+        "identity_mode": cfg.identity_mode.value if cfg else IdentityMode.off.value,
     }
 
 @router.get("/api/instances")
-async def list_instances(request: Request) -> list[dict]:
+async def list_instances(request: Request, include: str = "") -> list[dict]:
     display_host = _request_host(request)
     guest = not await is_request_authenticated(request)
+    # Opt-in only: the default payload is the hot path (polled every few seconds
+    # per open tab) and specs are fat — one control tool alone carries 23 full
+    # JSON schemas. Guests never get them; _guest_view is an allowlist anyway.
+    want_specs = not guest and "specs" in {p.strip() for p in include.split(",")}
 
     def _build() -> list[dict]:
         # One directory scan feeds both the states and the enrichment, and the
@@ -39,8 +50,11 @@ async def list_instances(request: Request) -> list[dict]:
         shared = shared_proxy.configured_port()  # one settings read for the whole list
         result = []
         for s in get_all_states(configs):
+            cfg = configs.get(s.id)
             d = _instance_to_dict(s, display_host, shared)
-            d.update(_config_fields(configs.get(s.id)))
+            d.update(_config_fields(cfg))
+            if want_specs:
+                d["specs"] = _specs_from_tool_file(cfg)["specs"] if cfg else []
             result.append(_guest_view(d) if guest else d)
         return result
 
@@ -57,6 +71,30 @@ async def get_instance(instance_id: str, request: Request) -> dict:
     if not await is_request_authenticated(request):
         return _guest_view(d)
     return d
+
+@router.get("/api/instances/{instance_id}/specs", dependencies=[Depends(require_auth)])
+async def get_specs(instance_id: str) -> dict:
+    """Function catalog of an instance, read straight from its tool JSON.
+
+    Deliberately only behind require_auth and not require_code_edit: these are
+    metadata, not source, so the info dialog keeps working under --no-code-edit
+    and --no-edit.
+    """
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+    info = await asyncio.to_thread(_specs_from_tool_file, cfg)
+    return {
+        "id": instance_id,
+        "description": info["description"] or cfg.description or "",
+        "specs": info["specs"],
+        # Served here rather than in the instance list: the list is polled every
+        # few seconds per tab, and this is one file read per instance.
+        "usage": read_usage(instance_id),
+        # None unless a tool of the same id ships in examples/ — see
+        # _bundled_version_info. Reported, never applied.
+        "bundled": await asyncio.to_thread(_bundled_version_info, cfg),
+    }
 
 @router.get("/api/instances/{instance_id}/config", dependencies=[Depends(require_auth)])
 async def get_config(instance_id: str) -> dict:
@@ -131,6 +169,17 @@ async def update_config(instance_id: str, body: dict) -> dict:
         cfg.lifecycle.auto_start = lc.get("auto_start", cfg.lifecycle.auto_start)
         cfg.lifecycle.restart_on_change = lc.get("restart_on_change", cfg.lifecycle.restart_on_change)
 
+    identity_changed = False
+    if "identity_mode" in body:
+        raw_mode = str(body["identity_mode"]).strip().lower()
+        try:
+            new_identity_mode = IdentityMode(raw_mode)
+        except ValueError:
+            raise HTTPException(422, f"Invalid identity_mode '{raw_mode}': off, optional or required")
+        if new_identity_mode != cfg.identity_mode:
+            cfg.identity_mode = new_identity_mode
+            identity_changed = True
+
     venv_changed = False
     if "venv" in body:
         new_venv = str(body["venv"]).strip()
@@ -159,7 +208,8 @@ async def update_config(instance_id: str, body: dict) -> dict:
 
     # Values only take effect at runner startup, so a changed value needs a
     # restart just like a changed address — gated by restart_on_change below.
-    needs_restart = (server_changed or venv_changed or deps_changed or values_changed)
+    needs_restart = (server_changed or venv_changed or deps_changed or values_changed
+                     or identity_changed)
     restarted = False
     if inst:
         inst.name = cfg.name
@@ -169,7 +219,8 @@ async def update_config(instance_id: str, body: dict) -> dict:
                 # Restart so the subprocess binds the new address / uses the new
                 # venv / picks up freshly installed dependencies.
                 reason = "venv" if venv_changed else "dependencies" if deps_changed \
-                    else "server config" if server_changed else "values"
+                    else "server config" if server_changed \
+                    else "identity mode" if identity_changed else "values"
                 logger.info(f"{reason} changed for '{instance_id}', restarting")
                 await asyncio.to_thread(restart_instance, instance_id)
                 restarted = True
@@ -250,7 +301,9 @@ async def unlock_instance(instance_id: str) -> dict:
     save_config(cfg)
     return {"ok": True, "locked": False}
 
-@router.get("/api/instances/{instance_id}/export", dependencies=[Depends(require_auth)])
+# require_admin_auth: the payload embeds the MCP Bearer token, so this GET is
+# closed to the read-only token.
+@router.get("/api/instances/{instance_id}/export", dependencies=[Depends(require_auth), Depends(require_admin_auth)])
 async def export_instance(instance_id: str, request: Request) -> JSONResponse:
     inst = get_instance_state(instance_id)
     if not inst:
@@ -300,6 +353,7 @@ async def delete_instance(instance_id: str) -> dict:
     cfg = load_config(instance_id)
     if not delete_config(instance_id):
         raise HTTPException(404, "Config not found")
+    forget_usage(instance_id)
     if cfg:
         tool_path = resolve_tool_path(cfg).resolve()
         # Only delete the tool file if no other instance still references it (B8).

@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Per-user access rules. Copy to runtime/identity_policy.json and edit.",
+    "Keys under 'users' are the OpenWebUI user id — the 'sub' claim of the",
+    "forwarded token, not the display name or the e-mail address.",
+    "Deny by default: a user who is not listed here reaches nothing, and",
+    "neither does anyone while this file is missing or unreadable.",
+    "'account' and 'credentials_file' are optional and opaque to the spawner:",
+    "it reads the file and hands the content to the tool that asks for it.",
+    "One account per file, chmod 600, and never a secret in this JSON.",
+    "The value read from the file is its last non-empty line, so an old value",
+    "may stay above the new one during a rotation."
+  ],
+  "default": { "deny": true },
+  "match_email": false,
+  "users": {
+    "8f2c1e94-0000-0000-0000-000000000001": {
+      "account": "anna",
+      "credentials_file": "secrets/accounts/anna",
+      "instances": {
+        "my_instance": ["search_items", "get_item"]
+      }
+    },
+    "8f2c1e94-0000-0000-0000-000000000002": {
+      "account": "ben",
+      "credentials_file": "secrets/accounts/ben",
+      "instances": {
+        "my_instance": "*"
+      }
+    }
+  }
+}

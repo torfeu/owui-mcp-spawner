@@ -21,3 +21,10 @@ tools/
 
 # local scratch files
 chat.txt
+docs/plan-*.md
+
+# Claude Code's local settings: the allow-list quotes whole curl commands,
+# tokens and internal addresses included. It was only kept out by
+# .git/info/exclude, which lives outside the repo and does not survive a
+# fresh clone — so the rule belongs here, where it travels with the code.
+.claude/

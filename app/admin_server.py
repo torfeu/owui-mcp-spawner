@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -7,13 +8,18 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import shared_proxy
+from .activity import prune as prune_usage
 from .api_helpers import APP_VERSION
-from .config_store import (BASE_DIR, find_free_port, get_instance_state, is_port_free, load_all_configs, save_config, set_instance_state)
+from .config_store import (BASE_DIR, find_free_port, get_instance_state, is_port_free, load_all_configs, resolve_tool_path, save_config, set_instance_state)
 from .dependency_manager import install_dependencies
 from .logger import get_manager_logger
 from .process_manager import check_running_instances, start_instance, sync_state_from_pids
 from .schema import MCPStatus
-from .routes import auth, instances, logs, settings, tools, venvs
+from .settings_store import atomic_write_text
+from .tool_editor import validate_tool_code
+from .update_check import update_check_loop
+from .venv_manager import python_path
+from .routes import auth, instances, logs, permissions, settings, tools, usage, venvs
 
 logger = get_manager_logger()
 WATCHDOG_INTERVAL = 10
@@ -34,6 +40,111 @@ async def _watchdog_loop() -> None:
                 await shared_proxy.start_proxy(sp, os.environ.get("MCP_RUNNER_HOST", "127.0.0.1"))
         except Exception as e:
             logger.error(f"Shared-port watchdog error: {e}")
+
+PRUNE_INTERVAL = 24 * 60 * 60
+
+async def _prune_usage_loop() -> None:
+    """Drop usage events past the retention window — once a day, in the manager.
+
+    Deliberately not in the runners: ten processes attempting the same
+    housekeeping would only fight over the write lock. `totals` is never
+    pruned, so "ever used" survives any retention setting.
+    """
+    # The old JSON counters were superseded by runtime/usage.db before anyone
+    # collected real data with them.
+    legacy = BASE_DIR / "runtime" / "activity"
+    if legacy.is_dir():
+        try:
+            for stale in legacy.glob("*.json"):
+                stale.unlink(missing_ok=True)
+            legacy.rmdir()
+            logger.info("Removed the superseded JSON usage counters")
+        except Exception as e:
+            logger.debug(f"Could not remove legacy usage counters: {e}")
+
+    while True:
+        try:
+            removed = await asyncio.to_thread(prune_usage)
+            if removed:
+                logger.info(f"Pruned {removed} usage event(s) past the retention window")
+        except Exception as e:
+            logger.debug(f"Usage pruning failed: {e}")
+        await asyncio.sleep(PRUNE_INTERVAL)
+
+_SPECS_MIGRATION_MARKER = BASE_DIR / "runtime" / ".specs_migrated"
+
+async def _migrate_tool_specs() -> None:
+    """One-time: rebuild the `specs` of installed tools from their own code.
+
+    Tools uploaded as a finished OpenWebUI JSON kept whatever specs that export
+    carried — frequently just the first line of each docstring, cut off
+    mid-sentence. Those descriptions are exactly what the info dialog, the
+    specs API and a tool router hand to a model, so a truncated one is worse
+    than none: it reads like a complete sentence and isn't. The generator that
+    every framework-created tool already uses derives them in full from the
+    same code.
+
+    New uploads are fixed at the source (`_provision_new_tool`); this repairs
+    what is already installed. Runs in the background so a slow validation
+    never delays the boot, rewrites a file only when the specs actually differ,
+    and ignores the instance lock on purpose: `content` stays untouched, only a
+    derived field is recomputed — "don't modify this tool" must not mean "keep
+    describing it wrongly forever".
+    """
+    if _SPECS_MIGRATION_MARKER.exists():
+        return
+    configs = load_all_configs()
+    if not configs:
+        return
+
+    repaired, failed = [], []
+    for cfg in configs.values():
+        try:
+            tool_path = resolve_tool_path(cfg)
+            if not tool_path.exists():
+                continue
+            raw = json.loads(tool_path.read_text())
+            entry = raw[0] if isinstance(raw, list) and raw else raw
+            if not isinstance(entry, dict):
+                continue
+            code = entry.get("content") or ""
+            if not code.strip():
+                continue  # MCP-config style instance without embedded code
+
+            validation = await asyncio.to_thread(
+                validate_tool_code, code, str(python_path(cfg.venv))
+            )
+            specs = validation.get("tools") if validation.get("valid") else None
+            if not specs:
+                failed.append(cfg.id)
+                continue
+            if specs == entry.get("specs"):
+                continue  # already current — don't churn the mtime or the cache
+
+            entry["specs"] = specs
+            atomic_write_text(tool_path, json.dumps(raw, indent=2, ensure_ascii=False))
+            repaired.append(cfg.id)
+        except Exception as e:
+            logger.warning(f"Specs migration failed for '{cfg.id}': {e}")
+            failed.append(cfg.id)
+
+    if repaired:
+        logger.info(
+            f"Rebuilt tool specs from code for {len(repaired)} instance(s): "
+            f"{', '.join(sorted(repaired))}"
+        )
+    if failed:
+        # Retried on the next start: a tool whose imports are momentarily
+        # broken must not be written off permanently.
+        logger.warning(
+            f"Specs migration incomplete — could not validate: {', '.join(sorted(failed))}"
+        )
+        return
+    try:
+        _SPECS_MIGRATION_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _SPECS_MIGRATION_MARKER.write_text("done\n")
+    except Exception as e:
+        logger.warning(f"Could not write specs migration marker: {e}")
 
 _VENV_MIGRATION_MARKER = BASE_DIR / "runtime" / ".venv_migrated"
 
@@ -115,12 +226,23 @@ async def _lifespan(app: FastAPI):
         await asyncio.to_thread(start_instance, cfg.id)
 
     watchdog = asyncio.create_task(_watchdog_loop())
+    # No-op while the update check is switched off (the default) — it reads the
+    # setting on every pass, so toggling it needs no restart.
+    updates = asyncio.create_task(update_check_loop())
+    # One-time repair, in the background: validating every tool costs a
+    # subprocess each and must not hold up the boot or the auto-start above.
+    specs = asyncio.create_task(_migrate_tool_specs())
+    pruner = asyncio.create_task(_prune_usage_loop())
     yield
     watchdog.cancel()
+    updates.cancel()
+    specs.cancel()
+    pruner.cancel()
     await shared_proxy.stop_proxy()
 
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
-for router in (auth.router, instances.router, tools.router, logs.router, venvs.router, settings.router):
+for router in (auth.router, instances.router, tools.router, logs.router, venvs.router,
+               settings.router, usage.router, permissions.router):
     app.include_router(router)
 
 @app.middleware("http")

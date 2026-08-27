@@ -50,8 +50,20 @@ MCP endpoints are then reachable at `http://<your-ip>:<port>/mcp`.
 
 The instance table is the main view. Next to ID, name, status, port, venv and URL it shows:
 
-- **Category** — a free-text grouping label (e.g. `Smart Home`, `Search`, `Utilities`) that you can set when uploading a JSON, when creating a tool in the editor, or later in **Edit → Category**. It is a spawner-side label only: it lives in the MCP config, never in the tool's Python code or its OpenWebUI JSON, so changing it neither rewrites the tool nor restarts the instance.
-- **Version** — read from the tool's `version:` docstring line (or `meta.manifest.version`).
+- **Category** — a free-text grouping label (e.g. `Smart Home`, `Search`, `Utilities`) that you can set when uploading a JSON, when creating a tool in the editor, or later in **Edit → Category**. It is a spawner-side label: it lives in the MCP config, so changing it neither rewrites the tool nor restarts the instance. A tool may declare a **default** for it in its docstring header, next to `version:`:
+
+  ```python
+  """
+  title: My Tool
+  version: 0.1.0
+  category: Smart Home
+  """
+  ```
+
+  Read only at install time and only when no category was given — the shipped control tool and tool router declare `System` this way, so a fresh install sorts them out of the way without anyone setting it by hand.
+- **Version** — read from the tool's `version:` docstring line (or `meta.manifest.version`). If the tool was installed from `examples/` and the spawner ships a newer copy, an orange `↑ x.y.z` marker sits next to it; the Info dialog spells out which file to copy from (see *Info view*).
+- **🔑 Users & permissions** — who may run which tools, assigned from a list of the people who have actually called (see *Per-user identity*)
+- **User identity** — in **Edit** a dropdown decides whether this instance cares who is calling: `off`, `optional` or `required` (see *Per-user identity*). It warns right there when no shared secret and no trusted headers are configured, because that combination fails silently later. Changing it restarts the instance, like a changed port or venv.
 
 Above the table sits a filter bar:
 
@@ -59,6 +71,42 @@ Above the table sits a filter bar:
 - **Category dropdown** — built from the categories actually in use; `All categories` clears the filter
 
 Both filters are client-side and combine. The spawner's own version is shown as a badge next to the title in the header.
+
+### Info view
+
+Every row has an **Info** button. It opens a dialog with the instance's description, category, version, venv and status — plus the **list of functions the tool actually provides**: name, description and every parameter with its type and whether it is required.
+
+The function list is read straight from the `specs` block of the tool JSON in `tools/`, which the spawner rewrites on every code change. So it works without starting the instance and without executing any uploaded code. The dialog fetches on open, never in the polling cycle.
+
+The dialog also shows **usage**: how often a tool of this instance has been called, when that last happened and which function it was — or *never used*, which is the more useful answer when you are deciding what to keep running.
+
+Counted in the instance itself, not in the shared proxy: with one port per instance the manager is not in the data path at all and would see nothing. Only `tools/call` counts — a client sends `initialize` and `tools/list` on every connection regardless of use, so counting those would make every instance look equally busy.
+
+Every call is recorded individually (time, instance, function) in `runtime/usage.db`, a SQLite database, so any period can be evaluated afterwards — including *per function*, which is what tells you that half a tool's surface is never used and only costs context. Two tables: the event log is pruned to the retention window, the totals are not, so *ever used* survives any retention setting. Deleting an instance deletes both. Time, instance and function name only — never arguments, results or caller addresses.
+
+Written by the runners while the manager reads: WAL mode plus a busy timeout, and the write is queued rather than done inside the call — a lock held by another instance must never delay a tool call. Under load the queue is written as one transaction per burst, while an idle instance is written through immediately.
+
+**Tools installed from `examples/` are checked against the shipped copy.** The instance table carries a compact `↑ x.y.z` marker next to the version, and the Info dialog the full `Update x.y.z` badge — the same badge the header uses for a spawner update, so *outdated* looks identical everywhere — plus the path of the file to copy from. Matched by instance id against the `id` in the shipped file, compared with `packaging.version` rather than as strings. A tool installed under a different id is not recognised.
+
+**The badge is a button.** Clicking it asks first — spelling out that the tool's code is replaced, that the Valve values survive and that the previous version is kept — and then applies the shipped copy through the same path as a manual save: dependencies installed, code validated in the instance venv, Valves synced, instance restarted if it was running.
+
+What makes that safe enough to offer is the snapshot: `PUT /api/instances/{id}/tool-code` writes the previous tool JSON to `runtime/history/<id>/<timestamp>.json` (last 10 kept) before anything is overwritten, so an adapted copy can be recovered. It is still an overwrite, so the question is not a formality.
+
+The update is **forward only** — a request to "update" to a version that is not newer is refused with `409`, so a stale page cannot roll a tool back. Locked instances refuse with `403` and read-only mode hides the button entirely; in both cases the badge stays as a plain marker and says why.
+
+Info is metadata, not source: the button stays available under `--no-code-edit` and `--no-edit`, and is hidden in guest mode.
+
+### Usage statistics
+
+The **📊** button in the header opens a report across all instances: calls within a chosen window (24 h / 7 / 30 / 90 days), calls in total, when each was last used, and a bar per day. Click a row to break it down **per function** — which is where it gets interesting: a tool whose ten functions include three nobody ever calls is carrying schemas through every request for nothing.
+
+Ranked by the calls within the window, not by the lifetime total: the total favours whatever has been installed longest and answers "what was once important", not "what do I use". Instances never called are listed separately at the end — with a tool router, stopping one removes it from the catalog and frees the context its schemas occupied.
+
+Instances in the **System** category (the control tool, a tool router) are shown apart, because they record their own traffic and would otherwise always top the ranking without being tools anyone deliberately uses.
+
+Data comes from `GET /api/usage?days=N`, fetched when the dialog opens — never in the polling cycle. Hidden in guest mode.
+
+> Since v0.1.3 the `specs` are always derived from the tool's own code, including for uploaded OpenWebUI JSONs — those often carry only the first line of each docstring. Existing installations are repaired once on the next start.
 
 ---
 
@@ -69,11 +117,36 @@ The web UI includes a **⚙ Settings** page (top-right button) for managing comm
 - **Password** — set or change the password (requires current password if one is already set); persisted as SHA-256 hash in `runtime/settings.json`
 - **Edit mode** — switch between full / upload-only / readonly at runtime
 - **MCP Bearer Token** — set, reveal (👁), generate (⟳), or remove the token that protects all MCP endpoints; stored in `runtime/settings.json`
+- **API Read Token** / **Agent Token** — same controls for the two optional API tokens that tools can carry instead of the password: read-only (`GET` only) and read/write (see *API tokens*)
+- **User Identity** — the secret OpenWebUI signs its forwarded user token with, plus the switch that accepts its plain, unsigned user headers instead (see *Per-user identity*). The secret field is write-only: no reveal button and no generator, because the value is a copy of what another system already has, not one this server invents
 - **Shared MCP Port** — expose all MCPs through one port as `/mcp/<id>` (see below)
 - **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
+- **Usage Tracking** — how long individual tool calls are kept (7 / 30 / 90 / 365 days or indefinitely); the per-function totals are always kept
+- **Update Check** — off by default; when enabled, the server asks GitHub once a day whether a newer release exists, plus a **Check now** button for a one-off check (see below)
 - **Restart** — restart the spawner process from the UI
 
 All settings survive restarts. CLI flags always take precedence over saved settings.
+
+---
+
+## Update check
+
+Releases live on GitHub only, so a running installation would never learn that a newer version exists. The **Update Check** switch on the Settings page closes that gap — **off by default**, and deliberately so: the check is an outgoing request that tells GitHub this installation exists (its IP and the time). For a tool meant to run on your own machine, "on unless you turn it off" would break that promise.
+
+When you switch it on:
+
+- The **server** requests `https://api.github.com/repos/torfeu/owui-mcp-spawner/releases/latest` once — immediately, so you get an answer right away — and from then on at most every 24 h. Nothing else is sent: no version, no instance list, no identifier.
+- `tag_name` is compared against the running version with `packaging.version` (not as a string — otherwise `0.1.10` would count as older than `0.1.9`).
+- The result (`latest_version`, `html_url`, `last_checked`) is cached in `runtime/settings.json`. **The browser never contacts GitHub** — the UI only reads the server's cache, so no viewer's IP is exposed.
+- If a newer version exists, a small badge appears next to the version in the header, linking to the release page. It shows up **after login only**, never in guest mode: the bare version number is already public via `/api/auth-status`, but "this instance is outdated" is the more useful sentence for a stranger, and stays behind the login.
+
+**Check now** — the button next to the switch runs a single check on the spot, ignoring both the 24 h cache and the switch itself. That the automatic check is opt-in is about unrequested background traffic; a click is exactly the request that was missing. The answer appears right below the checkbox: version available, up to date, or *why* it failed — a check you waited for must not report "up to date" when GitHub was never reached. With the switch off, nothing is written to disk.
+
+Turning the switch back off deletes the cached result as well.
+
+The check **only reports** — it never updates anything. A tool that spawns processes and runs Python does not overwrite itself; upgrade with `git pull` as usual.
+
+Failures (no internet, DNS dead, GitHub down, rate limit) are silent: the previous cache is kept and a single line is logged at debug level. A server without internet access notices nothing.
 
 ---
 
@@ -170,13 +243,155 @@ In OpenWebUI, set the token as Bearer token when adding the MCP connection. In C
 
 ---
 
+## Per-user identity (who is calling)
+
+The Bearer token above answers *may this client connect*. It says nothing about **which person** is using that client: one token serves every user of an OpenWebUI installation, so a tool that holds credentials of its own acts with the same rights for everybody.
+
+OpenWebUI can forward the signed-in user as an HS256-signed JWT. When the spawner shares that secret, each runner verifies the token and publishes the verified user for the duration of one tool call — so a tool can act *as that user*, and access rules can be applied per user.
+
+**Setup.** In OpenWebUI (0.11.0 or newer):
+
+```
+ENABLE_FORWARD_USER_INFO_HEADERS=true
+FORWARD_USER_INFO_HEADER_JWT_SECRET=<a strong shared secret>
+```
+
+In the spawner, the same secret — environment variable, or the Settings page (write-only; it is never handed back out):
+
+```bash
+MCP_USER_JWT_SECRET=<the same secret>
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `MCP_USER_JWT_SECRET` | *(unset)* | Shared secret. Unset = no identity is ever verified. |
+| `MCP_USER_JWT_HEADER` | `X-OpenWebUI-User-Jwt` | Header carrying the token. |
+| `MCP_USER_JWT_ISSUER` | `open-webui` | Required `iss` claim. |
+| `MCP_USER_TRUST_HEADERS` | *(off)* | Accept OpenWebUI's plain user headers when no token is sent (see below). |
+| `MCP_IDENTITY_POLICY` | `runtime/identity_policy.json` | Access-rule file. |
+
+**Per instance**, the **User identity** dropdown in the config dialog (`identity_mode` in the config file) decides how much the instance cares:
+
+| Mode | Behaviour |
+|---|---|
+| `off` (default) | As before. Nothing changes for existing instances. |
+| `optional` | A valid token is published to the tools; a missing one is not an error and **no rules are applied**. For migration and diagnosis — not a boundary. |
+| `required` | No verified user, no tool call. Access rules apply on top and deny by default. |
+
+Only HS256 is accepted, `exp`/`iat` are checked with 60 seconds of leeway for clock drift between the two hosts, and a token without `sub` is refused. **After changing the secret, restart each MCP server** — runners read it at startup, exactly like the Bearer token.
+
+### Without a shared secret: trusting the plain headers
+
+With `ENABLE_FORWARD_USER_INFO_HEADERS=true` but no secret, OpenWebUI sends four ordinary headers instead of a token: `X-OpenWebUI-User-Id`, `-Email`, `-Name`, `-Role`. Set `MCP_USER_TRUST_HEADERS=1` (or tick *Trust OpenWebUI's plain user headers* in the Settings page) to accept them as an identity. Everything downstream — modes, rules, per-user credentials — then works exactly the same.
+
+Know what you are choosing. Those headers are a **claim, not a proof**: anyone who can reach an instance's port with the MCP Bearer token can write them by hand, and that token is shared by every user. This mode separates the users of one OpenWebUI installation from each other, which is a real and often sufficient goal — it does not defend the port. Use it when nobody you are guarding against can reach that port; otherwise use the secret.
+
+The line stays visible where it matters: a signed token always wins when both arrive, a *broken* token is refused rather than falling back to the weaker proof, and `whoami` labels an unsigned identity as such.
+
+### Checking the setup: the Identity Probe
+
+`examples/identity-probe.json` ships a single read-only tool, `whoami`. Install it first, switch it to `optional`, and ask it from a chat: it reports who arrived (`sub`, e-mail, name, role), whether the identity was signed or taken from the plain headers, and what the access rules grant that person. It never prints a token, a password or any other credential, so its output is safe to paste anywhere.
+
+Set-up mistakes are otherwise silent — a wrong secret, an instance that was not restarted and a mode left on `off` all look the same from a chat window. When no user arrives, the probe names the accepted proof and, for the signed variant, the first twelve hex characters of the secret's SHA-256. The same twelve characters must come out of
+
+```bash
+docker exec open-webui printenv FORWARD_USER_INFO_HEADER_JWT_SECRET | tr -d '\n' | shasum -a 256 | cut -c1-12
+```
+
+Two systems have to agree on one string that neither may display; comparing fingerprints settles it without revealing anything.
+
+### Users & permissions (the 🔑 dialog)
+
+Rights are assigned in the dashboard, not in a text editor. The **🔑** button opens a list of everyone the runners have actually seen — recorded on their first verified call, so a new colleague appears the moment they use anything — plus everyone a rule already names.
+
+That recording happens in `optional` as well as `required`, which is what makes the natural order of work possible: switch an instance to `optional`, let everyone use it once, collect who turns up, assign rights from the list, then switch to `required`. An instance on `off` never looks at the header and records nobody. Pick a person, and per governed instance choose *no access*, *all tools* or *selected tools* with the function list right there. Someone who has never called can be added by hand with their user id: a rule may exist before its first use.
+
+Two things the list marks, because both are easy to miss. A green dot means rules exist for that person. A **?** means a rule names a user who has never called — which is what a mistyped user id looks like, and otherwise the rule would silently never apply.
+
+Only instances set to `required` are offered: a checkbox that governs nothing would be a promise the framework does not keep. Saving takes effect on the next call — the rules file is read per call, so nothing needs restarting.
+
+Two switches sit at the bottom. *Match by e-mail* lets a rule find its user by address when the id does not match — an address can be reassigned by an admin. *Match by name* does the same for the display name and is labelled unsafe on purpose: **the user can change that themselves in OpenWebUI**, so anyone could rename into someone else's rule. Both are off by default; the user id is always matched and cannot be switched off.
+
+**Roles** are the second tab of the same list. OpenWebUI's token carries no groups, but it does carry a role, and that one is signed — so a role is the closest thing to a group available here. It works as base equipment: a personal entry adds to what the role grants rather than replacing it, per instance, and an explicit deny on the person wins over everything. *Every admin may search the law database, but Nextcloud only for whoever is named.*
+
+### Callers without a login
+
+An agent CLI, a script or a cron job has no OpenWebUI session, so `required` would lock it out. Give that instance a machine identity in its config:
+
+```json
+"machine_identity": { "sub": "codex-agent", "name": "Codex CLI", "role": "agent" }
+```
+
+It stands in when no user token arrives, and the rules then apply to the machine like to anyone else — which is the gain: an agent can be given three tools instead of all of them. It is *assigned*, not verified: whoever reaches that port with the MCP Bearer token is this identity. That is no weaker than the instance was before, but give it its own id and its own account rather than pointing it at a person's.
+
+A real token still wins over it, and a **broken** token is still refused — falling back to the machine identity there would quietly upgrade a forged token into a working one.
+
+### Access rules
+
+`runtime/identity_policy.json` maps the stable OpenWebUI user id (the JWT's `sub`) to what that person may reach. See `examples/identity-policy.example.json`.
+
+```json
+{
+  "default": { "deny": true },
+  "users": {
+    "8f2c…": {
+      "account": "anna",
+      "credentials_file": "secrets/accounts/anna",
+      "instances": {
+        "my_instance": ["search_items", "get_item"],
+        "another_instance": "*"
+      }
+    }
+  }
+}
+```
+
+Deny by default: an unknown user, a missing file and an unreadable file all mean no access. Rules are keyed by `sub` because display names and addresses change; `"match_email": true` enables matching by e-mail instead, and an ambiguous address matches nobody.
+
+Forbidden tools are hidden from `tools/list` **and** refused when called by name — the listing is a courtesy, the call is the boundary. A router or any other proxy in front enforces nothing.
+
+The shipped **MCP tool router** (v0.0.8) passes the user token on to whichever instance it routes to, unchanged, alongside its own Bearer token — and forwards nothing else of the incoming request. In the plain-header mode it rebuilds those four headers instead, since there is no token to hand on. Give the router `identity_mode: optional` so its runner verifies the caller; the instance behind it decides what that identity is worth. The router's directory is not filtered by the rules: a forbidden tool is still listed, and refused when called.
+
+### Per-user credentials
+
+`account` and `credentials_file` let a tool act under the user's own backend account instead of one shared login. The framework treats both as opaque: it reads the file and hands the value to the tool. One account per file, `chmod 600`, never a secret in the JSON.
+
+The value is the **last non-empty line** of the file, not the whole content — so a rotation can leave the previous value above the new one, and a comment line on top is allowed. A single line with a trailing newline behaves as expected.
+
+In the tool:
+
+```python
+try:
+    from app.identity import get_current_identity
+    from app.policy import credentials_for_current_user
+except ImportError:          # running inside OpenWebUI itself, not the spawner
+    get_current_identity = credentials_for_current_user = lambda: None
+
+async def search_items(self, query: str) -> str:
+    credentials = credentials_for_current_user()
+    if credentials is None:
+        return "No account is configured for you."
+    client = build_client(credentials.account, credentials.secret)   # per call!
+    ...
+```
+
+**Resolve credentials per call and keep nothing user-specific on the Tools instance.** One instance serves every caller concurrently; a client cached on `self` is how two users end up sharing one account. A synchronous tool works the same way — `asyncio.to_thread` carries the context into the worker thread.
+
+One limit worth stating plainly: credentials inherit the rights of *their* account. Handing each person a different key separates them only if the backend has a separate account per person.
+
+---
+
 ## Authentication
 
 | Variable | Description |
 |---|---|
 | `MCP_MANAGER_PASSWORD` | Plain-text password — hashed with SHA-256 at startup |
 | `MCP_MANAGER_PASSWORD_HASH` | Pre-hashed SHA-256 hex digest (takes precedence) |
+| `MCP_MANAGER_READ_TOKEN` | Optional read-only API token, valid on `GET` requests only (see below). Takes precedence over the value saved in the Settings page. |
+| `MCP_MANAGER_AGENT_TOKEN` | Optional API token for agents that also write; valid on every method except the credential routes (see below). Takes precedence over the value saved in the Settings page. |
 | `MCP_BEARER_TOKEN` | Bearer token for MCP endpoints when starting runner/server components directly. With `app/manager.py`, use `--mcp-token` or the Settings page. |
+| `MCP_USER_JWT_SECRET` | Shared secret for the forwarded end-user token. A different question from the ones above — *which person* is calling, not whether the client may (see *Per-user identity*). |
+| `MCP_USER_TRUST_HEADERS` | Accept OpenWebUI's plain, unsigned user headers instead of a signed token (see *Per-user identity*). |
 
 When auth is active:
 - The web UI shows a login screen. The password is verified against a protected endpoint (`GET /api/auth-check`) — wrong passwords are rejected immediately.
@@ -188,7 +403,7 @@ When auth is active:
 
 `GET /api/instances` and `GET /api/instances/{id}` stay reachable without a token, but answer anonymous callers with a reduced payload — only `id`, `name`, `description`, `category`, `status` and `version`. Ports, URLs, venv, PID and lock state are omitted, so a guest can see *that* a tool exists and whether it runs, but not how to reach it.
 
-In the UI this is the **Continue as guest** view: the instance table drops the Port, Venv, URL and Actions columns, and the upload, editor and settings buttons disappear. A **Login** button switches to the authenticated view at any time; **Logout** discards the token and returns to guest mode.
+In the UI this is the **Continue as guest** view: the instance table drops the Port, Venv, URL and Actions columns, and the upload, editor, statistics, permissions and settings buttons disappear — the routes behind them refuse an anonymous caller anyway, so the hiding is tidiness rather than the boundary. A **Login** button switches to the authenticated view at any time; **Logout** discards the token and returns to guest mode.
 
 ![Guest view](Screen_Guest.png)
 
@@ -196,22 +411,56 @@ In the UI this is the **Continue as guest** view: the instance table drops the P
 
 Guest mode only exists when a password is set — without auth every route is open anyway. Every other route, including `/api/instances/{id}/config`, the logs and the export, still requires the Bearer token.
 
+### API tokens
+
+Tools that talk to this API — the [tool router](#one-connection-for-all-tools-mcp-tool-router), the [control tool](#managing-the-spawner-over-mcp-control-tool) — need a credential to get past the guest view. Handing them the password means storing it in clear text inside an instance config, and it cannot be revoked without changing the password itself, which logs you out of the dashboard and breaks every other tool at the same time.
+
+Two optional tokens exist for that. Both are set in **Settings** (👁 reveals, ⟳ generates) or via an environment variable, and go into the tool's `auth_token` value instead of the password. The tools themselves need no change — it is a Bearer token like any other.
+
+| | **Read token** | **Agent token** |
+|---|---|---|
+| For | the tool router, read-only agents | the control tool with write actions enabled |
+| Valid on | `GET` only — every other method answers `401` | every method |
+| Variable | `MCP_MANAGER_READ_TOKEN` | `MCP_MANAGER_AGENT_TOKEN` |
+
+Both are refused with `403` on the routes that handle credentials, which stay password-only:
+
+- `/api/settings/mcp-token`, `/api/settings/read-token`, `/api/settings/agent-token` — they return a credential verbatim.
+- `GET /api/instances/{id}/export` — its payload embeds the MCP token.
+- `PUT /api/settings` — it sets the password. A token that can write a new password *is* the password, so the agent token stops here; the control tool never needed the route (it reads settings via `GET`).
+
+The rule is the HTTP method, decided in [one place](app/auth.py), not a per-route list: a mutating route cannot forget to opt out of the read token, because it is not a `GET`.
+
+Both are optional and independent — unset means "password only", exactly as before. Neither can be set to the password or to the other token, and `--no-token-edit` blocks editing them, same as the MCP token.
+
+**On the agent token's reach, plainly.** It can upload and save tool code, and that code runs on this machine. Anyone holding it can execute code as the spawner user. It is not a sandbox and not a lesser admin: it is a *rotatable stand-in* for the password that never has to be typed into a login form, cannot read out the other credentials, and cannot promote itself. If you want an actually smaller blast radius, turn the write Valves off on the control tool and give it the read token instead.
+
 ### Protected routes (require Bearer token)
 
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/api/auth-check` | Token validation endpoint |
-| `GET` | `/api/settings` | Spawner settings — auth, edit mode (plus `edit_mode_locked`), MCP token status, `shared_port` and `shared_proxy_running` |
-| `PUT` | `/api/settings` | Update settings |
-| `GET` | `/api/settings/mcp-token` | Retrieve current MCP token value *(blocked by `--no-token-edit`)* |
+| `GET` | `/api/settings` | Spawner settings — auth, edit mode (plus `edit_mode_locked`), MCP token status, `read_token_set`, `agent_token_set`, `shared_port`, `shared_proxy_running`, `usage_retention_days`, `user_jwt_secret_set`, `user_trust_headers` and `update` (cached update-check result) |
+| `PUT` | `/api/settings` | Update settings *(password only — it sets the password and both API tokens)* |
+| `GET` | `/api/settings/mcp-token` | Retrieve current MCP token value *(password only; blocked by `--no-token-edit`)* |
+| `GET` | `/api/settings/read-token` | Retrieve current API read token value *(password only; blocked by `--no-token-edit`)* |
+| `GET` | `/api/settings/agent-token` | Retrieve current agent token value *(password only; blocked by `--no-token-edit`)* |
+| `GET` | `/api/usage` | Usage per instance and per function — calls within `?days=N` (default 7), totals, first/last use and a per-day series. Every known instance is listed, including those never used |
+| `GET` | `/api/identities` | Users the runners have seen — `sub`, name, e-mail, role, how the identity was established, first/last seen, plus `has_rules` and `never_seen` so a rule naming somebody who never called is visible instead of silently inert |
+| `DELETE` | `/api/identities/{sub}` | Forget one user from the roster. Not a revocation: their rules stay, and they reappear on their next call *(blocked by `--no-edit`)* |
+| `GET` | `/api/policy` | The access rules as stored, plus the file path. Reports a broken file in `error` rather than only in a log — while it is broken, every rule denies |
+| `PUT` | `/api/policy` | Replace the access rules *(password only — assigning an account hands that account's data to a person)*. Validated for shape, and refused outright when an entry carries a `password`/`secret`/`token` field: secrets belong in the file `credentials_file` points at. Live on the next call, no restart |
+| `POST` | `/api/policy/preview` | What would this user be allowed, as the rules stand? Applies the real lookup — role, personal entry, deny, matching switches — to a hypothetical caller |
+| `POST` | `/api/settings/update-check` | Run one update check immediately ("Check now"), ignoring the switch and the 24 h cache; reports failures instead of claiming "up to date". Persists the result only while the check is enabled |
 | `POST` | `/api/server/restart` | Restart the spawner process |
 | `GET` | `/api/instances/{id}/config` | Full config; secret values are masked and `secret_fields` lists which keys the server classified as credentials, so the edit dialog never has to guess |
+| `GET` | `/api/instances/{id}/specs` | Function catalog — `{id, description, specs:[{name, description, parameters}], usage, bundled}`, read from the tool JSON plus the instance's usage counters. `bundled` compares the installed version against the copy shipped in `examples/` (`null` when none ships under that id). Metadata only, therefore **not** blocked by `--no-code-edit` |
 | `GET` | `/api/instances/{id}/tool-code` | Python source of a tool *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/instances/{id}/logs/install` | Install log |
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
 | `POST` | `/api/instances/upload` | Upload & install a new tool; accepts optional `category`, `venv` and `port` form fields. Category is stored in the MCP config without modifying the uploaded tool JSON *(blocked by `--no-edit`)* |
 | `POST` | `/api/tools/create` | Create & install a new tool from raw Python code in one step; accepts optional `category` (installs deps, validates in the venv, fills values) *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts). `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts), `identity_mode`. `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
 | `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code; installs newly declared `requirements:` and syncs Valve values *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/venvs` | List virtual environments with instance counts |
 | `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
@@ -220,9 +469,10 @@ Guest mode only exists when a password is set — without auth every route is op
 | `POST` | `/api/instances/{id}/stop` | Stop (allowed even when locked) |
 | `POST` | `/api/instances/{id}/restart` | Restart *(blocked while locked)* |
 | `POST` | `/api/instances/{id}/reinstall` | Reinstall dependencies *(blocked while locked)* |
+| `POST` | `/api/instances/{id}/update-from-example` | Replace the instance's code with the copy shipped in `examples/` under the same id. Forward only — `409` when the shipped version is not newer, `404` when nothing ships under that id. Goes through the same save path (validation, Valve sync, history snapshot, restart) *(blocked while locked; blocked by `--no-edit`)* |
 | `POST` | `/api/instances/{id}/lock` | Lock the instance (blocks modifications, see *Instance locking*) *(blocked by `--no-edit`)* |
 | `POST` | `/api/instances/{id}/unlock` | Unlock the instance *(blocked by `--no-edit`)* |
-| `GET` | `/api/instances/{id}/export` | Download an OpenWebUI MCP-connection JSON for this instance |
+| `GET` | `/api/instances/{id}/export` | Download an OpenWebUI MCP-connection JSON for this instance *(password only — the payload carries the MCP token)* |
 | `POST` | `/api/tools/validate` | Validate tool code; pass an optional `instance_id` to validate in that instance's venv so its installed dependencies resolve *(blocked by `--no-code-edit`)* |
 | `POST` | `/api/tools/export` | Export tool as OpenWebUI JSON *(blocked by `--no-code-edit`)* |
 | `DELETE` | `/api/instances/{id}` | Delete *(blocked by `--no-edit`)* |
@@ -232,7 +482,7 @@ Guest mode only exists when a password is set — without auth every route is op
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/api/auth-status` | Returns `{"auth_enabled": bool, "edit_mode": "full"\|"upload"\|"readonly", "version": str}` |
-| `GET` | `/api/instances` | Instance list — full records (status, ports, URLs, venv, lock state) with a valid token, reduced guest records without one (see *Guest mode*) |
+| `GET` | `/api/instances` | Instance list — full records (status, ports, URLs, venv, lock state, `bundled_update`, `identity_mode`) with a valid token, reduced guest records without one (see *Guest mode*). `?include=specs` adds each instance's function catalog; opt-in because the default payload is polled by every open tab, and never served to guests |
 | `GET` | `/api/instances/{id}` | Single instance — same token-dependent shape as the list |
 | `GET` | `/api/tools/template` | Starter template for the editor |
 
@@ -404,9 +654,63 @@ The definition lives in `examples/mcp-manager-control.json` (instance id `mcp_ma
 1. Upload `examples/mcp-manager-control.json` (or paste it into the editor) to create and install the `mcp_manager_control` instance, then start it.
 2. In your client add it as an MCP server at `http://<host>:<port>/mcp`, with the Bearer token if MCP auth is enabled.
 
-**Available tools (23):** `list_instances`, `get_instance`, `get_instance_config`, `get_settings`, `get_install_log`, `get_runtime_log`, `get_tool_code`, `get_tool_template`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `restart_manager`, `create_tool`, `upload_tool`, `save_tool_code`, `validate_tool_code`, `export_tool`, `update_instance_category`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv`, `delete_instance`.
+**Available tools (25):** `list_instances`, `get_instance`, `get_instance_config`, `get_instance_specs`, `get_settings`, `get_usage_stats`, `get_install_log`, `get_runtime_log`, `get_tool_code`, `get_tool_template`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `restart_manager`, `create_tool`, `upload_tool`, `save_tool_code`, `validate_tool_code`, `export_tool`, `update_instance_category`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv`, `delete_instance`.
 
-**Security — enforced server-side, granular per action.** The control instance carries one `allow_*` Valve per action (`allow_delete`, `allow_create_tool`, `allow_restart`, `allow_manager_restart`, …). Read-only actions are on by default; destructive ones (e.g. `delete_instance`) stay disabled until you flip their Valve in **Edit → Values** (the spawner restarts the instance itself, so the change takes effect right away) — so an agent can never do more than you've allowed. Write operations also need the spawner password, supplied to the control instance via the `auth_token` Valve; `manager_url` points it at the spawner API. The global edit mode (`--no-edit` / `--no-code-edit`) still applies on top.
+**Security — enforced server-side, granular per action.** The control instance carries one `allow_*` Valve per action (`allow_delete`, `allow_create_tool`, `allow_restart`, `allow_manager_restart`, …). Read-only actions are on by default; destructive ones (e.g. `delete_instance`) stay disabled until you flip their Valve in **Edit → Values** (the spawner restarts the instance itself, so the change takes effect right away) — so an agent can never do more than you've allowed. Write operations also need a credential, supplied to the control instance via the `auth_token` Valve; `manager_url` points it at the spawner API. Give it the [agent token](#api-tokens) rather than the password — it does the same job, is revocable on its own, and cannot read out the other credentials or set a new password. With every write Valve off, the read token is enough and the reach shrinks to reading. The global edit mode (`--no-edit` / `--no-code-edit`) still applies on top.
+
+---
+
+## One connection for all tools (MCP tool router)
+
+With one MCP connection per instance, every OpenWebUI request carries *every* function of *every* connected tool. Ten instances with ~50 functions are roughly 12.000 tokens of schemas in each and every request — before the user has said a word, and even when a single tool is needed.
+
+The **tool router** in `examples/mcp-tool-router.json` (instance id `mcp_tool_router`) replaces that with **one** connection exposing **three** meta-tools, ~500 tokens:
+
+| Tool | Purpose |
+|---|---|
+| `find_tools(query_words=[], category="", mode="or")` | The directory. **Without arguments the complete catalog**: one line per function, `instance.action — what it does`, no schemas |
+| `describe_tools(tools=[...])` | Full parameter schemas, several at once — this is where it gets expensive, and only for what is actually needed |
+| `call_tool(tool="instance.action", arguments={…})` | Runs it, via a fresh MCP session to the target instance |
+
+The model works in three steps: find the tool, fetch its schema, call it. Measured on a ten-instance installation: **~690 tokens per request instead of ~11.600**, plus ~1.500 once per conversation when the model actually opens the directory.
+
+*(It was ~516 until v0.0.5. Small models kept failing at `call_tool` and then explaining the failure away — the description there was one sentence, while the two steps before it explained the sequence in full. Spelling it out costs ~170 tokens per request, which is a bad trade only if you assume the model gets the call right.)*
+
+**Setup**
+
+1. Upload `examples/mcp-tool-router.json` and start the instance.
+2. In **Edit → Values** set `auth_token` and `mcp_token` if MCP auth is on. `manager_url` defaults to `http://127.0.0.1:7860`. The router only reads, so give it the [read token](#api-tokens) rather than the password — otherwise the password sits in clear text in `configs/mcp_tool_router.json`.
+3. In OpenWebUI, connect *only* the router and remove the direct tool connections — otherwise the model keeps the full schema list anyway.
+
+**Works with and without the shared port.** The router takes each instance's address from the catalog the manager already returns, so `/mcp/<id>` behind a shared port and one-port-per-instance both work with the same code path. `mcp_base_url` exists only as an override for a router running on another machine.
+
+**It carries the caller, it does not vouch for them.** With per-user identity on, the router hands the signed user token to the target instance unchanged — or rebuilds OpenWebUI's four plain headers, if that is the mode in use — alongside its own Bearer token, and forwards nothing else of the incoming request: no incoming `Authorization`, no cookies. Set `identity_mode: optional` on the router so its runner establishes the caller; the target verifies again for itself and decides. The directory stays unfiltered: a tool the caller may not run is still listed and refused when called, because the boundary belongs at the instance, not at a proxy in front of it. The valve `forward_user_identity` (default on) switches the whole behaviour off. See *Per-user identity*.
+
+**Read-only and fenced in.** The router uses one GET on the manager API plus MCP calls — no process management, no writing endpoints, so it works unchanged under `--no-edit`. `deny_instances` (default: `mcp_manager_control`) is enforced in `find_tools` **and** in `call_tool`, because `tool` is free text and a model that guesses a name must not slip past the directory. It never routes into itself: its own ID is excluded, and so is any instance offering exactly these three tools — a copy under a different ID cannot create a loop either.
+
+**Built to be understood by smaller models.** Errors carry the answer with them: a wrong argument comes back with the tool's schema attached, an unknown handle with "did you mean" suggestions, a stopped instance with "call find_tools again" instead of a raw connection error. A search that matches nothing returns the whole catalog rather than an empty result — it is a filter, never a gate. Umlauts are normalised (`Küche` → `kueche`), since German and English descriptions sit side by side in one installation. Every call is logged as one line in the instance's runtime log, so you can see whether a model follows the sequence.
+
+**System prompt.** Small models need to be told the sequence. Something like:
+
+> Tools are behind three meta-tools. Always: `find_tools` (no args = full catalog) → `describe_tools("instance.action")` → `call_tool(tool=…, arguments={…})`. Copy handles exactly, never invent parameters. On an error that includes a schema, fix the arguments and retry once. To search *inside* a tool (a device, a law, a file), use that tool's own search function first — `find_tools` knows tools, not their contents.
+
+**Limit.** The directory indexes tools, not their data. "Which lamps are on?" finds the OpenHAB instance, not the lamp — the model has to search inside that tool afterwards, which is what the last sentence of the prompt is for.
+
+**Headless agents (Codex, Claude Code) need `call_tool` pre-approved.** A client that asks for approval per tool has to be told about `call_tool` explicitly. Under `approval_policy = never` — which is what non-interactive runs use — an unlisted tool cannot be approved by anyone, and Codex reports that as `user cancelled MCP tool call`, although no user was involved and the router never saw the request (its runtime log stays empty for the attempt). In `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.mcp-router]
+url = "http://127.0.0.1:8109/mcp"
+bearer_token_env_var = "MCP_TOKEN"
+
+[mcp_servers.mcp-router.tools.find_tools]
+approval_mode = "approve"
+
+[mcp_servers.mcp-router.tools.call_tool]
+approval_mode = "approve"
+```
+
+Approving `find_tools` alone is the trap: the directory works, so the connection looks healthy, and only the call fails. Note what this grants — one approval for `call_tool` covers **every** tool the router exposes, writing ones included. `deny_instances` and `allow_categories` are the fence for that, so with a headless agent set `allow_categories` to what it may actually reach rather than leaving the whole catalog open.
 
 ---
 
@@ -453,7 +757,7 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 .venv/bin/python -m unittest discover -v
 ```
 
-The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
+The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
 
 ---
 
@@ -463,11 +767,17 @@ The suite runs against temporary project trees and never touches real instance c
 app/
   manager.py            Entry point (CLI) — --host, --port, --no-edit, --no-code-edit, --mcp-token, --no-token-edit
   admin_server.py       FastAPI app assembly, static web server, instance watchdog
-  routes/               API endpoints — auth.py, instances.py, tools.py, logs.py, settings.py, venvs.py
-  api_helpers.py        Shared route helpers (edit-mode/lock guards, instance serialization, version lookup)
+  routes/               API endpoints — auth.py, instances.py, tools.py, logs.py, settings.py,
+                        venvs.py, usage.py, permissions.py
+  api_helpers.py        Shared route helpers (edit-mode/lock guards, instance serialization, version + specs lookup)
+  activity.py           Usage tracking (runtime/usage.db, written by the runners, pruned by the manager)
+  update_check.py       Optional GitHub release check (off by default, server-side, cached)
   shared_proxy.py       Streaming reverse proxy for the shared MCP port (/mcp/<id>)
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
-  auth.py               Auth, guest detection, edit mode, MCP token helpers
+  identity.py           Verified end user of one tool call (forwarded HS256 token → ContextVar)
+  identity_registry.py  Roster of users the runners have seen (runtime/identities.db)
+  policy.py             Per-user access rules and per-user backend credentials
+  auth.py               Auth, guest detection, edit mode, MCP token and API-token helpers
   settings_store.py     Persistent settings (runtime/settings.json)
   config_store.py       Config file I/O + port management
   process_manager.py    Subprocess lifecycle (start/stop/restart) + health checks
@@ -482,19 +792,48 @@ app/
   logger.py             Logging setup (rotating log)
 configs/                Per-server JSON configs (one file = one MCP)
 tools/                  Uploaded OpenWebUI tool JSONs
-examples/               example_valve_tool.py (minimal tool with a Valve) and the
-                        control tool JSON (manage the spawner via MCP)
+examples/               example_valve_tool.py (minimal tool with a Valve), the
+                        control tool JSON (manage the spawner via MCP), the
+                        tool router JSON (one connection for all instances),
+                        identity-probe.json (who is calling? — diagnostic) and
+                        identity-policy.example.json (per-user access rules)
 tests/                  unittest suite (API contract, auth/guest, locking, ports, e2e)
 web/                    Frontend — index.html, style.css and ES modules:
                         app.js (bootstrap), common.js (state/fetch/UI helpers),
-                        instances.js, config.js, upload.js, editor.js, logs.js, settings.js
-runtime/                PIDs + logs + venvs + settings.json + tool-code history (gitignored)
+                        instances.js, config.js, upload.js, editor.js, logs.js, info.js,
+                        stats.js, permissions.js, settings.js
+runtime/                PIDs + logs + venvs + settings.json + usage.db + identities.db
+                        + identity_policy.json + history (gitignored)
 deploy/                 systemd service + env file examples
 ```
 
 ---
 
 ## Changelog
+
+### v0.2.0
+
+**New**
+- **Identity Probe** (`examples/identity-probe.json`) — one read-only tool, `whoami`, that reports who arrived at an MCP server, whether the identity was signed, and what the rules grant them. Ships with the spawner because every mistake in the identity setup is otherwise silent: a wrong secret, an unrestarted instance and a mode left on `off` are indistinguishable from a chat window. Prints a fingerprint of the shared secret instead of the secret, so both sides can be compared without either being shown (see *Per-user identity*)
+- **Users & permissions** — a 🔑 dialog that assigns rights per person: the runners record every verified caller in `runtime/identities.db`, the dialog offers that roster, and per governed instance you pick *no access*, *all tools* or single functions. Roles work as base equipment (OpenWebUI sends no groups, but the role is signed), a personal entry adds to them, an explicit deny wins. Saving is live — the rules file is read per call. A rule naming someone who never called is shown and marked, because that is what a mistyped user id looks like
+- **Machine identity** — `machine_identity` in an instance config stands in for callers without an OpenWebUI login (agent CLIs, scripts), so `required` no longer locks them out and the rules apply to them too. Assigned, not verified; a valid token still wins over it and a broken one is still refused
+- **Per-user identity** — the MCP Bearer token says a client may connect; it never said *who* is calling, so a tool holding credentials of its own acted with the same rights for every user of an OpenWebUI installation. The runner now verifies the HS256 user token OpenWebUI forwards (`ENABLE_FORWARD_USER_INFO_HEADERS` + `FORWARD_USER_INFO_HEADER_JWT_SECRET`) and publishes the verified user for the duration of one tool call, in a `ContextVar` — never on the Tools instance, which is shared by every concurrent caller. Per instance, `identity_mode` is `off` (unchanged behaviour, the default), `optional` (identity passed on, nothing enforced) or `required` (no verified user, no call). Only HS256 is accepted — a verifier that honours the token's own `alg` can be told `"none"` — with 60 s of leeway on `exp`/`iat` for clock drift between the two hosts. Access rules in `runtime/identity_policy.json` map the user id to instances and tools, deny by default, and are enforced on the call, not just on the listing: hiding a tool is presentation, refusing it is the boundary. `account` / `credentials_file` let a tool act under the user's own backend account instead of one shared login — opaque to the spawner, one secret per file, `chmod 600`. Without a shared secret, `MCP_USER_TRUST_HEADERS=1` accepts OpenWebUI's plain user headers instead: enough to keep the users of one installation apart, but a claim rather than a proof, so it is off by default, a signed token always wins over it, and a broken token is refused rather than falling back to it. The tool router (v0.0.8) passes the caller on either way (see *Per-user identity*)
+- **MCP tool router** (`examples/mcp-tool-router.json`) — one OpenWebUI connection with three meta-tools (`find_tools`, `describe_tools`, `call_tool`) instead of one connection per instance. Measured on a ten-instance installation: ~690 instead of ~11.600 tokens of schemas per request. Read-only, works with and without the shared port, refuses to route into itself or into the control tool (see *One connection for all tools*)
+- **Declared categories** — a tool can name its default category in its docstring (`category: …`), used at install time when none is given. The shipped control tool and tool router declare `System`, which is also how the usage report keeps them out of the ranking
+- **Usage statistics** — a report over all instances and their functions behind the 📊 button, plus `GET /api/usage`; the control tool gained `get_usage_stats` and `get_instance_specs` (v0.0.7), so an agent can evaluate the same data
+- **Usage tracking** — every tool call is recorded with time, instance and function in `runtime/usage.db` (SQLite, stdlib). The info view shows how often an instance has been used, when last and which function; `never used` otherwise. Counted in the runner, so it works without the shared port, and only for `tools/call`. The event log is pruned to a retention window (default 30 days), the totals are kept, so *ever used* survives pruning. No arguments, no results, no caller addresses
+- **Update hint for tools from `examples/`** — the dashboard compares an installed tool against the copy the spawner ships under the same id: a compact `↑ x.y.z` marker in the instance table, the full badge plus the source file in the info view. Both are buttons: they ask, then apply the shipped copy through the normal save path, keeping the Valve values and snapshotting the previous code to `runtime/history`. Forward only (`409` on a downgrade), refused on locked instances, hidden in read-only mode. The control tool aged unnoticed exactly this way, and the router was one day old before it was a version behind. Compared with `packaging.version`, never as strings The control tool aged unnoticed exactly this way, and the router was one day old before it was a version behind. Compared with `packaging.version`, never as strings. Reports only: an "update now" button would overwrite code you may have adapted, and is refused on a locked instance anyway
+- **Info view in the dashboard** — an **Info** button per row opens a dialog with description, category, version, venv, status and the tool's function list (name, description, parameters with type and required flag). Read from the `specs` block of the tool JSON, so no instance has to run and no uploaded code is executed; available in every edit mode, hidden for guests (see *Info view*)
+- **`GET /api/instances/{id}/specs`** — function catalog of one instance. Deliberately behind `require_auth` only, not `--no-code-edit`: these are metadata, not source
+- **`GET /api/instances?include=specs`** — the whole catalog in one call, opt-in. Without the parameter the list payload is byte-for-byte what it was; guests never get specs
+- **API tokens** — two optional credentials so a tool never has to carry the admin password, which lands in clear text in an instance config and can only be revoked by changing the password itself. The **read token** is valid on `GET` requests only (the tool router); the **agent token** on every method (the control tool with its write actions). The rule is the HTTP method, decided in one place, so a mutating route cannot forget to opt out of the read token. Both are refused with `403` on the routes that handle credentials: the three that return a token verbatim, the instance export (its payload embeds the MCP token), and `PUT /api/settings` — a token able to write a new password would be the password. Optional and independent, cannot equal the password or each other, managed in the Settings page or via `MCP_MANAGER_READ_TOKEN` / `MCP_MANAGER_AGENT_TOKEN` (see *API tokens*)
+- **Update check** — optional, **off by default**: the server asks the GitHub releases API once a day whether a newer version exists and shows a badge in the header after login. Comparison via `packaging.version`, result cached server-side, browser never contacts GitHub, failures stay silent. A **Check now** button runs one check on demand — cache and switch ignored, with the result (and the reason on failure) shown right in the form; with the switch off nothing is persisted. Reports only — nothing is downloaded or installed (see *Update check*)
+
+**Fixed**
+- **Uploaded tools kept OpenWebUI's truncated `specs`** — an OWUI export often carries only the first line of each docstring, cut off mid-sentence, and sometimes misses parameters entirely. The upload path validated the code anyway and had the correct schemas in hand, but discarded them. It now replaces `specs` with the generated ones while keeping everything else the upload brought (`meta`, `manifest`, ids). Already installed tools are repaired **once, automatically**, by a background task on the next start (marker `runtime/.specs_migrated`); a file is only rewritten when the specs actually differ. The repair deliberately ignores the instance lock — `content` stays untouched, only a derived field is recomputed, and a locked instance is exactly the one that could not be fixed by hand. Matters now that the info view, the specs API and the tool router show these descriptions to humans and models
+
+**Internal**
+- **One version source** — `app/__init__.py:__version__` is the single place; `pyproject.toml` derives its version from it via `[tool.setuptools.dynamic]`. With the update check comparing against it, two places to bump would have meant false "up to date" reports
 
 ### v0.1.2
 

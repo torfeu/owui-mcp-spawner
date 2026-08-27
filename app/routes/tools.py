@@ -3,7 +3,7 @@ import json
 import re
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
-from ..api_helpers import (_backup_tool_file, _import_mcp_config, _import_openwebui_tool, _provision_new_tool, require_available_id, require_code_edit, require_not_locked, require_upload_or_edit, str_field)
+from ..api_helpers import (_backup_tool_file, _bundled_version_info, _example_code, _import_mcp_config, _import_openwebui_tool, _provision_new_tool, require_available_id, require_code_edit, require_not_locked, require_upload_or_edit, str_field)
 from ..auth import require_auth
 from ..config_store import get_instance_state, load_config, resolve_tool_path, save_config, set_instance_state
 from ..dependency_manager import install_dependencies
@@ -149,6 +149,46 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
         restarted = True
 
     return {"ok": True, "restarted": restarted, "warnings": result["warnings"]}
+
+# Treated as an upload, not as code editing: the code comes from a file this
+# spawner ships, not from a text box, so it stays available under
+# --no-code-edit exactly like re-uploading the same JSON by hand would.
+@router.post("/api/instances/{instance_id}/update-from-example", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
+async def update_from_example(instance_id: str) -> dict:
+    """Replace an instance's code with the copy shipped in examples/.
+
+    Forward only: refused unless the shipped version is strictly newer, so a
+    stray click cannot silently downgrade a tool someone updated by hand.
+
+    What makes this safe enough to offer at all is the snapshot below in
+    save_tool_code — the previous tool JSON goes to runtime/history/<id>/
+    before anything is written, so an adapted copy can be recovered. It is
+    still an overwrite, which is why the UI asks first.
+    """
+    require_not_locked(instance_id)
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+
+    bundled = _bundled_version_info(cfg)
+    if not bundled:
+        raise HTTPException(404, f"No tool ships with this spawner under the id '{instance_id}'")
+    if not bundled["update_available"]:
+        raise HTTPException(
+            409,
+            f"Nothing to update — the shipped copy is {bundled['version']}, "
+            f"which is not newer than what is installed",
+        )
+    code = _example_code(instance_id)
+    if not code.strip():
+        raise HTTPException(422, f"The shipped tool file {bundled['path']} carries no code")
+
+    # Same path as a manual save: dependency install, validation in the
+    # instance venv, valve sync, backup, restart. Nothing about this update
+    # deserves a second implementation of that.
+    result = await save_tool_code(instance_id, {"code": code})
+    logger.info(f"Updated '{instance_id}' from {bundled['path']} to {bundled['version']}")
+    return {**result, "version": bundled["version"], "source": bundled["path"]}
 
 # Deliberately available in readonly mode (see README "Edit modes"): reinstall
 # only re-runs pip for the dependencies already pinned in the config — it cannot

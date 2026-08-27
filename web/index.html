@@ -12,12 +12,14 @@
   <header>
     <div class="header-title">
       <span class="logo">⬡</span>
-      <h1>OWUI MCP Spawner <span class="app-version" id="app-version"></span></h1>
+      <h1>OWUI MCP Spawner <span class="app-version" id="app-version"></span><a class="update-badge hidden" id="update-badge" target="_blank" rel="noopener"></a></h1>
     </div>
     <button class="btn btn-secondary" id="editor-btn">+ New Tool</button>
     <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
     <button class="btn btn-primary hidden" id="login-btn">Login</button>
     <button class="btn btn-ghost hidden" id="logout-btn" title="Log out">Logout</button>
+    <button class="btn btn-ghost btn-settings" id="perm-btn" title="Users &amp; permissions">🔑</button>
+    <button class="btn btn-ghost btn-settings" id="stats-btn" title="Usage statistics">📊</button>
     <button class="btn btn-ghost btn-settings" id="settings-btn" title="Settings">⚙</button>
   </header>
 
@@ -110,7 +112,17 @@
 
           <label>Auto Start</label>
           <input type="checkbox" id="edit-autostart" />
+
+          <label title="Who is calling? off = only the MCP token is checked. optional = a forwarded OpenWebUI user is verified and passed to the tools, no rules applied. required = no verified user, no tool call, and the rules in runtime/identity_policy.json apply.">User identity</label>
+          <select id="edit-identity-mode">
+            <option value="off">off — no user identity</option>
+            <option value="optional">optional — pass through, enforce nothing</option>
+            <option value="required">required — verified user + access rules</option>
+          </select>
         </div>
+        <p id="edit-identity-hint" class="hidden" style="color:var(--text-muted);font-size:12px;margin:-4px 0 0">
+          No way to identify a user is configured — set a shared secret under Settings (or accept the plain headers there), or every call to this instance will be refused.
+        </p>
 
         <h3>Values</h3>
         <div id="edit-values-container"></div>
@@ -141,6 +153,81 @@
       <div class="modal-actions">
         <button class="btn btn-secondary" id="logs-refresh">Refresh</button>
         <button class="btn btn-ghost" id="logs-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Usage Statistics Modal -->
+  <div id="stats-modal" class="modal hidden">
+    <div class="modal-backdrop" id="stats-backdrop"></div>
+    <div class="modal-content modal-wide">
+      <div class="stats-header">
+        <h2>Usage statistics</h2>
+        <select id="stats-days">
+          <option value="1">last 24 hours</option>
+          <option value="7" selected>last 7 days</option>
+          <option value="30">last 30 days</option>
+          <option value="90">last 90 days</option>
+        </select>
+      </div>
+      <p class="modal-hint" id="stats-hint"></p>
+      <div id="stats-body">Loading…</div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="stats-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Permissions Modal -->
+  <div id="perm-modal" class="modal hidden">
+    <div class="modal-backdrop" id="perm-backdrop"></div>
+    <div class="modal-content modal-wide">
+      <div class="stats-header">
+        <h2>Users &amp; permissions</h2>
+        <span id="perm-status" class="settings-status"></span>
+      </div>
+      <p class="modal-hint">
+        Rules for instances whose <em>User identity</em> is <code>required</code>. Deny by default:
+        a user with no entry reaches nothing. Instances on <code>off</code> are not governed here.
+      </p>
+      <div id="perm-layout">
+        <div id="perm-people">
+          <div class="perm-people-head">
+            <span>Users</span>
+            <button class="btn btn-ghost" id="perm-add" title="Add a user id by hand">+</button>
+          </div>
+          <ul id="perm-list"></ul>
+          <div class="perm-people-head" style="margin-top:10px"><span>Roles</span></div>
+          <ul id="perm-roles"></ul>
+        </div>
+        <div id="perm-detail">
+          <p class="modal-hint">Pick someone on the left.</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <label class="checkbox-label" title="Match a rule by e-mail when the user id does not match. An address can be reassigned to another person.">
+          <input type="checkbox" id="perm-match-email" /> match by e-mail
+        </label>
+        <label class="checkbox-label" title="DANGEROUS: the display name can be changed by the user themselves, so anyone could rename into someone else's rule.">
+          <input type="checkbox" id="perm-match-name" /> match by name (unsafe)
+        </label>
+        <span style="flex:1"></span>
+        <button class="btn btn-primary" id="perm-save">Save</button>
+        <button class="btn btn-ghost" id="perm-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Info Modal -->
+  <div id="info-modal" class="modal hidden">
+    <div class="modal-backdrop" id="info-backdrop"></div>
+    <div class="modal-content modal-wide">
+      <h2>Info: <span id="info-title"></span></h2>
+      <div id="info-meta" class="info-meta"></div>
+      <h3>Functions <span id="info-fn-count" class="info-count"></span></h3>
+      <div id="info-functions">Loading…</div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="info-close">Close</button>
       </div>
     </div>
   </div>
@@ -289,6 +376,81 @@
       </div>
 
       <div class="settings-section">
+        <h3 class="settings-section-title">User Identity (OpenWebUI)</h3>
+        <div class="settings-status" id="settings-identity-status"></div>
+        <p class="modal-hint">Lets an instance know <em>which person</em> is calling, not just that the client is allowed to. Set the same secret OpenWebUI signs with (<code>FORWARD_USER_INFO_HEADER_JWT_SECRET</code>, together with <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code>). Per instance, switch <em>User identity</em> in its config; access rules live in <code>runtime/identity_policy.json</code>. Write-only: it is never shown again, because it is a copy of what OpenWebUI already has.</p>
+        <div class="form-grid" id="settings-identity-fields">
+          <label>Shared Secret</label>
+          <input type="password" id="settings-identity-secret" autocomplete="off"
+                 placeholder="Not set" />
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-identity-clear" />
+            Remove secret (no user identity is verified anywhere)
+          </label>
+          <label>Without a secret</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-identity-trust-headers" />
+            Trust OpenWebUI's plain user headers (unsigned)
+          </label>
+        </div>
+        <p class="modal-hint" id="settings-identity-trust-hint">Only needs <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code> in OpenWebUI, no shared secret. It separates the users of your OpenWebUI installation from each other — but the headers are a claim, not a proof: anyone who can reach an instance's port with the MCP Bearer token can write them by hand. Choose it when that port is not reachable by anyone you are guarding against; otherwise use the secret.</p>
+        <div id="settings-identity-locked" class="settings-locked hidden">
+          Token editing is disabled on this server (<code>--no-token-edit</code>).
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3 class="settings-section-title">API Read Token</h3>
+        <div class="settings-status" id="settings-read-status"></div>
+        <p class="modal-hint">A second credential for tools that only read from this API — the tool router, the control tool in read-only setups. Valid on <code>GET</code> requests only, and never for the MCP token or an instance export. Without it such tools have to carry the admin password, which grants everything.</p>
+        <div class="form-grid" id="settings-read-fields">
+          <label>Read Token</label>
+          <div class="token-input-wrap">
+            <input type="password" id="settings-read-token" autocomplete="off"
+                   placeholder="No token set" />
+            <button type="button" class="btn btn-ghost btn-token-toggle" id="settings-read-toggle"
+                    title="Show / hide token">👁</button>
+            <button type="button" class="btn btn-ghost btn-token-toggle" id="settings-read-generate"
+                    title="Generate secure token">⟳</button>
+          </div>
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-read-clear" />
+            Remove token (password stays the only credential)
+          </label>
+        </div>
+        <div id="settings-read-locked" class="settings-locked hidden">
+          Token editing is disabled on this server (<code>--no-token-edit</code>).
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3 class="settings-section-title">Agent Token</h3>
+        <div class="settings-status" id="settings-agent-status"></div>
+        <p class="modal-hint">For agents that also write — the control tool with its write actions enabled. Valid on every method, but never for the password or the token fields on this page: an agent that could set a new password would be an admin. Its reach is otherwise the admin's, including uploading and running code, so treat it as a rotatable stand-in for the password, not as a sandbox.</p>
+        <div class="form-grid" id="settings-agent-fields">
+          <label>Agent Token</label>
+          <div class="token-input-wrap">
+            <input type="password" id="settings-agent-token" autocomplete="off"
+                   placeholder="No token set" />
+            <button type="button" class="btn btn-ghost btn-token-toggle" id="settings-agent-toggle"
+                    title="Show / hide token">👁</button>
+            <button type="button" class="btn btn-ghost btn-token-toggle" id="settings-agent-generate"
+                    title="Generate secure token">⟳</button>
+          </div>
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-agent-clear" />
+            Remove token (password stays the only credential)
+          </label>
+        </div>
+        <div id="settings-agent-locked" class="settings-locked hidden">
+          Token editing is disabled on this server (<code>--no-token-edit</code>).
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3 class="settings-section-title">Shared MCP Port</h3>
         <div class="settings-status" id="settings-shared-status"></div>
         <p class="modal-hint">Expose all MCPs through one port as <code>/mcp/&lt;id&gt;</code> instead of one port per instance. Instances then bind to localhost only; already running instances pick this up on their next restart.</p>
@@ -311,6 +473,35 @@
           <input type="text" id="settings-venv-new" placeholder="new-venv-name" />
           <button type="button" class="btn btn-secondary btn-sm" id="settings-venv-create">Create Venv</button>
         </div>
+      </div>
+
+      <div class="settings-section">
+        <h3 class="settings-section-title">Usage Tracking</h3>
+        <p class="modal-hint">Every tool call is recorded with time, instance and function in <code>runtime/usage.db</code> — never arguments or results. Individual calls are deleted after the retention window; the totals per function are kept, so <em>ever used</em> stays answerable.</p>
+        <div class="form-grid">
+          <label>Keep calls for</label>
+          <select id="settings-retention">
+            <option value="7">7 days</option>
+            <option value="30">30 days</option>
+            <option value="90">90 days</option>
+            <option value="365">1 year</option>
+            <option value="0">indefinitely</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3 class="settings-section-title">Update Check</h3>
+        <div class="settings-status" id="settings-update-status"></div>
+        <p class="modal-hint">Off by default. When enabled, the server asks the GitHub releases API once a day whether a newer version exists — an outgoing request that tells GitHub this installation exists. Nothing is downloaded or installed; you only get a link in the header.</p>
+        <div class="update-check-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-update-enable" />
+            Check for updates on GitHub
+          </label>
+          <button type="button" class="btn btn-secondary btn-sm" id="settings-update-now">Check now</button>
+        </div>
+        <div class="update-check-result" id="settings-update-result"></div>
       </div>
 
       <div class="settings-section settings-section-last">

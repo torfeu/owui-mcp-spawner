@@ -11,11 +11,18 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from app.schema import MCPConfig
+from app.activity import flush as flush_usage, record_call
+from app.identity import (PLAIN_HEADERS, Identity, IdentityError, configured_secret,
+                          header_name, identity_configured, identity_from_headers,
+                          identity_scope, trust_plain_headers)
+from app.identity_registry import record as record_identity
+from app.policy import is_tool_allowed, visible_tools
+from app.schema import IdentityMode, MCPConfig
 from app.tool_loader import load_openwebui_json, create_tools_instance
 
 logging.basicConfig(
@@ -38,10 +45,188 @@ def resolve_path(p: str) -> Path:
     return BASE_DIR / path
 
 
-async def run_server(config_path: str, host_override: str | None = None) -> None:
+def _request_headers(server) -> dict:
+    """Headers of the HTTP request that carried the current MCP message.
+
+    The SDK hands the Starlette request down with every JSON-RPC message
+    (streamable_http → ServerMessageMetadata → RequestContext.request), and
+    each message is dispatched in its own task. So this is per call, not per
+    session — which matters, because one MCP session can carry calls made
+    seconds apart by a client that re-authenticates in between.
+
+    Empty dict outside an HTTP context (stdio, tests).
+    """
+    try:
+        request = server.request_context.request
+    except LookupError:
+        return {}
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return {}
+    try:
+        return dict(headers.items())
+    except Exception:
+        return {}
+
+
+def _claims_an_identity(headers: dict) -> bool:
+    """Did the caller claim to be somebody, even unsuccessfully?
+
+    The difference between "no login, as configured" and "a token that did not
+    hold up". Only the first may fall back to a machine identity — otherwise a
+    forged or expired token would be quietly upgraded into a working one.
+
+    Compared lowercased: ASGI, Starlette and httpx each hand headers over with
+    their own capitalisation, and getting this wrong would open exactly the
+    hole the distinction exists to close.
+    """
+    lowered = {str(k).lower() for k, v in (headers or {}).items() if str(v).strip()}
+    if header_name().lower() in lowered:
+        return True
+    return trust_plain_headers() and PLAIN_HEADERS["sub"].lower() in lowered
+
+
+def _resolve_identity(server, mode: IdentityMode, instance_id: str = "",
+                      machine: Optional[Identity] = None) -> tuple[Optional[Identity], str]:
+    """Establish who is calling. Returns (identity, rejection reason).
+
+    An identity of None with an empty reason means "none was offered and none
+    was needed". A reason without an identity is a refusal the caller should
+    hear about — with the *reason*, never the token.
+
+    *machine* stands in when no user token arrives: a configured identity for
+    callers without a login. A real token always wins over it, and a *broken*
+    token is still a refusal — falling back to the machine identity there would
+    turn a forged token into a working one.
+    """
+    if mode == IdentityMode.off:
+        return None, ""
+    if not identity_configured() and machine is None:
+        # required with no way to establish an identity is a misconfiguration,
+        # not an open door.
+        if mode == IdentityMode.required:
+            return None, ("this instance requires an identified user, but the server "
+                          "has neither a user-JWT secret nor trusted user headers "
+                          "configured")
+        return None, ""
+    headers = _request_headers(server)
+    try:
+        identity = identity_from_headers(headers)
+    except IdentityError as e:
+        if machine is not None and not _claims_an_identity(headers):
+            # Nobody claimed to be anybody — this is the agent-CLI case.
+            record_identity(machine, instance_id)
+            return machine, ""
+        if mode == IdentityMode.required:
+            return None, str(e)
+        # optional: an absent or broken token is not fatal, but silence here
+        # would make a wrong secret look like a working setup.
+        logger.info(f"No verified user identity ({e}) — continuing, identity_mode=optional")
+        return None, ""
+    # Noted for the roster the dashboard offers when assigning rights —
+    # bookkeeping only, and it never fails a call.
+    record_identity(identity, instance_id)
+    return identity, ""
+
+
+def build_server(cfg: MCPConfig, mcp_tool_defs: list[dict], tools_instance):
+    """Wire the tool methods up as MCP handlers.
+
+    Separate from run_server so the access decisions below can be tested
+    without a socket: they are the gate the whole per-user setup rests on.
+    """
     from mcp.server import Server
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from mcp import types
+
+    allowed_tools = {t["name"] for t in mcp_tool_defs}
+    identity_mode = cfg.identity_mode
+    machine_identity = cfg.machine_identity.as_identity() if cfg.machine_identity else None
+    server = Server(cfg.id)
+
+    @server.list_tools()
+    async def handle_list_tools() -> list[types.Tool]:
+        defs = mcp_tool_defs
+        if identity_mode != IdentityMode.off:
+            identity, refusal = _resolve_identity(server, identity_mode, cfg.id, machine_identity)
+            if refusal:
+                # An empty catalog rather than an error: a client that cannot
+                # identify its user should see nothing to call, and the refusal
+                # it gets from call_tool explains why.
+                logger.warning(f"list_tools refused: {refusal}")
+                return []
+            # Rules apply in required mode only. In optional mode an identity
+            # is passed on but nothing is enforced — otherwise switching an
+            # instance to optional before writing a policy would leave
+            # identified users with less access than anonymous ones, which is
+            # the opposite of what the mode is for.
+            if identity_mode == IdentityMode.required:
+                permitted = set(visible_tools(identity, cfg.id, sorted(allowed_tools)))
+                defs = [t for t in defs if t["name"] in permitted]
+        return [
+            types.Tool(
+                name=t["name"],
+                description=t["description"],
+                inputSchema=t["inputSchema"],
+            )
+            for t in defs
+        ]
+
+    @server.call_tool()
+    async def handle_call_tool(
+        name: str, arguments: dict | None
+    ) -> list[types.TextContent]:
+        arguments = arguments or {}
+        # Only methods advertised via list_tools are callable — getattr alone
+        # would also expose private helpers and inherited methods.
+        if name not in allowed_tools:
+            return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
+
+        identity = None
+        if identity_mode != IdentityMode.off:
+            identity, refusal = _resolve_identity(server, identity_mode, cfg.id, machine_identity)
+            if refusal:
+                logger.warning(f"Denied call to '{name}': {refusal}")
+                return [types.TextContent(
+                    type="text",
+                    text=f"Access denied: {refusal}.",
+                )]
+            # Checked here and not only in list_tools: a hidden tool is still
+            # callable by name, so the listing is a courtesy and this is the
+            # actual gate. The router in front of this enforces nothing.
+            if identity_mode == IdentityMode.required and not is_tool_allowed(identity, cfg.id, name):
+                who = identity.sub if identity else "unidentified caller"
+                logger.warning(f"Denied call to '{name}' for {who}: not permitted by policy")
+                return [types.TextContent(
+                    type="text",
+                    text=f"Access denied: you are not permitted to use '{name}' on this server.",
+                )]
+
+        # Counted here and not in the proxy: with one port per instance the
+        # manager is not in the data path at all.
+        record_call(cfg.id, name)
+        method = getattr(tools_instance, name, None)
+        if method is None:
+            return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
+        try:
+            # The identity is published for exactly this call and taken down
+            # again in the ContextVar's own finally. It must not be attached to
+            # tools_instance: that object is shared by every concurrent caller.
+            # asyncio.to_thread copies the context, so synchronous tools see it too.
+            with identity_scope(identity):
+                if inspect.iscoroutinefunction(method):
+                    result = await method(**arguments)
+                else:
+                    result = await asyncio.to_thread(method, **arguments)
+            return [types.TextContent(type="text", text=str(result))]
+        except Exception as e:
+            logger.error(f"Error calling {name}: {e}")
+            return [types.TextContent(type="text", text=f"Error: {e}")]
+
+    return server
+
+
+async def run_server(config_path: str, host_override: str | None = None) -> None:
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     import uvicorn
 
     cfg = load_config(config_path)
@@ -61,43 +246,18 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
         sys.exit(1)
 
     mcp_tool_defs = tool.get_mcp_tool_defs()
-    allowed_tools = {t["name"] for t in mcp_tool_defs}
-    logger.info(f"Loaded {len(mcp_tool_defs)} tools: {sorted(allowed_tools)}")
+    logger.info(f"Loaded {len(mcp_tool_defs)} tools: {sorted(t['name'] for t in mcp_tool_defs)}")
 
-    server = Server(cfg.id)
+    if cfg.identity_mode != IdentityMode.off:
+        proof = "signed token" if configured_secret() else "none"
+        if trust_plain_headers():
+            proof += " + trusted plain headers (unsigned)"
+        logger.info(
+            f"User identity: {cfg.identity_mode.value} (header {header_name()}, "
+            f"accepted proof: {proof})"
+        )
 
-    @server.list_tools()
-    async def handle_list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=t["name"],
-                description=t["description"],
-                inputSchema=t["inputSchema"],
-            )
-            for t in mcp_tool_defs
-        ]
-
-    @server.call_tool()
-    async def handle_call_tool(
-        name: str, arguments: dict | None
-    ) -> list[types.TextContent]:
-        arguments = arguments or {}
-        # Only methods advertised via list_tools are callable — getattr alone
-        # would also expose private helpers and inherited methods.
-        if name not in allowed_tools:
-            return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
-        method = getattr(tools_instance, name, None)
-        if method is None:
-            return [types.TextContent(type="text", text=f"Tool '{name}' not found")]
-        try:
-            if inspect.iscoroutinefunction(method):
-                result = await method(**arguments)
-            else:
-                result = await asyncio.to_thread(method, **arguments)
-            return [types.TextContent(type="text", text=str(result))]
-        except Exception as e:
-            logger.error(f"Error calling {name}: {e}")
-            return [types.TextContent(type="text", text=f"Error: {e}")]
+    server = build_server(cfg, mcp_tool_defs, tools_instance)
 
     endpoint = cfg.server.endpoint.rstrip("/")
     session_manager = StreamableHTTPSessionManager(server)
@@ -113,6 +273,10 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
                     await send({"type": "lifespan.startup.complete"})
                 event = await receive()
                 if event["type"] == "lifespan.shutdown":
+                    # Write out what is still queued — otherwise every stop
+                    # would silently drop the last calls, and stopping is what
+                    # happens ten times an evening.
+                    await flush_usage()
                     await send({"type": "lifespan.shutdown.complete"})
             return
 

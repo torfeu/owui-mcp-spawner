@@ -3,7 +3,11 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException
 from .. import shared_proxy
 from ..api_helpers import _rebind_running_instances, _restart_after_delay, require_token_edit, str_field
-from ..auth import auth_enabled, edit_mode, edit_mode_locked, mcp_bearer_token, require_auth, token_edit_enabled
+from ..auth import (agent_token, auth_enabled, edit_mode, edit_mode_locked, mcp_bearer_token,
+                    read_token, require_admin_auth, require_auth, token_edit_enabled,
+                    user_jwt_secret, user_trust_headers)
+from ..activity import retention_days
+from ..update_check import cached_result, check_manually, check_now
 router = APIRouter()
 
 @router.get("/api/settings", dependencies=[Depends(require_auth)])
@@ -15,14 +19,30 @@ async def get_settings() -> dict:
         "host": os.environ.get("MCP_RUNNER_HOST", "127.0.0.1"),
         "port": int(os.environ.get("MCP_MANAGER_PORT", "7860")),
         "mcp_token_set": mcp_bearer_token() is not None,
+        "read_token_set": read_token() is not None,
+        "agent_token_set": agent_token() is not None,
+        # Only whether it exists. The secret itself has no read route at all —
+        # unlike the tokens, nobody needs to copy it out of here: it is set once
+        # to match what OpenWebUI already has.
+        "user_jwt_secret_set": user_jwt_secret() is not None,
+        "user_trust_headers": user_trust_headers(),
         "token_edit_enabled": token_edit_enabled(),
         "shared_port": shared_proxy.configured_port(),
         "shared_proxy_running": shared_proxy.proxy_running(),
+        "usage_retention_days": retention_days(),
+        # Authenticated on purpose: /api/auth-status already leaks the bare
+        # version to anyone, but "this instance is outdated" is the more useful
+        # sentence for an unauthenticated visitor and stays behind the login.
+        "update": cached_result(),
     }
 
-@router.put("/api/settings", dependencies=[Depends(require_auth)])
+# require_admin_auth: this route sets the password and both API tokens. An
+# agent token that reached it could promote itself to admin, which would make
+# the whole separation decorative.
+@router.put("/api/settings", dependencies=[Depends(require_auth), Depends(require_admin_auth)])
 async def update_settings(body: dict) -> dict:
-    from ..auth import set_password, set_edit_mode_setting, set_mcp_bearer_token, verify_password
+    from ..auth import (set_agent_token, set_password, set_edit_mode_setting,
+                        set_mcp_bearer_token, set_read_token, verify_password)
     changed = []
 
     def _str_field(key: str) -> str:
@@ -71,6 +91,82 @@ async def update_settings(body: dict) -> dict:
             if len(token) < 8:
                 raise HTTPException(400, "MCP token must be at least 8 characters")
             new_token = ("set", token)
+
+    # The two API tokens have the same shape and the same rules — one loop, so
+    # they cannot drift apart.
+    api_token_changes = {}  # kind -> ("clear", None) | ("set", token)
+    for kind, label in (("read", "Read token"), ("agent", "Agent token")):
+        if f"{kind}_token" not in body and not body.get(f"{kind}_token_clear"):
+            continue
+        require_token_edit()
+        if body.get(f"{kind}_token_clear"):
+            api_token_changes[kind] = ("clear", None)
+            continue
+        token = _str_field(f"{kind}_token")
+        if len(token) < 8:
+            raise HTTPException(400, f"{label} must be at least 8 characters")
+        # Reusing the password would defeat the whole split: the token is
+        # stored in clear text in every config that carries it.
+        if token == pw or (auth_enabled() and verify_password(token)):
+            raise HTTPException(400, f"{label} must differ from the password")
+        api_token_changes[kind] = ("set", token)
+
+    # …and they must differ from each other, or the GET-only token silently
+    # inherits the agent token's write access.
+    def _other_token(kind: str):
+        other = "agent" if kind == "read" else "read"
+        if other in api_token_changes:
+            return api_token_changes[other][1]
+        return agent_token() if other == "agent" else read_token()
+
+    for kind, (action, value) in api_token_changes.items():
+        if action == "set" and value == _other_token(kind):
+            raise HTTPException(400, "Read token and agent token must differ")
+
+    # The user-JWT secret is not a token this server hands out — it is a copy of
+    # what OpenWebUI signs with, so it is write-only here and has no minimum
+    # length of our choosing beyond "not trivially short".
+    jwt_secret_change = None  # ("clear", None) or ("set", secret)
+    if "user_jwt_secret" in body or body.get("user_jwt_secret_clear"):
+        require_token_edit()
+        if body.get("user_jwt_secret_clear"):
+            jwt_secret_change = ("clear", None)
+        else:
+            secret = _str_field("user_jwt_secret")
+            if len(secret) < 16:
+                raise HTTPException(400, "User-JWT secret must be at least 16 characters")
+            jwt_secret_change = ("set", secret)
+
+    trust_change = None
+    if "user_trust_headers" in body:
+        raw = body["user_trust_headers"]
+        if not isinstance(raw, bool):
+            raise HTTPException(400, "user_trust_headers must be true or false")
+        if raw != user_trust_headers():
+            trust_change = raw
+
+    update_change = None
+    if "update_check" in body:
+        raw = body["update_check"]
+        if not isinstance(raw, bool):
+            raise HTTPException(400, "update_check must be true or false")
+        from ..update_check import update_check_enabled
+        if raw != update_check_enabled():
+            update_change = raw
+
+    retention_change = None
+    if "usage_retention_days" in body:
+        raw = body["usage_retention_days"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+            raise HTTPException(400, "usage_retention_days must be a number")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "usage_retention_days must be a number")
+        if not 0 <= value <= 3650:
+            raise HTTPException(400, "usage_retention_days must be between 0 (keep forever) and 3650")
+        if value != retention_days():
+            retention_change = value
 
     shared_change = None  # ("disable", None) or ("enable", port)
     current_shared = shared_proxy.configured_port()
@@ -127,6 +223,29 @@ async def update_settings(body: dict) -> dict:
         set_edit_mode_setting(new_mode)
         changed.append("edit_mode")
 
+    if retention_change is not None:
+        from ..settings_store import save_settings
+        save_settings({"usage_retention_days": retention_change})
+        # Applied by the daily pruning task; shortening the window does not
+        # delete anything before the next pass, and `totals` never at all.
+        changed.append("usage_retention_days")
+
+    if update_change is not None:
+        from ..settings_store import save_settings
+        if update_change:
+            save_settings({"update_check": True})
+            # Check straight away so switching it on gives an answer instead of
+            # an empty badge until the next daily pass.
+            await check_now(force=True)
+        else:
+            # Drop the cached result too: nothing stale should be served, and
+            # switching off should leave no trace of the request behind.
+            save_settings({
+                "update_check": False, "update_latest_version": None,
+                "update_html_url": None, "update_last_checked": None,
+            })
+        changed.append("update_check")
+
     if new_token is not None:
         if new_token[0] == "clear":
             set_mcp_bearer_token(None)
@@ -135,11 +254,44 @@ async def update_settings(body: dict) -> dict:
             set_mcp_bearer_token(new_token[1])
             changed.append("mcp_token")
 
+    for kind, (action, value) in api_token_changes.items():
+        (set_read_token if kind == "read" else set_agent_token)(value)
+        changed.append(f"{kind}_token" if action == "set" else f"{kind}_token_cleared")
+
+    if trust_change is not None:
+        from ..auth import set_user_trust_headers
+        set_user_trust_headers(trust_change)
+        changed.append("user_trust_headers")
+        changed.append("restart_instances_to_apply")
+
+    if jwt_secret_change is not None:
+        from ..auth import set_user_jwt_secret
+        set_user_jwt_secret(jwt_secret_change[1])
+        # Running runners keep the value they inherited at spawn, so say so:
+        # otherwise the next identity failure looks like a wrong secret.
+        changed.append("user_jwt_secret" if jwt_secret_change[0] == "set" else "user_jwt_secret_cleared")
+        changed.append("restart_instances_to_apply")
+
     return {"ok": True, "changed": changed}
 
-@router.get("/api/settings/mcp-token", dependencies=[Depends(require_auth), Depends(require_token_edit)])
+@router.post("/api/settings/update-check", dependencies=[Depends(require_auth)])
+async def run_update_check() -> dict:
+    """"Check now" button: one immediate check, cache and 24 h interval ignored."""
+    return await check_manually()
+
+# require_admin_auth on both token routes: they return a credential verbatim,
+# so the read-only token must not reach them.
+@router.get("/api/settings/mcp-token", dependencies=[Depends(require_auth), Depends(require_admin_auth), Depends(require_token_edit)])
 async def get_mcp_token_value() -> dict:
     return {"token": mcp_bearer_token() or ""}
+
+@router.get("/api/settings/read-token", dependencies=[Depends(require_auth), Depends(require_admin_auth), Depends(require_token_edit)])
+async def get_read_token_value() -> dict:
+    return {"token": read_token() or ""}
+
+@router.get("/api/settings/agent-token", dependencies=[Depends(require_auth), Depends(require_admin_auth), Depends(require_token_edit)])
+async def get_agent_token_value() -> dict:
+    return {"token": agent_token() or ""}
 
 @router.post("/api/server/restart", dependencies=[Depends(require_auth)])
 async def restart_server_endpoint() -> dict:

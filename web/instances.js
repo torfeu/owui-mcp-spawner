@@ -62,7 +62,7 @@ function renderTable(rows) {
   tbody.innerHTML = rows.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
-      <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}</td>
+      <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td>${statusBadge(inst.status, inst.error)}</td>
       <td class="admin-col">${inst.port ?? ""}</td>
@@ -76,6 +76,25 @@ function renderTable(rows) {
   tbody.querySelectorAll("[data-action]").forEach(btn => {
     btn.addEventListener("click", handleAction);
   });
+}
+
+// A tool installed from examples/ that the spawner ships in a newer version.
+// Same colours as the header's update badge, but compact: a table row has no
+// space for a sentence, and the Info dialog carries the detail and the path.
+//
+// Clickable unless the instance is locked or the edit mode forbids writing —
+// a button that only ever answers 403 is worse than no button.
+function bundledMark(inst) {
+  if (!inst.bundled_update) return "";
+  const canUpdate = state.editMode !== "readonly" && !inst.locked && !state.guestMode;
+  const label = `↑ ${esc(inst.bundled_update)}`;
+  if (!canUpdate) {
+    const why = inst.locked ? "instance is locked" : "read-only mode";
+    return ` <span class="update-badge update-badge-sm"
+      title="Version ${esc(inst.bundled_update)} ships with this spawner — cannot update here (${why})">${label}</span>`;
+  }
+  return ` <button class="update-badge update-badge-sm" data-action="updateexample" data-id="${esc(inst.id)}"
+    title="Update to ${esc(inst.bundled_update)} from the copy shipped with this spawner">${label}</button>`;
 }
 
 function statusBadge(status, error = "") {
@@ -101,6 +120,9 @@ function actionButtons(inst) {
   if ((running || stopped) && canRestart) btns.push(ab("restart", inst.id, "Restart", "btn-secondary btn-sm", busy));
   if (canUploadOrEdit) btns.push(ab("edit",     inst.id, "Edit",      "btn-secondary btn-sm", busy));
   if (canCodeEdit)     btns.push(ab("editcode", inst.id, "Edit Code", "btn-secondary btn-sm", busy));
+  // Info is pure metadata — available in every edit mode, even when the code
+  // editor is locked away.
+  btns.push(ab("info",   inst.id, "Info",   "btn-secondary btn-sm"));
   btns.push(ab("logs",   inst.id, "Logs",   "btn-secondary btn-sm"));
   btns.push(ab("export", inst.id, "Export", "btn-secondary btn-sm"));
   // Reinstall stays available in readonly mode (matches the API): it only
@@ -167,11 +189,40 @@ async function handleAction(e) {
       case "logs":
         await actionHandlers.openLogs(id);
         return;
+      case "info":
+        await actionHandlers.openInfo(id, instances.find(i => i.id === id) || null);
+        return;
+      case "updateexample":
+        await updateFromExample(id, instances.find(i => i.id === id) || null);
+        return;
     }
     loadInstances();
   } catch (err) {
     showAlert("error", err.message);
   }
+}
+
+// Overwrites the instance's code with the shipped copy. The question spells
+// out what is replaced and what survives, because "Update?" alone would not
+// tell anyone that a hand-adapted tool is about to be replaced.
+export async function updateFromExample(id, inst = null) {
+  const to = inst?.bundled_update ? ` to ${inst.bundled_update}` : "";
+  const from = inst?.version ? ` from ${inst.version}` : "";
+  if (!confirm(
+    `Update ${id}${from}${to} with the copy shipped in this spawner?\n\n` +
+    `This replaces the tool's code. Your Valve values are kept, and the ` +
+    `previous version is saved to runtime/history — but any changes you made ` +
+    `to the code itself will be gone from the instance.`
+  )) return;
+  try {
+    const res = await apiFetch(`${API}/${id}/update-from-example`, { method: "POST" });
+    showAlert("success", `${id} updated to ${res.version} from ${res.source}.`);
+    if (res.restarted) showAlert("info", `${id} was restarted.`);
+    (res.warnings || []).forEach(w => showAlert("info", w));
+  } catch (e) {
+    showAlert("error", `Update failed: ${e.message}`);
+  }
+  loadInstances();
 }
 
 async function exportInstance(id) {

@@ -2,11 +2,14 @@ import { applyEditMode, clearToken, getToken, hideLoginModal, setToken, showLogi
 import { bindEdit, openEdit } from "./config.js";
 import { openEditorForInstance } from "./editor.js";
 import { bindFilter, configureInstanceActions, loadInstances } from "./instances.js";
+import { bindInfo, openInfo } from "./info.js";
 import { bindLogs, openLogs } from "./logs.js";
+import { bindPermissions } from "./permissions.js";
+import { bindStats } from "./stats.js";
 import { bindUpload } from "./upload.js";
-import "./settings.js";
+import { refreshUpdateBadge } from "./settings.js";
 
-configureInstanceActions({ openEdit, openEditorForInstance, openLogs });
+configureInstanceActions({ openEdit, openEditorForInstance, openLogs, openInfo });
 
 document.getElementById("login-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -18,6 +21,7 @@ document.getElementById("login-form").addEventListener("submit", async event => 
     hideLoginModal();
     applyEditMode();
     loadInstances();
+    refreshUpdateBadge();
     startPolling();
   } else {
     document.getElementById("login-error").classList.remove("hidden");
@@ -42,6 +46,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindUpload();
   bindEdit();
   bindLogs();
+  bindInfo();
+  bindStats();
+  bindPermissions();
   bindFilter();
 
   const statusResponse = await fetch("/api/auth-status");
@@ -53,6 +60,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   state.guestMode = state.authEnabled && !getToken();
   applyEditMode();
   loadInstances();
+  refreshUpdateBadge();
   startPolling();
 });
 

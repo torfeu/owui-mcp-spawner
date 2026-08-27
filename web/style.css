@@ -502,6 +502,351 @@ textarea { resize: vertical; font-family: var(--mono); font-size: 12px; }
   word-break: break-all;
 }
 
+.update-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(245,158,11,.15);
+  border: 1px solid rgba(245,158,11,.35);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 500;
+  text-decoration: none;
+  vertical-align: middle;
+}
+
+.update-badge:hover { background: rgba(245,158,11,.25); }
+
+/* The badge is a link in the header and a button on an instance — same look. */
+button.update-badge { font-family: inherit; cursor: pointer; }
+
+/* Table variant: same colour language, tighter so a dense row still reads. */
+.update-badge-sm {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.update-check-row {
+  display: flex;
+  align-items: center;
+  /* Checkbox hard left, button hard right — same edge the Create Venv button
+     sits on, so the section reads as one column. */
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.update-check-result {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.update-check-result:empty { margin-top: 0; }
+
+.update-check-ok    { color: var(--success); }
+.update-check-new   { color: var(--warning); }
+.update-check-error { color: var(--danger); }
+
+/* ── Usage Statistics ── */
+.stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.stats-header h2 { margin: 0; }
+.stats-header select { width: auto; }
+
+.stats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.stats-row:hover { border-color: var(--primary); }
+
+.stats-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.stats-name { font-size: 13px; }
+
+/* Bars, not a chart library: one column per day, tallest = busiest. */
+.stats-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 16px;
+}
+
+.stats-spark i {
+  width: 3px;
+  background: var(--primary);
+  border-radius: 1px;
+}
+
+.stats-spark i.empty { background: var(--border); }
+
+/* ── Calls-per-day chart ── */
+.chart {
+  position: relative;
+  margin: 4px 0 14px;
+}
+
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.chart-grid line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-grid text,
+.chart-xlabels text {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.chart-area {
+  fill: rgba(99, 102, 241, 0.16);
+  fill: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.chart-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* The busiest day is the one number worth reading without hovering. The ring
+   in surface colour keeps it legible where the line runs underneath it. */
+.chart-peak {
+  fill: var(--primary);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.chart-peak-label {
+  fill: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-cursor line {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.chart-cursor circle {
+  fill: var(--primary);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.chart-hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.chart-tip {
+  position: absolute;
+  bottom: 100%;
+  z-index: 2;
+  padding: 5px 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chart-compact { margin: 2px 0 8px; }
+
+.stats-numbers {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.stats-recent {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stats-tools {
+  padding: 4px 10px 10px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stats-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.stats-tool code { font-family: var(--mono); flex: 1; }
+
+.stats-unused {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stats-chip {
+  font-size: 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+/* ── Info Modal ── */
+.info-meta {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+
+.info-row { display: contents; }
+
+.info-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding-top: 1px;
+}
+
+.info-value { word-break: break-word; }
+.info-value code { font-family: var(--mono); font-size: 12px; }
+
+/* Second line under a value — the path behind an "Update x.y.z" badge. */
+.info-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.info-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.fn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.fn-item {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.fn-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.fn-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+.fn-params {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fn-params-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.fn-param {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.fn-param-name { font-family: var(--mono); color: var(--text); }
+.fn-param-type { font-family: var(--mono); font-size: 11px; color: var(--info); }
+
+.fn-param-req {
+  font-size: 10px;
+  color: var(--warning);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+
+.fn-param-desc { color: var(--text-muted); flex: 1 1 100%; }
+
+@media (max-width: 700px) {
+  .info-meta { grid-template-columns: 1fr; gap: 2px; }
+  .info-label { padding-top: 6px; }
+}
+
 /* ── Misc ── */
 .hidden { display: none !important; }
 
@@ -844,8 +1189,95 @@ body.guest .admin-col { display: none; }
   vertical-align: middle;
 }
 
+/* ── Users & permissions ── */
+#perm-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 16px;
+  max-height: 55vh;
+}
+
+#perm-people {
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
+}
+
+.perm-people-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+#perm-list, #perm-roles { list-style: none; margin: 0; padding: 0; }
+
+.perm-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.perm-item:hover { background: rgba(255,255,255,.05); }
+.perm-active { background: rgba(59,130,246,.18); }
+.perm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perm-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, monospace; }
+.perm-dot { color: var(--success); font-size: 10px; }
+.perm-warn { color: var(--warning); font-weight: 700; }
+
+#perm-detail { overflow-y: auto; padding-right: 4px; }
+.perm-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.perm-account { margin: 12px 0; }
+
+.perm-instance {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.perm-instance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.perm-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+/* Dimmed rather than hidden: seeing which tools exist is half the reason to
+   pick "selected tools" in the first place. */
+.perm-dim { opacity: .4; }
+
+.perm-tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+}
+
 /* ── Small screens ── */
 @media (max-width: 700px) {
+  #perm-layout { grid-template-columns: 1fr; max-height: none; }
+  #perm-people { border-right: none; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+
   header {
     flex-wrap: wrap;
     padding: 10px 8px;

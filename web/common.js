@@ -13,6 +13,8 @@ export function applyEditMode() {
   document.getElementById("upload-btn").classList.toggle("hidden", hideUpload);
   document.getElementById("editor-btn").classList.toggle("hidden", hideNewTool);
   document.getElementById("settings-btn").classList.toggle("hidden", state.guestMode);
+  document.getElementById("stats-btn").classList.toggle("hidden", state.guestMode);
+  document.getElementById("perm-btn").classList.toggle("hidden", state.guestMode);
   document.getElementById("login-btn").classList.toggle("hidden", !state.guestMode);
   document.getElementById("logout-btn").classList.toggle("hidden", !(state.authEnabled && !state.guestMode));
   document.body.classList.toggle("guest", state.guestMode);

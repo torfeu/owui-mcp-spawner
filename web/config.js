@@ -22,7 +22,16 @@ export async function openEdit(id) {
   document.getElementById("edit-endpoint").value = cfg.server.endpoint;
   document.getElementById("edit-autostart").checked = cfg.lifecycle?.auto_start ?? false;
   document.getElementById("edit-deps").value = (cfg.install?.dependencies || []).join("\n");
+  document.getElementById("edit-identity-mode").value = cfg.identity_mode || "off";
   fillVenvSelect(document.getElementById("edit-venv"), await fetchVenvs(), cfg.venv || "default");
+
+  // Choosing a mode with no way to establish an identity is the one
+  // combination that fails silently later — required refuses every call,
+  // optional never sees a user. Say it here, where the choice is made.
+  const settings = await apiFetch("/api/settings").catch(() => null);
+  const canIdentify = settings === null
+    || settings.user_jwt_secret_set || settings.user_trust_headers;
+  document.getElementById("edit-identity-hint").classList.toggle("hidden", !!canIdentify);
 
   // Which fields are credentials is the server's call (it does the masking) —
   // it ships the classification in the payload instead of us re-guessing here.
@@ -84,6 +93,7 @@ async function saveEdit(restart) {
     values,
     install: { dependencies: deps },
     venv: document.getElementById("edit-venv").value || "default",
+    identity_mode: document.getElementById("edit-identity-mode").value,
   };
 
   try {

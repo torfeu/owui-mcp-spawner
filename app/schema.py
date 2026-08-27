@@ -14,6 +14,45 @@ class MCPStatus(str, Enum):
     dependency_error = "dependency_error"
 
 
+class IdentityMode(str, Enum):
+    """How much this instance cares who the end user is.
+
+    off       — as before: only the MCP Bearer token is checked (default).
+    optional  — a valid user token is published to the tools, a missing one is
+                not an error, and no access rules are applied. For bringing an
+                instance over and for diagnosis; not a boundary, because
+                "no token" still gets in.
+    required  — no verified user, no tool call. Access rules from app/policy.py
+                apply on top, and they deny by default.
+    """
+
+    off = "off"
+    optional = "optional"
+    required = "required"
+
+
+class MachineIdentity(BaseModel):
+    """A caller that has no OpenWebUI login — an agent CLI, a script, a cron job.
+
+    Assigned, not verified: whoever reaches this instance's port with the MCP
+    Bearer token *is* this identity. That is no weaker than the instance was
+    before (the token was already the only gate), and it buys something real —
+    the access rules apply to machines too, so an agent can be given three
+    tools instead of all of them.
+
+    Give it its own id and its own account. Pointing it at a person's account
+    hands that person's data to anyone holding the token.
+    """
+
+    sub: str = ""
+    name: str = ""
+    role: str = ""
+
+    def as_identity(self):
+        from .identity import Identity, SOURCE_MACHINE
+        return Identity(sub=self.sub, name=self.name, role=self.role, source=SOURCE_MACHINE)
+
+
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(ge=1024, le=65535)
@@ -56,6 +95,9 @@ class MCPConfig(BaseModel):
     values: dict[str, Any] = {}
     lifecycle: LifecycleConfig = LifecycleConfig()
     venv: str = "default"
+    identity_mode: IdentityMode = IdentityMode.off
+    # Stands in when no user token arrives — for callers that have no login.
+    machine_identity: Optional[MachineIdentity] = None
 
     @field_validator("id")
     @classmethod
