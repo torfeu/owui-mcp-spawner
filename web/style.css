@@ -1056,12 +1056,42 @@ button.update-badge { font-family: inherit; cursor: pointer; }
   margin-left: 8px;
 }
 
+/* ── Settings tabs ── */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.settings-tab:hover { color: var(--text); }
+
+.settings-tab-active {
+  color: var(--text);
+  border-bottom-color: var(--primary);
+}
+
 .settings-section {
   margin: 20px 0 0;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--border);
 }
 
+/* The separator belongs between sections, so the last one in a panel drops it.
+   Position decides that now, not a hand-set class that survives regrouping. */
+.settings-panel > .settings-section:last-child,
 .settings-section-last {
   border-bottom: none;
 }
@@ -1190,14 +1220,20 @@ body.guest .admin-col { display: none; }
 }
 
 /* ── Users & permissions ── */
+/* The row must be allowed to shrink, or max-height is a suggestion the grid
+   ignores: an auto row is as tall as its content, spills out of the box and
+   paints over the footer — which has no background of its own. Both halves are
+   needed, minmax() for the track and min-height for the items. */
 #perm-layout {
   display: grid;
   grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   gap: 16px;
   max-height: 55vh;
 }
 
 #perm-people {
+  min-height: 0;
   overflow-y: auto;
   border-right: 1px solid var(--border);
   padding-right: 10px;
@@ -1233,7 +1269,7 @@ body.guest .admin-col { display: none; }
 .perm-dot { color: var(--success); font-size: 10px; }
 .perm-warn { color: var(--warning); font-weight: 700; }
 
-#perm-detail { overflow-y: auto; padding-right: 4px; }
+#perm-detail { min-height: 0; overflow-y: auto; padding-right: 4px; }
 .perm-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 .perm-account { margin: 12px 0; }
 
@@ -1250,6 +1286,54 @@ body.guest .admin-col { display: none; }
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 6px;
+}
+
+/* The name takes what is left; min-width lets it shrink instead of forcing a
+   three-line stack next to the dropdown in a narrow dialog. */
+.perm-instance-head strong { flex: 1; min-width: 0; }
+
+.perm-instance-head select {
+  flex: 0 0 auto;
+  width: 140px;
+  font-size: 12px;
+}
+
+.perm-fold {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+}
+
+/* The head keeps the score so a folded block still says what it grants. */
+.perm-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.perm-search {
+  width: 100%;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.perm-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.perm-filter .perm-search { margin-bottom: 0; }
+
+.perm-filter-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .perm-tools {

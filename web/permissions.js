@@ -8,6 +8,11 @@ let identities = [];
 let instances = [];
 let selected = null;        // {kind: "user"|"role", key: string}
 const specsCache = new Map();
+const expanded = new Set();  // instance ids whose tool list is unfolded
+
+// Above this many governed instances the blocks start folded: a hundred
+// headings with a status each is readable, a hundred open tool lists is not.
+const FOLD_ABOVE = 8;
 
 export function bindPermissions() {
   document.getElementById("perm-btn").addEventListener("click", openPermissions);
@@ -15,6 +20,8 @@ export function bindPermissions() {
   document.getElementById("perm-backdrop").addEventListener("click", closePermissions);
   document.getElementById("perm-save").addEventListener("click", savePolicy);
   document.getElementById("perm-add").addEventListener("click", addUserByHand);
+  document.getElementById("perm-people-filter")
+    .addEventListener("input", event => applyPeopleFilter(event.target.value));
 }
 
 function closePermissions() {
@@ -27,10 +34,13 @@ async function openPermissions() {
   document.getElementById("perm-detail").innerHTML =
     '<p class="modal-hint">Pick someone on the left.</p>';
   try {
+    // ?include=specs carries every function list in this one response. The
+    // alternative is one request per instance per selected person, which is
+    // what this dialog used to do — fine for five instances, not for a hundred.
     const [policyData, roster, instanceList] = await Promise.all([
       apiFetch("/api/policy"),
       apiFetch("/api/identities"),
-      apiFetch(API),
+      apiFetch(`${API}?include=specs`),
     ]);
     policy = policyData.policy && Object.keys(policyData.policy).length
       ? policyData.policy : { users: {}, roles: {} };
@@ -40,6 +50,14 @@ async function openPermissions() {
     // Only instances that actually enforce anything are worth offering — a
     // checkbox that governs nothing is a promise the framework does not keep.
     instances = (instanceList || []).filter(i => i.identity_mode === "required");
+    specsCache.clear();
+    expanded.clear();
+    for (const inst of instances) {
+      if (Array.isArray(inst.specs)) specsCache.set(inst.id, inst.specs.map(s => s.name));
+      if (instances.length <= FOLD_ABOVE) expanded.add(inst.id);
+    }
+    document.getElementById("perm-people-filter").value = "";
+    applyPeopleFilter("");
 
     document.getElementById("perm-match-email").checked = !!policy.match_email;
     document.getElementById("perm-match-name").checked = !!policy.match_name;
@@ -93,6 +111,9 @@ function renderPeople() {
       <span class="perm-name">${esc(role)}</span>${dot}</li>`;
   }).join("") || '<li class="modal-hint">No roles seen.</li>';
 
+  // Both lists were just rebuilt, so the filter has to be laid over them again.
+  applyPeopleFilter(document.getElementById("perm-people-filter").value);
+
   for (const item of document.querySelectorAll(".perm-item")) {
     item.addEventListener("click", () => {
       selected = { kind: item.dataset.kind, key: item.dataset.key };
@@ -141,19 +162,23 @@ async function renderDetail() {
     const mode = current === "*" ? "all" : Array.isArray(current) ? "some" : "none";
     const tools = await specsFor(inst.id);
     const chosen = new Set(Array.isArray(current) ? current : []);
+    const open = expanded.has(inst.id);
     const toolBoxes = tools.map(tool => `
       <label class="perm-tool"><input type="checkbox" data-tool="${esc(inst.id)}|${esc(tool)}"
         ${chosen.has(tool) ? "checked" : ""} ${mode === "some" ? "" : "disabled"}/> ${esc(tool)}</label>`).join("");
-    return `<div class="perm-instance">
+    return `<div class="perm-instance" data-instance="${esc(inst.id)}">
       <div class="perm-instance-head">
+        <button type="button" class="perm-fold" data-fold="${esc(inst.id)}"
+                aria-expanded="${open}" title="Show or hide the tools">${open ? "▾" : "▸"}</button>
         <strong>${esc(inst.name || inst.id)}</strong>
+        <span class="perm-count" data-count="${esc(inst.id)}">${statusText(mode, chosen.size, tools.length)}</span>
         <select data-mode="${esc(inst.id)}">
           <option value="none"${mode === "none" ? " selected" : ""}>no access</option>
           <option value="all"${mode === "all" ? " selected" : ""}>all tools</option>
           <option value="some"${mode === "some" ? " selected" : ""}>selected tools</option>
         </select>
       </div>
-      <div class="perm-tools${mode === "some" ? "" : " perm-dim"}">${toolBoxes || '<span class="modal-hint">no tools</span>'}</div>
+      <div class="perm-tools${mode === "some" ? "" : " perm-dim"}${open ? "" : " hidden"}">${toolBoxes || '<span class="modal-hint">no tools</span>'}</div>
     </div>`;
   }));
 
@@ -166,6 +191,10 @@ async function renderDetail() {
              placeholder="secrets/accounts/&lt;name&gt;" />
     </div>
     <p class="modal-hint">The file holds the secret — one per account, <code>chmod 600</code>. Its last non-empty line is used, so an old value may stay above the new one.</p>
+    ${rows.length > 1 ? `<div class="perm-filter">
+      <input type="search" id="perm-tool-filter" class="perm-search" placeholder="Filter tools across all instances…" />
+      <span class="perm-filter-count" id="perm-tool-count"></span>
+    </div>` : ""}
     ${rows.join("") || '<p class="modal-hint">No instance is set to <code>required</code>, so there is nothing to grant yet.</p>'}
     ${isUser ? `<div class="modal-actions"><button class="btn btn-danger" id="perm-remove">Remove all rules</button></div>` : ""}`;
 
@@ -189,8 +218,20 @@ async function renderDetail() {
       const list = new Set(Array.isArray(target.instances[id]) ? target.instances[id] : []);
       box.checked ? list.add(tool) : list.delete(tool);
       target.instances[id] = [...list];
+      // The head keeps the score, so a folded block still says what it grants.
+      const counter = detail.querySelector(`[data-count="${CSS.escape(id)}"]`);
+      if (counter) counter.textContent = statusText("some", list.size, specsCache.get(id)?.length ?? 0);
     });
   });
+  detail.querySelectorAll("[data-fold]").forEach(button => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.fold;
+      expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+      applyToolFilter(document.getElementById("perm-tool-filter")?.value || "");
+    });
+  });
+  document.getElementById("perm-tool-filter")
+    ?.addEventListener("input", event => applyToolFilter(event.target.value));
   for (const [id, field] of [["perm-account", "account"], ["perm-credentials", "credentials_file"]]) {
     detail.querySelector(`#${id}`)?.addEventListener("input", event => {
       const target = entryFor(true);
@@ -206,6 +247,55 @@ async function renderDetail() {
       '<p class="modal-hint">Pick someone on the left.</p>';
     renderPeople();
   });
+}
+
+function statusText(mode, chosen, total) {
+  if (mode === "all") return "all tools";
+  if (mode === "some") return `${chosen} of ${total}`;
+  return "no access";
+}
+
+// Filtering and folding are pure show/hide over the rendered blocks: no
+// re-render, so nothing anyone has ticked can get lost on the way.
+function applyToolFilter(text) {
+  const needle = text.trim().toLowerCase();
+  const detail = document.getElementById("perm-detail");
+  let shown = 0;
+  let total = 0;
+
+  for (const block of detail.querySelectorAll(".perm-instance")) {
+    let hits = 0;
+    for (const label of block.querySelectorAll(".perm-tool")) {
+      total += 1;
+      const match = !needle || label.textContent.toLowerCase().includes(needle);
+      label.classList.toggle("hidden", !match);
+      if (match) hits += 1;
+    }
+    shown += hits;
+
+    // While a filter is active a hit decides: a match hidden behind a fold is
+    // as good as no match, and an instance without one is out of the way.
+    const open = needle ? hits > 0 : expanded.has(block.dataset.instance);
+    block.classList.toggle("hidden", Boolean(needle) && hits === 0);
+    block.querySelector(".perm-tools")?.classList.toggle("hidden", !open);
+    const fold = block.querySelector("[data-fold]");
+    if (fold) {
+      fold.textContent = open ? "▾" : "▸";
+      fold.setAttribute("aria-expanded", String(open));
+    }
+  }
+
+  const counter = document.getElementById("perm-tool-count");
+  if (counter) counter.textContent = needle ? `${shown} of ${total}` : "";
+}
+
+function applyPeopleFilter(text) {
+  const needle = text.trim().toLowerCase();
+  for (const list of ["perm-list", "perm-roles"]) {
+    for (const item of document.getElementById(list).querySelectorAll("li")) {
+      item.classList.toggle("hidden", Boolean(needle) && !item.textContent.toLowerCase().includes(needle));
+    }
+  }
 }
 
 function addUserByHand() {

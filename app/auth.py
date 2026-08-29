@@ -20,6 +20,8 @@ from typing import Optional
 from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import lockout
+
 _password_hash: Optional[str] = None   # SHA-256 hex digest, or None = no auth
 
 _bearer = HTTPBearer(auto_error=False)
@@ -223,6 +225,16 @@ def configure_api_tokens() -> None:
             os.environ[env] = stored[key]
 
 
+def _is_configured_credential(token: str) -> bool:
+    """True for any credential this installation actually issued.
+
+    Used to keep the lockout honest: the read token on a write route is a
+    configured client at the wrong door, not somebody guessing. Only a token
+    that matches *nothing* counts as an attempt.
+    """
+    return verify_password(token) or verify_agent_token(token) or verify_read_token(token)
+
+
 def _token_grants_access(token: str, method: str) -> bool:
     """The single place that decides which credential opens which request.
 
@@ -250,7 +262,19 @@ async def is_request_authenticated(request) -> bool:
     credentials = await _bearer(request)
     if credentials is None:
         return False
-    return _token_grants_access(credentials.credentials, request.method)
+
+    # These routes answer either way — with the guest view for anonymous
+    # callers. That still tells a guesser whether a credential was right, so
+    # the attempts are counted here too; a blocked address gets the guest view.
+    address = lockout.address_of(request)
+    if lockout.blocked_for(address):
+        return False
+    if _token_grants_access(credentials.credentials, request.method):
+        lockout.reset(address)
+        return True
+    if not _is_configured_credential(credentials.credentials):
+        lockout.record_failure(address)
+    return False
 
 
 def auth_enabled() -> bool:
@@ -279,6 +303,14 @@ def _unauthorized(detail: str) -> HTTPException:
     )
 
 
+def _too_many(seconds: int) -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail=f"Too many failed attempts — wait {seconds} seconds",
+        headers={"Retry-After": str(seconds), "WWW-Authenticate": "Bearer"},
+    )
+
+
 def require_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
@@ -288,19 +320,38 @@ def require_auth(
     Accepts the password, the agent token, and the read token on GET requests
     (see _token_grants_access). Routes that serve credentials or can change
     them add require_admin_auth on top.
+
+    Repeated rejections from one address are slowed down (see app/lockout.py).
+    A wrong credential is counted whatever it was meant to be: on the wire a
+    mistyped password and a wrong token are the same thing, and counting only
+    the login form would leave every other route open to guessing.
     """
     if _password_hash is None:
         return  # auth disabled
 
+    address = lockout.address_of(request)
+    wait = lockout.blocked_for(address)
+    if wait:
+        raise _too_many(wait)
+
     token = credentials.credentials if credentials else None
     if not token:
+        # No credential is not a guess — the UI asks before anyone logs in.
         raise _unauthorized("Authentication required")
     if _token_grants_access(token, request.method):
+        lockout.reset(address)
         return
+    if _is_configured_credential(token):
+        # The read token on a mutating route: refused, but not a guess.
+        raise _unauthorized("Invalid password")
+    wait = lockout.record_failure(address)
+    if wait:
+        raise _too_many(wait)
     raise _unauthorized("Invalid password")
 
 
 def require_admin_auth(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
 ) -> None:
     """Password-only dependency for routes that serve or change credentials.
@@ -314,17 +365,28 @@ def require_admin_auth(
     if _password_hash is None:
         return  # auth disabled
 
+    address = lockout.address_of(request)
+    wait = lockout.blocked_for(address)
+    if wait:
+        raise _too_many(wait)
+
     token = credentials.credentials if credentials else None
     if not token:
         raise _unauthorized("Authentication required")
     if verify_password(token):
+        lockout.reset(address)
         return
     if verify_agent_token(token) or verify_read_token(token):
         # Deliberately 403, not 401: the credential is valid, the door is not.
+        # A configured client at the wrong door is not a guess, so it does not
+        # count towards the lockout either.
         raise HTTPException(
             status_code=403,
             detail="This route handles credentials and requires the admin password",
         )
+    wait = lockout.record_failure(address)
+    if wait:
+        raise _too_many(wait)
     raise _unauthorized("Invalid password")
 
 

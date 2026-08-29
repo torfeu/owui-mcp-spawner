@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.api_helpers as api_helpers
 import app.auth as auth
+import app.lockout as lockout
 from app.admin_server import app
 from app.schema import IdentityMode
 
@@ -387,6 +388,9 @@ class ReadTokenTests(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(app)
+        # Rejected credentials are counted per address now, and every test
+        # here shares one — start each with a clean slate.
+        lockout.clear_all()
         self.original_hash = auth._password_hash
         self.original_token = os.environ.get("MCP_MANAGER_READ_TOKEN")
         auth._password_hash = hashlib.sha256(self.PASSWORD.encode()).hexdigest()
@@ -548,6 +552,7 @@ class AgentTokenTests(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(app)
+        lockout.clear_all()
         self.original_hash = auth._password_hash
         self.original = {k: os.environ.get(k) for k in
                          ("MCP_MANAGER_AGENT_TOKEN", "MCP_MANAGER_READ_TOKEN")}
@@ -850,6 +855,7 @@ class SpecsEndpointTests(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(app)
+        lockout.clear_all()
         self.original_hash = auth._password_hash
         auth._password_hash = None
         self.tmp = tempfile.TemporaryDirectory()

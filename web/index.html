@@ -196,6 +196,7 @@
             <span>Users</span>
             <button class="btn btn-ghost" id="perm-add" title="Add a user id by hand">+</button>
           </div>
+          <input type="search" id="perm-people-filter" class="perm-search" placeholder="Filter people…" />
           <ul id="perm-list"></ul>
           <div class="perm-people-head" style="margin-top:10px"><span>Roles</span></div>
           <ul id="perm-roles"></ul>
@@ -326,6 +327,14 @@
     <div class="modal-content modal-wide">
       <h2>Settings</h2>
 
+      <div class="settings-tabs">
+        <button class="settings-tab settings-tab-active" data-settings-tab="security">Security</button>
+        <button class="settings-tab" data-settings-tab="identity">Identity</button>
+        <button class="settings-tab" data-settings-tab="system">System</button>
+        <button class="settings-tab" data-settings-tab="maintenance">Maintenance</button>
+      </div>
+
+      <div class="settings-panel" data-settings-panel="security">
       <div class="settings-section">
         <h3 class="settings-section-title">Security</h3>
         <div class="settings-status" id="settings-auth-status"></div>
@@ -338,7 +347,6 @@
           <input type="password" id="settings-pw2" autocomplete="new-password" placeholder="" />
         </div>
       </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">Edit Mode</h3>
         <div class="form-grid">
@@ -350,7 +358,6 @@
           </select>
         </div>
       </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">MCP Endpoint Authentication</h3>
         <div class="settings-status" id="settings-mcp-status"></div>
@@ -374,32 +381,6 @@
           MCP token editing is disabled on this server (<code>--no-token-edit</code>).
         </div>
       </div>
-
-      <div class="settings-section">
-        <h3 class="settings-section-title">User Identity (OpenWebUI)</h3>
-        <div class="settings-status" id="settings-identity-status"></div>
-        <p class="modal-hint">Lets an instance know <em>which person</em> is calling, not just that the client is allowed to. Set the same secret OpenWebUI signs with (<code>FORWARD_USER_INFO_HEADER_JWT_SECRET</code>, together with <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code>). Per instance, switch <em>User identity</em> in its config; access rules live in <code>runtime/identity_policy.json</code>. Write-only: it is never shown again, because it is a copy of what OpenWebUI already has.</p>
-        <div class="form-grid" id="settings-identity-fields">
-          <label>Shared Secret</label>
-          <input type="password" id="settings-identity-secret" autocomplete="off"
-                 placeholder="Not set" />
-          <label></label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="settings-identity-clear" />
-            Remove secret (no user identity is verified anywhere)
-          </label>
-          <label>Without a secret</label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="settings-identity-trust-headers" />
-            Trust OpenWebUI's plain user headers (unsigned)
-          </label>
-        </div>
-        <p class="modal-hint" id="settings-identity-trust-hint">Only needs <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code> in OpenWebUI, no shared secret. It separates the users of your OpenWebUI installation from each other — but the headers are a claim, not a proof: anyone who can reach an instance's port with the MCP Bearer token can write them by hand. Choose it when that port is not reachable by anyone you are guarding against; otherwise use the secret.</p>
-        <div id="settings-identity-locked" class="settings-locked hidden">
-          Token editing is disabled on this server (<code>--no-token-edit</code>).
-        </div>
-      </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">API Read Token</h3>
         <div class="settings-status" id="settings-read-status"></div>
@@ -424,7 +405,6 @@
           Token editing is disabled on this server (<code>--no-token-edit</code>).
         </div>
       </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">Agent Token</h3>
         <div class="settings-status" id="settings-agent-status"></div>
@@ -449,7 +429,36 @@
           Token editing is disabled on this server (<code>--no-token-edit</code>).
         </div>
       </div>
+      </div>
 
+      <div class="settings-panel hidden" data-settings-panel="identity">
+      <div class="settings-section">
+        <h3 class="settings-section-title">User Identity (OpenWebUI)</h3>
+        <div class="settings-status" id="settings-identity-status"></div>
+        <p class="modal-hint">Lets an instance know <em>which person</em> is calling, not just that the client is allowed to. Set the same secret OpenWebUI signs with (<code>FORWARD_USER_INFO_HEADER_JWT_SECRET</code>, together with <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code>). Per instance, switch <em>User identity</em> in its config; access rules live in <code>runtime/identity_policy.json</code>. Write-only: it is never shown again, because it is a copy of what OpenWebUI already has.</p>
+        <div class="form-grid" id="settings-identity-fields">
+          <label>Shared Secret</label>
+          <input type="password" id="settings-identity-secret" autocomplete="off"
+                 placeholder="Not set" />
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-identity-clear" />
+            Remove secret (no user identity is verified anywhere)
+          </label>
+          <label>Without a secret</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-identity-trust-headers" />
+            Trust OpenWebUI's plain user headers (unsigned)
+          </label>
+        </div>
+        <p class="modal-hint" id="settings-identity-trust-hint">Only needs <code>ENABLE_FORWARD_USER_INFO_HEADERS=true</code> in OpenWebUI, no shared secret. It separates the users of your OpenWebUI installation from each other — but the headers are a claim, not a proof: anyone who can reach an instance's port with the MCP Bearer token can write them by hand. Choose it when that port is not reachable by anyone you are guarding against; otherwise use the secret.</p>
+        <div id="settings-identity-locked" class="settings-locked hidden">
+          Token editing is disabled on this server (<code>--no-token-edit</code>).
+        </div>
+      </div>
+      </div>
+
+      <div class="settings-panel hidden" data-settings-panel="system">
       <div class="settings-section">
         <h3 class="settings-section-title">Shared MCP Port</h3>
         <div class="settings-status" id="settings-shared-status"></div>
@@ -464,7 +473,6 @@
           <input type="number" id="settings-shared-port" min="1024" max="65535" placeholder="e.g. 8100" />
         </div>
       </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">Virtual Environments</h3>
         <p class="modal-hint">Each instance runs in its own venv so dependencies stay isolated. The <code>default</code> venv is always available.</p>
@@ -474,7 +482,19 @@
           <button type="button" class="btn btn-secondary btn-sm" id="settings-venv-create">Create Venv</button>
         </div>
       </div>
+      <div class="settings-section settings-section-last">
+        <h3 class="settings-section-title">Server</h3>
+        <div class="settings-info-row">
+          <span class="settings-label">Bind Address</span>
+          <code id="settings-host">—</code>
+          <span class="settings-label">Port</span>
+          <code id="settings-port">—</code>
+        </div>
+        <div class="settings-bind-hint" id="settings-bind-hint"></div>
+      </div>
+      </div>
 
+      <div class="settings-panel hidden" data-settings-panel="maintenance">
       <div class="settings-section">
         <h3 class="settings-section-title">Usage Tracking</h3>
         <p class="modal-hint">Every tool call is recorded with time, instance and function in <code>runtime/usage.db</code> — never arguments or results. Individual calls are deleted after the retention window; the totals per function are kept, so <em>ever used</em> stays answerable.</p>
@@ -489,7 +509,6 @@
           </select>
         </div>
       </div>
-
       <div class="settings-section">
         <h3 class="settings-section-title">Update Check</h3>
         <div class="settings-status" id="settings-update-status"></div>
@@ -503,18 +522,7 @@
         </div>
         <div class="update-check-result" id="settings-update-result"></div>
       </div>
-
-      <div class="settings-section settings-section-last">
-        <h3 class="settings-section-title">Server</h3>
-        <div class="settings-info-row">
-          <span class="settings-label">Bind Address</span>
-          <code id="settings-host">—</code>
-          <span class="settings-label">Port</span>
-          <code id="settings-port">—</code>
-        </div>
-        <div class="settings-bind-hint" id="settings-bind-hint"></div>
       </div>
-
       <div class="modal-actions">
         <button class="btn btn-primary" id="settings-save">Save Settings</button>
         <button class="btn btn-danger" id="settings-restart">Restart Spawner</button>

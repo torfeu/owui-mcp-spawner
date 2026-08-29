@@ -30,7 +30,12 @@ VENVS_DIR = BASE_DIR / "runtime" / "venvs"
 DEFAULT_VENV = "default"
 
 # Packages every instance venv needs so the MCP runner can import and serve.
-BASE_PACKAGES = ["mcp", "uvicorn", "starlette", "pydantic", "httpx"]
+# mcp is pinned below 2: the 2.x line rebuilt the low-level Server API, and
+# mcp_runner.build_server() still uses the 1.x decorators (@server.list_tools()).
+# Unpinned, a venv created today installs 2.x and every instance in it dies at
+# startup with "'Server' object has no attribute 'list_tools'". Lifting the pin
+# means porting the runner first.
+BASE_PACKAGES = ["mcp<2", "uvicorn", "starlette", "pydantic", "httpx"]
 READY_MARKER = ".mcp-manager-ready"
 
 # venv creation + base-package install can be slow on first use.
@@ -54,8 +59,12 @@ def _lock_for(name: str) -> threading.Lock:
         return lock
 
 
+def _is_valid_name(name: str) -> bool:
+    return bool(name) and bool(_VALID_NAME.fullmatch(name))
+
+
 def _validate_name(name: str) -> None:
-    if not name or not _VALID_NAME.fullmatch(name):
+    if not _is_valid_name(name):
         raise ValueError(f"Invalid venv name: {name!r} (letters, digits, _ and - only)")
 
 
@@ -87,13 +96,26 @@ def venv_ready(name: str = DEFAULT_VENV) -> bool:
 
 
 def list_venvs() -> list[str]:
-    """Names of all created venvs (directories that contain a Python)."""
+    """Names of all created venvs (directories that contain a Python).
+
+    A directory whose name this module could never have created is skipped, not
+    fatal. Backups land next to the venvs — `default.py312-migrated-20260816`
+    after an interpreter migration — and asking venv_dir() about one used to
+    raise straight out of the listing, which took the whole /api/venvs route
+    with it. One stray directory must not cost the list.
+    """
     if not VENVS_DIR.exists():
         return []
-    return sorted(
-        p.name for p in VENVS_DIR.iterdir()
-        if p.is_dir() and python_path(p.name).exists()
-    )
+    names = []
+    for p in sorted(VENVS_DIR.iterdir()):
+        if not p.is_dir():
+            continue
+        if not _is_valid_name(p.name):
+            logger.debug(f"Ignoring {p.name} in runtime/venvs — not a venv name")
+            continue
+        if python_path(p.name).exists():
+            names.append(p.name)
+    return names
 
 
 def _base_packages_available(py: Path) -> bool:

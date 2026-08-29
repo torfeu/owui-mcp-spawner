@@ -112,7 +112,7 @@ Data comes from `GET /api/usage?days=N`, fetched when the dialog opens — never
 
 ## Settings page
 
-The web UI includes a **⚙ Settings** page (top-right button) for managing common runtime options:
+The web UI includes a **⚙ Settings** page (top-right button) for managing common runtime options, grouped into four tabs — **Security**, **Identity**, **System** and **Maintenance**. All panels stay loaded, so **Save Settings** submits the whole dialog whichever tab is open; the tab you last used is remembered in the browser.
 
 - **Password** — set or change the password (requires current password if one is already set); persisted as SHA-256 hash in `runtime/settings.json`
 - **Edit mode** — switch between full / upload-only / readonly at runtime
@@ -174,7 +174,7 @@ Notes:
 
 Every instance runs in its own Python virtual environment under `runtime/venvs/<name>/`, so a tool's third-party dependencies are fully isolated — conflicting versions across tools no longer collide, and nothing pollutes the spawner process itself.
 
-- Instances default to the **`default`** venv, which is created on first use with the base packages the runner needs (`mcp`, `uvicorn`, `starlette`, `pydantic`, `httpx`).
+- Instances default to the **`default`** venv, which is created on first use with the base packages the runner needs (`mcp<2`, `uvicorn`, `starlette`, `pydantic`, `httpx`). `mcp` carries a ceiling because the 2.x line rebuilt the low-level `Server` API the runner registers its handlers with; lifting it means porting the runner first.
 - A venv is **created on demand**: assigning an instance to a new venv name (or creating a tool with one) builds it automatically. You can also create/delete venvs explicitly on the Settings page.
 - Validation, dependency installs and the runtime all use the instance's venv interpreter, so an import-time check sees exactly the packages the tool will have at runtime.
 - The dashboard shows each instance's venv in a **Venv** column; the **Edit** dialog has a venv dropdown to move an instance (deps are reinstalled into the target venv and the instance restarts if running).
@@ -398,6 +398,16 @@ When auth is active:
 - The login screen can be dismissed with **Continue as guest**, which opens the read-only guest view described below.
 - All mutating and sensitive API routes require a `Bearer` token.
 - Auth is initialized at module import time, so it is also active when starting directly via `uvicorn app.admin_server:app`.
+
+### Login lockout
+
+Repeated rejected credentials from one address are slowed down: three cost 60 seconds, the next three 120, then 240, doubling without a ceiling. The API answers `429` with `Retry-After`, and the login dialog counts down instead of repeating "wrong password".
+
+There is no login endpoint to guard — the UI sends the password as a Bearer token on every request — so the counter lives in `app/lockout.py`, next to the decision in `app/auth.py`, and is keyed by the **connection's** address. `X-Forwarded-For` is deliberately ignored: a header the caller writes would let an attacker dodge their own counter, or run someone else's address into a block. Behind a reverse proxy that means every browser shares the proxy's address.
+
+Not counted: a request with no credential at all (the UI asks before anyone logs in, and a reload must not cost a strike), and a *configured* read or agent token used on a route it has no scope for — a client at the wrong door, not a guess.
+
+Counters are in memory only. A manager restart clears every block, which is also the way back in after locking yourself out; that needs access to the server, and whoever has it is not the attacker.
 
 ### Guest mode
 
@@ -757,7 +767,7 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 .venv/bin/python -m unittest discover -v
 ```
 
-The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
+The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_auth_lockout.py` covers the failed-credential counter — the doubling, the quiet period that starts when a block *ends* rather than at the last attempt, and the two things that must not count. `tests/test_venv_base_packages.py` guards the `mcp` ceiling in both places that declare it. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
 
 ---
 
@@ -778,6 +788,7 @@ app/
   identity_registry.py  Roster of users the runners have seen (runtime/identities.db)
   policy.py             Per-user access rules and per-user backend credentials
   auth.py               Auth, guest detection, edit mode, MCP token and API-token helpers
+  lockout.py            Failed-credential counter per client address (in memory, see Login lockout)
   settings_store.py     Persistent settings (runtime/settings.json)
   config_store.py       Config file I/O + port management
   process_manager.py    Subprocess lifecycle (start/stop/restart) + health checks
@@ -810,6 +821,19 @@ deploy/                 systemd service + env file examples
 ---
 
 ## Changelog
+
+### v0.2.1
+
+**New**
+- **Settings in tabs** — eleven sections in one modal had outgrown the dialog. They are now grouped into **Security** (password, edit mode, MCP endpoint auth, read token, agent token), **Identity**, **System** (shared port, venvs, server) and **Maintenance** (usage tracking, update check). The panels stay in the DOM, so loading and **Save Settings** still reach every field no matter which tab is open — saving remains one action for the whole dialog. The chosen tab is remembered in `localStorage` (in a `try`/`catch`: in a private window the access itself throws)
+- **Login lockout** — three rejected credentials from one address cost 60 seconds, the next three 120, then 240, doubling without a ceiling; the API answers `429` with `Retry-After` and the login dialog shows a countdown instead of "wrong password". There is no login route to protect — the browser sends the password as a Bearer token on every request — so the counter sits in `app/lockout.py` where that decision is made, keyed by the connection's address and never by `X-Forwarded-For`, which a caller could write to dodge their own counter or run someone else's address into a block. A request carrying **no** credential is not counted (the UI asks before anyone has logged in, and a reload must not cost a strike), and neither is a *configured* token that merely lacks the scope for a route — that is a client at the wrong door, not a guess. Counters live in memory only: a manager restart clears every block, which is also how you get back in if you lock yourself out
+- **Permissions dialog at scale** — a search over all tools (with a "10 of 152" counter, blocks holding a hit open themselves), a search over the people list, and instance blocks collapsed from eight instances up, each header carrying its status (*no access* · *all tools* · *7 of 86*). Filtering and collapsing only show and hide the rendered blocks, so a checkbox already ticked cannot get lost on the way
+
+**Fixed**
+- **A new venv installed an `mcp` the runner cannot use** — the base packages were unpinned, so any venv created after the release of `mcp` 2.0 got the 2.x line, which rebuilt the low-level `Server` API; every instance in that venv died at startup with `'Server' object has no attribute 'list_tools'`. Existing venvs keep the 1.x they installed long ago and show nothing, which is why this stayed invisible on a running installation — but a **fresh install of v0.2.0 was broken out of the box**, as was any newly created venv. `mcp` is now pinned below 2 in `venv_manager.BASE_PACKAGES` and in `pyproject.toml`, with a test that fails if the ceiling is dropped without porting the runner first
+- **The permissions dialog painted over its own buttons** — its grid items kept their automatic minimum height, so the columns grew with their content instead of scrolling, and the overflow was drawn across the Save/Close bar (which has no background of its own). Measured at 900×500 with 86 tools: 199 px of overlap, now a 20 px gap and a scrollbar where it belongs
+- **A leftover directory took the venv list down** — an interpreter migration parks the old venv next to the new one under a name like `default.py312-migrated-20260816-001110`. The listing asked `venv_dir()` about every directory it found, and the dot in that name raised out of the listing and took `/api/venvs` with it. Unnoticed since 16 Aug because the UI has a fallback and quietly showed only `default`. The listing now skips names this module could never have produced; `venv_dir()` stays strict, so *using* such a name still raises
+- **A three-line instance name in the permissions header** — the name stacked next to the dropdown in the narrow column; the dropdown has a fixed width now and the name `min-width: 0`
 
 ### v0.2.0
 

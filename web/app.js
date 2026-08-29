@@ -11,11 +11,39 @@ import { refreshUpdateBadge } from "./settings.js";
 
 configureInstanceActions({ openEdit, openEditorForInstance, openLogs, openInfo });
 
+// Counts the lockout down in the login dialog. Without it a 429 looks like a
+// wrong password that stays wrong, and the next thing anyone tries is another
+// guess — which is exactly what extends the block.
+let lockoutTimer = null;
+
+function showLockout(seconds) {
+  const error = document.getElementById("login-error");
+  const submit = document.querySelector("#login-form button[type=submit]");
+  clearInterval(lockoutTimer);
+  error.classList.remove("hidden");
+  submit.disabled = true;
+
+  const tick = () => {
+    if (seconds <= 0) {
+      clearInterval(lockoutTimer);
+      submit.disabled = false;
+      error.textContent = "Wrong password";
+      error.classList.add("hidden");
+      return;
+    }
+    error.textContent = `Too many attempts — wait ${seconds} s`;
+    seconds -= 1;
+  };
+  tick();
+  lockoutTimer = setInterval(tick, 1000);
+}
+
 document.getElementById("login-form").addEventListener("submit", async event => {
   event.preventDefault();
   const password = document.getElementById("login-password").value;
   const response = await fetch("/api/auth-check", { headers: { "Authorization": `Bearer ${password}` } });
   if (response.ok) {
+    clearInterval(lockoutTimer);
     setToken(password);
     state.guestMode = false;
     hideLoginModal();
@@ -23,7 +51,10 @@ document.getElementById("login-form").addEventListener("submit", async event => 
     loadInstances();
     refreshUpdateBadge();
     startPolling();
+  } else if (response.status === 429) {
+    showLockout(Number(response.headers.get("Retry-After")) || 60);
   } else {
+    document.getElementById("login-error").textContent = "Wrong password";
     document.getElementById("login-error").classList.remove("hidden");
   }
 });

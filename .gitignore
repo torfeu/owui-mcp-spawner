@@ -29,3 +29,5 @@ docs/bug-*.md
 # .git/info/exclude, which lives outside the repo and does not survive a
 # fresh clone — so the rule belongs here, where it travels with the code.
 .claude/
+
+content/

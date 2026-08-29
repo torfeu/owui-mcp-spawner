@@ -50,12 +50,43 @@ document.getElementById("settings-restart").addEventListener("click", restartMan
 document.getElementById("settings-venv-create").addEventListener("click", createVenv);
 document.getElementById("settings-update-now").addEventListener("click", runUpdateCheck);
 
+// Tabs are presentation only: every panel stays in the DOM and keeps its
+// fields, so loading and saving reach all of them regardless of what is shown.
+// Saving is one action for the whole dialog, not per tab.
+const TAB_STORAGE_KEY = "settings-tab";
+
+function showSettingsTab(key) {
+  for (const tab of document.querySelectorAll("[data-settings-tab]")) {
+    tab.classList.toggle("settings-tab-active", tab.dataset.settingsTab === key);
+  }
+  for (const panel of document.querySelectorAll("[data-settings-panel]")) {
+    panel.classList.toggle("hidden", panel.dataset.settingsPanel !== key);
+  }
+  try {
+    localStorage.setItem(TAB_STORAGE_KEY, key);
+  } catch {
+    // Private mode or blocked storage: remembering the tab is a convenience.
+  }
+}
+
+for (const tab of document.querySelectorAll("[data-settings-tab]")) {
+  tab.addEventListener("click", () => showSettingsTab(tab.dataset.settingsTab));
+}
+
 // Guards saveSettings: saving before the current values arrive would silently
 // reset edit mode and disable the shared port from the pristine form state.
 let settingsLoaded = false;
 
 function openSettings() {
   settingsLoaded = false;
+  let remembered = null;
+  try {
+    remembered = localStorage.getItem(TAB_STORAGE_KEY);
+  } catch {
+    // See showSettingsTab: fall back to the first tab.
+  }
+  const known = remembered && document.querySelector(`[data-settings-panel="${remembered}"]`);
+  showSettingsTab(known ? remembered : document.querySelector("[data-settings-tab]").dataset.settingsTab);
   document.getElementById("settings-modal").classList.remove("hidden");
   loadSettingsData();
 }
