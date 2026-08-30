@@ -883,6 +883,19 @@ deploy/                 systemd service + env file examples
 
 ## Changelog
 
+### v0.2.2 — in progress (unreleased)
+
+*Kept up to date as work lands; the version number in `app/__init__.py` is bumped only at release.*
+
+**New**
+- **File storage** — tools that produce a file had nowhere to put it. An instance that opts in gets `content/<id>/`, and the path reaches the tool three ways (Valve autofill for `content_dir` / `output_dir` / `*_export_dir`, the `MCP_CONTENT_DIR` environment variable, and `MCP_CONTENT_URL` for the link), so a tool written for OpenWebUI usually runs unchanged. Results are rewritten on the way out: a link to OpenWebUI's `/cache/files/...`, which resolves against OpenWebUI in the browser and finds nothing of ours, becomes a download URL of the spawner's own. Each file carries a token derived from a server secret in `runtime/content.key` — deliberately not in `settings.json`, because the runners read it and a runner doing read-modify-write on that file would sooner or later overwrite a write of the manager's. The download route needs no login, the token *is* the credential, and a wrong token gives the same `404` as a missing file so the route cannot be used to probe for names. Quota with a warning line placed **before** the tool's own output (a small model reads the first lines), optional refusal once the folder is full, and retention by file age. Settings tab **Files**, per-instance switch in **Edit → Config**, and `list_content` / `read_content` / `delete_content` in the control tool (v0.0.8, deletion behind its own switch, off by default)
+- **mcp 2.x** — the runner is on the 2.x `Server` API, the base packages are pinned to `mcp>=2`, and `require_mcp_2()` refuses to start on an older line rather than failing later with a missing attribute. This lifts the emergency ceiling from v0.2.1, where `mcp` had to be pinned *below* 2 because the 2.0 release rebuilt the API the runner used. The tool router had to follow to v0.0.9 — it is itself an SDK *client*, which the port had not accounted for
+
+**Fixed**
+- **Every runner log line appeared twice** — the manager's logger has its own stdout handler, and inside the runner the root logger has one too, so each record was emitted by both. `propagate = False` on the manager logger ends it. Long-standing; it only became obvious next to a newly added line
+- **The test suite deleted real files** — `tests/test_api.py::AgentTokenTests` walks *every* method of *every* `/api` route with a valid token and lets them run for real. `DELETE /api/content` was the first such route without a mandatory instance id, so nothing upstream turned it into a harmless `404`, and the first run wiped the storage folder. The same suite runs on the server. Patched like `_restart_after_delay` beside it, and verified with a sentinel file that survives a full run — **any new writing route without a mandatory id has to be patched there too**
+
+
 ### v0.2.1
 
 **New**
