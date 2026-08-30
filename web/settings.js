@@ -49,6 +49,7 @@ document.getElementById("settings-save").addEventListener("click", saveSettings)
 document.getElementById("settings-restart").addEventListener("click", restartManager);
 document.getElementById("settings-venv-create").addEventListener("click", createVenv);
 document.getElementById("settings-update-now").addEventListener("click", runUpdateCheck);
+document.getElementById("settings-content-clear").addEventListener("click", clearAllContent);
 
 // Tabs are presentation only: every panel stays in the DOM and keeps its
 // fields, so loading and saving reach all of them regardless of what is shown.
@@ -208,6 +209,9 @@ async function loadSettingsData() {
     }
     retention.value = stored;
 
+    renderContentSettings(data);
+    await renderContentFiles();
+
     renderUpdateSection(data.update);
 
     document.getElementById("settings-host").textContent = data.host || "—";
@@ -343,6 +347,138 @@ export async function refreshUpdateBadge() {
   }
 }
 
+export function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value < 10 && unit ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+function renderContentSettings(data) {
+  // Plain number fields rather than a list of presets: a quota is a number
+  // somebody picks for their disk, and 300 MB is not a stranger choice than
+  // 500. The server keeps the authoritative bounds (see PUT /api/settings).
+  document.getElementById("settings-content-base-url").value = data.content_base_url || "";
+  document.getElementById("settings-content-max").value = data.content_max_mb ?? 200;
+  document.getElementById("settings-content-warn").value = data.content_warn_percent ?? 80;
+  document.getElementById("settings-content-retention").value = data.content_retention_days ?? 0;
+  document.getElementById("settings-content-block").checked = !!data.content_block_when_full;
+  document.getElementById("settings-content-mode").value = data.content_retention_mode || "file_age";
+
+  // The one setting that fails silently: without it the links are relative,
+  // and a chat client resolves them against itself instead of against us.
+  const status = document.getElementById("settings-content-status");
+  if (data.content_base_url) {
+    status.textContent = `Download links point at ${data.content_base_url}/content/…`;
+    status.className = "settings-status settings-status-ok";
+  } else {
+    status.textContent = "No base URL — download links stay relative and will not resolve from a chat";
+    status.className = "settings-status settings-status-warn";
+  }
+}
+
+async function renderContentFiles() {
+  const list = document.getElementById("settings-content-list");
+  let data;
+  try {
+    data = await apiFetch("/api/content");
+  } catch (e) {
+    list.innerHTML = `<div class="venv-meta">Could not read the storage: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (!data.instances.length) {
+    list.innerHTML = '<div class="venv-meta">Nothing stored yet.</div>';
+    return;
+  }
+  // The same threshold the runners warn at — hardcoding 80 here would colour
+  // the list at a different point than the warning actually fires.
+  const warnAt = data.settings?.content_warn_percent ?? 80;
+  list.innerHTML = data.instances.map(entry => {
+    const quota = entry.limit_bytes
+      ? ` · ${entry.percent} % of ${formatBytes(entry.limit_bytes)}`
+      : "";
+    const warn = entry.limit_bytes && entry.percent >= warnAt ? " content-over" : "";
+    return `<div class="venv-row">
+      <span class="venv-badge">${esc(entry.instance)}</span>
+      <span class="venv-meta${warn}">${entry.files} file${entry.files === 1 ? "" : "s"} · ${formatBytes(entry.bytes)}${quota}</span>
+      <button class="btn btn-secondary btn-sm" data-content-show="${esc(entry.instance)}">Files</button>
+      <button class="btn btn-danger btn-sm" data-content-empty="${esc(entry.instance)}">Empty</button>
+    </div>
+    <div class="content-files hidden" data-content-files="${esc(entry.instance)}"></div>`;
+  }).join("");
+
+  list.querySelectorAll("[data-content-show]").forEach(btn => {
+    btn.addEventListener("click", () => toggleContentFiles(btn.dataset.contentShow));
+  });
+  list.querySelectorAll("[data-content-empty]").forEach(btn => {
+    btn.addEventListener("click", () => emptyContent(btn.dataset.contentEmpty));
+  });
+}
+
+async function toggleContentFiles(instance) {
+  const box = document.querySelector(`[data-content-files="${CSS.escape(instance)}"]`);
+  if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.innerHTML = '<div class="venv-meta">Loading…</div>';
+  try {
+    const data = await apiFetch(`/api/content/${encodeURIComponent(instance)}`);
+    if (!data.items.length) {
+      box.innerHTML = '<div class="venv-meta">Empty.</div>';
+      return;
+    }
+    box.innerHTML = data.items.map(item => {
+      const when = new Date(item.modified * 1000).toLocaleString();
+      // The href is the same tokenised link the chat gets — the admin session
+      // has no shortcut past it, because there is none to have.
+      return `<div class="content-file-row">
+        <a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.name)}</a>
+        <span class="venv-meta">${formatBytes(item.size)} · ${esc(when)}</span>
+        <button class="btn btn-danger btn-sm" data-content-del="${esc(item.name)}">Delete</button>
+      </div>`;
+    }).join("");
+    box.querySelectorAll("[data-content-del]").forEach(btn => {
+      btn.addEventListener("click", () => deleteContentFile(instance, btn.dataset.contentDel));
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="venv-meta">${esc(e.message)}</div>`;
+  }
+}
+
+async function deleteContentFile(instance, name) {
+  if (!confirm(`Delete '${name}'? Links to it stop working immediately.`)) return;
+  try {
+    await apiFetch(`/api/content/${encodeURIComponent(instance)}/${encodeURIComponent(name)}`,
+                   { method: "DELETE" });
+    await renderContentFiles();
+    await toggleContentFiles(instance);
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
+async function emptyContent(instance) {
+  if (!confirm(`Delete every stored file of '${instance}'?`)) return;
+  try {
+    const res = await apiFetch(`/api/content/${encodeURIComponent(instance)}`, { method: "DELETE" });
+    showAlert("success", `${res.removed} file(s) deleted.`);
+    await renderContentFiles();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
+async function clearAllContent() {
+  if (!confirm("Delete every stored file of every instance? This cannot be undone.")) return;
+  try {
+    const res = await apiFetch("/api/content", { method: "DELETE" });
+    showAlert("success", `${res.removed} file(s) deleted.`);
+    await renderContentFiles();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
 async function renderVenvSettings() {
   const list = document.getElementById("settings-venv-list");
   const venvs = await fetchVenvs();
@@ -445,6 +581,37 @@ async function saveSettings() {
     body.password_confirm = pw2;
     if (currentPw) body.current_password = currentPw;
   }
+
+  const contentBase = document.getElementById("settings-content-base-url").value.trim();
+  if (contentBase && !/^https?:\/\//.test(contentBase)) {
+    showAlert("error", "The download base URL must start with http:// or https://");
+    return;
+  }
+  body.content_base_url = contentBase;
+
+  // An emptied field is not a zero: 0 means "no limit" for the quota and "keep
+  // forever" for the retention, so reading a blank box as 0 would silently
+  // switch both of them off. Ask instead. The server checks the ranges again.
+  const numberFields = [
+    ["settings-content-max", "content_max_mb", 0, 1000000, "the quota in MB (0 = no limit)"],
+    ["settings-content-warn", "content_warn_percent", 1, 100, "the warning threshold in percent"],
+    ["settings-content-retention", "content_retention_days", 0, 3650, "how many days to keep files (0 = forever)"],
+  ];
+  for (const [id, key, low, high, what] of numberFields) {
+    const raw = document.getElementById(id).value.trim();
+    if (raw === "") {
+      showAlert("error", `Enter ${what}`);
+      return;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < low || value > high) {
+      showAlert("error", `${what[0].toUpperCase()}${what.slice(1)} must be a whole number between ${low} and ${high}`);
+      return;
+    }
+    body[key] = value;
+  }
+  body.content_block_when_full = document.getElementById("settings-content-block").checked;
+  body.content_retention_mode = document.getElementById("settings-content-mode").value;
 
   body.update_check = document.getElementById("settings-update-enable").checked;
   body.usage_retention_days = Number(document.getElementById("settings-retention").value);

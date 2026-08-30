@@ -7,6 +7,12 @@ from ..auth import (agent_token, auth_enabled, edit_mode, edit_mode_locked, mcp_
                     read_token, require_admin_auth, require_auth, token_edit_enabled,
                     user_jwt_secret, user_trust_headers)
 from ..activity import retention_days
+from ..content_store import (RETENTION_MODES, base_url as content_base_url,
+                             block_when_full as content_block_when_full,
+                             max_bytes as content_max_bytes,
+                             retention_days as content_retention_days,
+                             retention_mode as content_retention_mode,
+                             warn_percent as content_warn_percent)
 from ..update_check import cached_result, check_manually, check_now
 router = APIRouter()
 
@@ -30,6 +36,15 @@ async def get_settings() -> dict:
         "shared_port": shared_proxy.configured_port(),
         "shared_proxy_running": shared_proxy.proxy_running(),
         "usage_retention_days": retention_days(),
+        # The content store. Quota and warning threshold apply per instance
+        # folder — the warning ends up in front of a tool result, and only a
+        # number about its own folder is something the model can act on.
+        "content_max_mb": content_max_bytes() // (1024 * 1024),
+        "content_warn_percent": content_warn_percent(),
+        "content_block_when_full": content_block_when_full(),
+        "content_retention_days": content_retention_days(),
+        "content_retention_mode": content_retention_mode(),
+        "content_base_url": content_base_url(),
         # Authenticated on purpose: /api/auth-status already leaks the bare
         # version to anyone, but "this instance is outdated" is the more useful
         # sentence for an unauthenticated visitor and stays behind the login.
@@ -85,12 +100,17 @@ async def update_settings(body: dict) -> dict:
     if "mcp_token" in body or body.get("mcp_token_clear"):
         require_token_edit()
         if body.get("mcp_token_clear"):
-            new_token = ("clear", None)
+            if mcp_bearer_token() is not None:
+                new_token = ("clear", None)
         else:
             token = _str_field("mcp_token")
             if len(token) < 8:
                 raise HTTPException(400, "MCP token must be at least 8 characters")
-            new_token = ("set", token)
+            # The dialog pre-fills the field with the current value and always
+            # sends it back — re-saving the same token is not a change, and
+            # reporting one fires "restart your instances" advice for nothing.
+            if token != mcp_bearer_token():
+                new_token = ("set", token)
 
     # The two API tokens have the same shape and the same rules — one loop, so
     # they cannot drift apart.
@@ -99,8 +119,10 @@ async def update_settings(body: dict) -> dict:
         if f"{kind}_token" not in body and not body.get(f"{kind}_token_clear"):
             continue
         require_token_edit()
+        current = read_token() if kind == "read" else agent_token()
         if body.get(f"{kind}_token_clear"):
-            api_token_changes[kind] = ("clear", None)
+            if current is not None:
+                api_token_changes[kind] = ("clear", None)
             continue
         token = _str_field(f"{kind}_token")
         if len(token) < 8:
@@ -109,7 +131,10 @@ async def update_settings(body: dict) -> dict:
         # stored in clear text in every config that carries it.
         if token == pw or (auth_enabled() and verify_password(token)):
             raise HTTPException(400, f"{label} must differ from the password")
-        api_token_changes[kind] = ("set", token)
+        # Same reason as the MCP token above: the dialog echoes the current
+        # value back on every save, and that is not a change.
+        if token != current:
+            api_token_changes[kind] = ("set", token)
 
     # …and they must differ from each other, or the GET-only token silently
     # inherits the agent token's write access.
@@ -167,6 +192,58 @@ async def update_settings(body: dict) -> dict:
             raise HTTPException(400, "usage_retention_days must be between 0 (keep forever) and 3650")
         if value != retention_days():
             retention_change = value
+
+    # ── Content store ─────────────────────────────────────────────────────
+    # Collected, not applied: like everything above, a rejected request must
+    # leave nothing half-saved.
+    content_changes: dict = {}
+
+    def _content_int(key: str, low: int, high: int, current: int) -> None:
+        if key not in body:
+            return
+        raw = body[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+            raise HTTPException(400, f"{key} must be a number")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key} must be a number")
+        if not low <= value <= high:
+            raise HTTPException(400, f"{key} must be between {low} and {high}")
+        if value != current:
+            content_changes[key] = value
+
+    _content_int("content_max_mb", 0, 1_000_000, content_max_bytes() // (1024 * 1024))
+    _content_int("content_warn_percent", 1, 100, content_warn_percent())
+    _content_int("content_retention_days", 0, 3650, content_retention_days())
+
+    if "content_block_when_full" in body:
+        raw = body["content_block_when_full"]
+        if not isinstance(raw, bool):
+            raise HTTPException(400, "content_block_when_full must be true or false")
+        if raw != content_block_when_full():
+            content_changes["content_block_when_full"] = raw
+
+    if "content_retention_mode" in body:
+        mode = str(body["content_retention_mode"]).strip()
+        if mode not in RETENTION_MODES:
+            raise HTTPException(
+                400, f"content_retention_mode must be one of: {', '.join(RETENTION_MODES)}"
+            )
+        if mode != content_retention_mode():
+            content_changes["content_retention_mode"] = mode
+
+    if "content_base_url" in body:
+        # Absolute on purpose: the links this builds end up in an OpenWebUI
+        # chat, and a relative one would be resolved against OpenWebUI — which
+        # serves nothing of ours under /content.
+        url = str(body["content_base_url"]).strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            raise HTTPException(400, "content_base_url must start with http:// or https://")
+        if len(url) > 300:
+            raise HTTPException(400, "content_base_url is too long")
+        if url != content_base_url():
+            content_changes["content_base_url"] = url or None
 
     shared_change = None  # ("disable", None) or ("enable", port)
     current_shared = shared_proxy.configured_port()
@@ -229,6 +306,13 @@ async def update_settings(body: dict) -> dict:
         # Applied by the daily pruning task; shortening the window does not
         # delete anything before the next pass, and `totals` never at all.
         changed.append("usage_retention_days")
+
+    if content_changes:
+        from ..settings_store import save_settings
+        save_settings(content_changes)
+        changed.extend(sorted(content_changes))
+        # Read fresh on every call, in both the manager and the runners — no
+        # restart, unlike the identity settings above.
 
     if update_change is not None:
         from ..settings_store import save_settings

@@ -1,7 +1,7 @@
 import { applyEditMode, clearToken, getToken, hideLoginModal, setToken, showLoginModal, state } from "./common.js";
 import { bindEdit, openEdit } from "./config.js";
 import { openEditorForInstance } from "./editor.js";
-import { bindFilter, configureInstanceActions, loadInstances } from "./instances.js";
+import { bindFilter, bindSorting, configureInstanceActions, loadInstances } from "./instances.js";
 import { bindInfo, openInfo } from "./info.js";
 import { bindLogs, openLogs } from "./logs.js";
 import { bindPermissions } from "./permissions.js";
@@ -73,6 +73,15 @@ document.getElementById("logout-btn").addEventListener("click", () => {
   location.reload();
 });
 
+// The version number in the header is the About trigger. Available to guests
+// too — a copyright notice that only logged-in users can see would miss the
+// point of shipping it in the first place.
+const aboutModal = document.getElementById("about-modal");
+const toggleAbout = show => aboutModal.classList.toggle("hidden", !show);
+document.getElementById("app-version").addEventListener("click", () => toggleAbout(true));
+document.getElementById("about-close").addEventListener("click", () => toggleAbout(false));
+document.getElementById("about-backdrop").addEventListener("click", () => toggleAbout(false));
+
 document.addEventListener("DOMContentLoaded", async () => {
   bindUpload();
   bindEdit();
@@ -81,12 +90,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindStats();
   bindPermissions();
   bindFilter();
+  bindSorting();
 
   const statusResponse = await fetch("/api/auth-status");
   const status = await statusResponse.json();
   state.editMode = status.edit_mode || "full";
   state.authEnabled = !!status.auth_enabled;
-  if (status.version) document.getElementById("app-version").textContent = `v${status.version}`;
+  if (status.version) {
+    document.getElementById("app-version").textContent = `v${status.version}`;
+    document.getElementById("about-version").textContent = `v${status.version}`;
+  }
 
   state.guestMode = state.authEnabled && !getToken();
   applyEditMode();

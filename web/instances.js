@@ -5,7 +5,7 @@ export async function loadInstances() {
   try {
     instances = await apiFetch(API);
     updateCategoryOptions();
-    renderTable(filteredInstances());
+    renderTable(sortInstances(filteredInstances()));
   } catch (e) {
     // silently skip poll errors
   }
@@ -14,8 +14,85 @@ export async function loadInstances() {
 // ── Search & category filter ──────────────────────────────────────────────────
 
 export function bindFilter() {
-  document.getElementById("filter-search").addEventListener("input", () => renderTable(filteredInstances()));
-  document.getElementById("filter-category").addEventListener("change", () => renderTable(filteredInstances()));
+  document.getElementById("filter-search").addEventListener("input", () => renderTable(sortInstances(filteredInstances())));
+  document.getElementById("filter-category").addEventListener("change", () => renderTable(sortInstances(filteredInstances())));
+}
+
+// ── Column sorting ────────────────────────────────────────────────────────────
+
+// Where a click on a header takes the table. Empty key = the order the server
+// sent, which is by config file name and therefore roughly by ID.
+const SORT_STORAGE_KEY = "instances-sort";
+let sort = { key: "", dir: 1 };
+
+// Status is the one column where alphabetical order would be an accident.
+// Sorted along the lifecycle instead: ascending puts what is up first and what
+// is broken last, descending answers "what needs me?" in one click.
+const STATUS_ORDER = ["running", "starting", "installing", "installed",
+                      "stopping", "stopped", "failed", "dependency_error"];
+
+export function bindSorting() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) || "null");
+    if (stored && typeof stored.key === "string") sort = { key: stored.key, dir: stored.dir === -1 ? -1 : 1 };
+  } catch {
+    // Private mode or a garbled value: the default order is a fine fallback.
+  }
+  for (const th of document.querySelectorAll("th[data-sort]")) {
+    th.addEventListener("click", () => {
+      // Same column again flips the direction; a new column starts ascending.
+      sort = sort.key === th.dataset.sort
+        ? { key: sort.key, dir: -sort.dir }
+        : { key: th.dataset.sort, dir: 1 };
+      try {
+        localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort));
+      } catch {
+        // Remembering the column is a convenience, not a requirement.
+      }
+      renderTable(sortInstances(filteredInstances()));
+    });
+  }
+  markSortedHeader();
+}
+
+function markSortedHeader() {
+  for (const th of document.querySelectorAll("th[data-sort]")) {
+    const active = th.dataset.sort === sort.key;
+    th.classList.toggle("sorted-asc", active && sort.dir === 1);
+    th.classList.toggle("sorted-desc", active && sort.dir === -1);
+  }
+}
+
+function sortKey(inst, key) {
+  if (key === "port") return inst.port ?? -1;
+  if (key === "status") {
+    const rank = STATUS_ORDER.indexOf(inst.status);
+    return rank === -1 ? STATUS_ORDER.length : rank;   // unknown status last
+  }
+  return String(inst[key] ?? "");
+}
+
+function sortInstances(rows) {
+  markSortedHeader();
+  if (!sort.key) return rows;
+  // A guest never sees port, venv or URL — a sort remembered from an admin
+  // session must not silently reorder by a field that is not there.
+  if (!rows.some(inst => inst[sort.key] !== undefined)) return rows;
+  return [...rows].sort((a, b) => {
+    const x = sortKey(a, sort.key), y = sortKey(b, sort.key);
+    let cmp;
+    if (typeof x === "number") {
+      cmp = x - y;
+    } else {
+      // numeric: true so mcp2 comes before mcp10; base so case is ignored.
+      cmp = x.localeCompare(y, undefined, { numeric: true, sensitivity: "base" });
+    }
+    // Tie-break by ID, always ascending and with the same collation the ID
+    // column uses: the table re-renders on every poll, and equal keys must not
+    // shuffle rows under the pointer.
+    if (cmp !== 0) return cmp * sort.dir;
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true, sensitivity: "base" });
+  });
 }
 
 let lastCategoryKey = "";

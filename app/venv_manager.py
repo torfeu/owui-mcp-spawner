@@ -30,12 +30,13 @@ VENVS_DIR = BASE_DIR / "runtime" / "venvs"
 DEFAULT_VENV = "default"
 
 # Packages every instance venv needs so the MCP runner can import and serve.
-# mcp is pinned below 2: the 2.x line rebuilt the low-level Server API, and
-# mcp_runner.build_server() still uses the 1.x decorators (@server.list_tools()).
-# Unpinned, a venv created today installs 2.x and every instance in it dies at
-# startup with "'Server' object has no attribute 'list_tools'". Lifting the pin
-# means porting the runner first.
-BASE_PACKAGES = ["mcp<2", "uvicorn", "starlette", "pydantic", "httpx"]
+# mcp carries a floor rather than a ceiling since v0.2.2: the runner speaks the
+# 2.x low-level Server API (handlers as constructor arguments of Server), and
+# against 1.x it does not even start. Venvs built before that port still hold
+# their old 1.x — ensure_venv() never re-installs into a venv it once marked
+# ready — so they need `pip install -U 'mcp>=2'` once; mcp_runner.require_mcp_2()
+# says so at startup instead of failing with a stack trace.
+BASE_PACKAGES = ["mcp>=2", "uvicorn", "starlette", "pydantic", "httpx"]
 READY_MARKER = ".mcp-manager-ready"
 
 # venv creation + base-package install can be slow on first use.

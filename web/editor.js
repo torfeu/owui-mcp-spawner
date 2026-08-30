@@ -1,4 +1,4 @@
-import { API, apiFetch, apiFetchRaw, downloadBlob, esc, fetchVenvs, fillVenvSelect, showAlert } from "./common.js";
+import { API, apiFetch, apiFetchRaw, bindNewVenvField, downloadBlob, esc, fetchVenvs, fillVenvSelect, showAlert, venvChoice } from "./common.js";
 import { loadInstances } from "./instances.js";
 
 let editorCM = null;
@@ -76,7 +76,8 @@ async function openEditor(opts = {}) {
   document.getElementById("editor-port-field").classList.toggle("hidden", !!editorEditId);
   if (!editorEditId) {
     document.getElementById("editor-port").value = "";
-    fillVenvSelect(document.getElementById("editor-venv"), await fetchVenvs(), opts.venv || "default");
+    fillVenvSelect(document.getElementById("editor-venv"), await fetchVenvs(), opts.venv || "default", { allowNew: true });
+    bindNewVenvField("editor-venv", "editor-venv-new");
   }
 }
 
@@ -237,13 +238,16 @@ async function runInstall() {
         : `Tool '${meta.name}' saved. Restart to apply changes.`);
     } else {
       // New tool: create_tool installs deps, validates in the venv and saves — one step.
+      // A venv named here that does not exist yet is created by the server.
+      const newVenv = venvChoice("editor-venv", "editor-venv-new");
+      if (newVenv === null) return;   // unusable name — venvChoice said so
       const body = {
         code: getEditorCode(),
         id: meta.id,
         name: meta.name,
         description: meta.description,
         category: meta.category,
-        venv: document.getElementById("editor-venv").value || "default",
+        venv: newVenv || "default",
       };
       const portVal = document.getElementById("editor-port").value;
       if (portVal) body.port = Number(portVal);

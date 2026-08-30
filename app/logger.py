@@ -25,6 +25,11 @@ def get_manager_logger() -> logging.Logger:
         logger.addHandler(sh)
         logger.addHandler(fh)
         logger.setLevel(logging.INFO)
+        # This logger carries its own stdout handler. In a runner the root
+        # logger has one too (basicConfig in mcp_runner), so propagating would
+        # print every manager-logger line into the runtime log twice — visible
+        # since tool_loader started logging the content-folder autofill.
+        logger.propagate = False
     return logger
 
 

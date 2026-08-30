@@ -1,4 +1,4 @@
-import { API, apiFetchRaw, fetchVenvs, fillVenvSelect, showAlert } from "./common.js";
+import { API, apiFetchRaw, bindNewVenvField, fetchVenvs, fillVenvSelect, showAlert, venvChoice } from "./common.js";
 import { loadInstances } from "./instances.js";
 
 export function bindUpload() {
@@ -18,9 +18,10 @@ export function bindUpload() {
   openBtn.addEventListener("click", async () => {
     selectedFile = null; resetUpload(); modal.classList.remove("hidden");
     const uploadVenv = document.getElementById("upload-venv");
-    fillVenvSelect(uploadVenv, await fetchVenvs(), "");
+    fillVenvSelect(uploadVenv, await fetchVenvs(), "", { allowNew: true });
     uploadVenv.prepend(new Option("from JSON / default", ""));
     uploadVenv.value = "";
+    bindNewVenvField("upload-venv", "upload-venv-new");
   });
   cancelBtn.addEventListener("click", closeUpload);
   backdrop.addEventListener("click", closeUpload);
@@ -55,8 +56,9 @@ export function bindUpload() {
       if (category) form.append("category", category);
       // Only send venv when the user picked one, so a venv set in an uploaded
       // MCP config stays the default instead of being overwritten with "default".
-      const venvVal = document.getElementById("upload-venv").value.trim();
-      if (venvVal) form.append("venv", venvVal);
+      const venvVal = venvChoice("upload-venv", "upload-venv-new");
+      if (venvVal === null) return;   // name typed but unusable — message shown
+      if (venvVal.trim()) form.append("venv", venvVal.trim());
       const portVal = document.getElementById("upload-port").value;
       if (portVal) form.append("port", portVal);
       const res = await apiFetchRaw(`${API}/upload`, { method: "POST", body: form });

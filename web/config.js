@@ -1,13 +1,23 @@
-import { API, apiFetch, esc, fetchVenvs, fillVenvSelect, showAlert } from "./common.js";
+import { API, apiFetch, bindNewVenvField, esc, fetchVenvs, fillVenvSelect, showAlert, venvChoice } from "./common.js";
 import { loadInstances } from "./instances.js";
 
 let currentEditId = null;
+// Read once per dialog: whether a download base URL is configured decides the
+// hint under the file-storage switch, and re-fetching it on every toggle would
+// be a request per click.
+let contentBaseUrlSet = false;
 
 export function bindEdit() {
   document.getElementById("edit-backdrop").addEventListener("click", closeEdit);
   document.getElementById("edit-cancel").addEventListener("click", closeEdit);
   document.getElementById("edit-save").addEventListener("click", () => saveEdit(false));
   document.getElementById("edit-save-restart").addEventListener("click", () => saveEdit(true));
+  document.getElementById("edit-content-enabled").addEventListener("change", updateContentHint);
+}
+
+function updateContentHint() {
+  const on = document.getElementById("edit-content-enabled").checked;
+  document.getElementById("edit-content-hint").classList.toggle("hidden", !on || contentBaseUrlSet);
 }
 
 export async function openEdit(id) {
@@ -23,7 +33,10 @@ export async function openEdit(id) {
   document.getElementById("edit-autostart").checked = cfg.lifecycle?.auto_start ?? false;
   document.getElementById("edit-deps").value = (cfg.install?.dependencies || []).join("\n");
   document.getElementById("edit-identity-mode").value = cfg.identity_mode || "off";
-  fillVenvSelect(document.getElementById("edit-venv"), await fetchVenvs(), cfg.venv || "default");
+  document.getElementById("edit-content-enabled").checked = cfg.content?.enabled ?? false;
+  document.getElementById("edit-content-prefix").value = cfg.content?.url_prefix ?? "/cache/files/";
+  fillVenvSelect(document.getElementById("edit-venv"), await fetchVenvs(), cfg.venv || "default", { allowNew: true });
+  bindNewVenvField("edit-venv", "edit-venv-new");
 
   // Choosing a mode with no way to establish an identity is the one
   // combination that fails silently later — required refuses every call,
@@ -32,6 +45,11 @@ export async function openEdit(id) {
   const canIdentify = settings === null
     || settings.user_jwt_secret_set || settings.user_trust_headers;
   document.getElementById("edit-identity-hint").classList.toggle("hidden", !!canIdentify);
+
+  // Same kind of trap as the identity hint: storage switched on without a base
+  // URL works right up to the point where somebody clicks the link in a chat.
+  contentBaseUrlSet = settings === null || !!settings.content_base_url;
+  updateContentHint();
 
   // Which fields are credentials is the server's call (it does the masking) —
   // it ships the classification in the payload instead of us re-guessing here.
@@ -85,6 +103,11 @@ async function saveEdit(restart) {
   const port = parseInt(document.getElementById("edit-port").value);
   if (!Number.isNaN(port)) server.port = port;
 
+  // Moving an instance to a venv that does not exist yet is fine — the server
+  // creates it and installs the dependencies there before it saves.
+  const venv = venvChoice("edit-venv", "edit-venv-new");
+  if (venv === null) return;   // unusable name — venvChoice said so
+
   const body = {
     name: document.getElementById("edit-name").value,
     category: document.getElementById("edit-category").value.trim(),
@@ -92,8 +115,12 @@ async function saveEdit(restart) {
     lifecycle: { auto_start: document.getElementById("edit-autostart").checked },
     values,
     install: { dependencies: deps },
-    venv: document.getElementById("edit-venv").value || "default",
+    venv: venv || "default",
     identity_mode: document.getElementById("edit-identity-mode").value,
+    content: {
+      enabled: document.getElementById("edit-content-enabled").checked,
+      url_prefix: document.getElementById("edit-content-prefix").value.trim() || "/cache/files/",
+    },
   };
 
   try {

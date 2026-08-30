@@ -11,21 +11,15 @@ logger = get_manager_logger()
 _EXCLUDED = {"__init__", "valves", "user_valves"}
 
 
-def _get_tools_class_methods(content: str) -> set[str]:
-    """Return names of public methods defined directly in the Tools class."""
-    try:
-        ns: dict = {}
-        exec(content, ns)  # noqa: S102
-        ToolsClass = ns.get("Tools")
-        if ToolsClass is None:
-            return set()
-        return {
-            name
-            for name, member in inspect.getmembers(ToolsClass, predicate=inspect.isfunction)
-            if not name.startswith("_") and name not in _EXCLUDED
-        }
-    except Exception:
+def _public_methods(ToolsClass) -> set[str]:
+    """Names of public tool methods on an already-exec'd Tools class."""
+    if ToolsClass is None:
         return set()
+    return {
+        name
+        for name, member in inspect.getmembers(ToolsClass, predicate=inspect.isfunction)
+        if not name.startswith("_") and name not in _EXCLUDED
+    }
 
 
 class OpenWebUITool:
@@ -35,7 +29,9 @@ class OpenWebUITool:
 
     def get_mcp_tool_defs(self) -> list[dict]:
         """Return MCP tool definitions built from the live Python code."""
-        # Exec once to get the real class and method objects
+        # Exec once to get the real class and method objects — the method names
+        # come from the same namespace, so the tool's import-time side effects
+        # (model loads, connection pools) run once per start, not twice.
         exec_ns: dict = {}
         ToolsClass = None
         if self.content:
@@ -45,7 +41,7 @@ class OpenWebUITool:
             except Exception as e:
                 logger.warning(f"Could not exec tool code for schema generation: {e}")
 
-        class_methods = _get_tools_class_methods(self.content)
+        class_methods = _public_methods(ToolsClass)
         specs_by_name = {s["name"]: s for s in self.specs}
 
         result = []
@@ -92,10 +88,39 @@ def load_openwebui_json(path: Path) -> Optional[OpenWebUITool]:
         return None
 
 
-def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any]) -> Any:
+# Valve names that mean "put the files you produce here". Two fixed names plus
+# a suffix, because the suffix is where the tool-specific ones live:
+# docx_export_dir, pdf_export_dir, image_export_dir — all the same question.
+_CONTENT_VALVES = {"content_dir", "output_dir"}
+
+
+def is_content_valve(name: str) -> bool:
+    return name in _CONTENT_VALVES or name.endswith("_export_dir")
+
+
+def content_valve_names(instance: Any) -> list[str]:
+    """Which valves of *instance* ask for an output directory."""
+    valves = getattr(instance, "valves", None)
+    if valves is None:
+        return []
+    try:
+        fields = list(type(valves).model_fields)
+    except Exception:
+        fields = [k for k in vars(valves) if not k.startswith("_")]
+    return sorted(f for f in fields if is_content_valve(f))
+
+
+def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
+                          content_dir: Optional[str] = None) -> Any:
     """
     Exec the tool code, instantiate Tools, and inject config values into Valves.
     Returns the Tools instance or None on failure.
+
+    When *content_dir* is given (the instance has the content store switched
+    on), any valve that asks for an output directory is filled with it — unless
+    the user set that valve themselves, which always wins. Without this a tool
+    written for OpenWebUI writes to its built-in default, which in the runner is
+    a path that does not exist.
     """
     if not tool.content:
         return None
@@ -113,6 +138,15 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any]) -> Any:
                         setattr(instance.valves, k, v)
                     except Exception:
                         pass
+        if content_dir:
+            for name in content_valve_names(instance):
+                if str(values.get(name, "")).strip():
+                    continue  # the user pointed this one somewhere on purpose
+                try:
+                    setattr(instance.valves, name, content_dir)
+                    logger.info(f"Valve '{name}' set to the content folder: {content_dir}")
+                except Exception:
+                    pass
         return instance
     except Exception as e:
         logger.error(f"Failed to create Tools instance: {e}")

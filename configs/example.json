@@ -27,5 +27,9 @@
     "auto_start": false,
     "restart_on_change": true
   },
-  "identity_mode": "off"
+  "identity_mode": "off",
+  "content": {
+    "enabled": false,
+    "url_prefix": "/cache/files/"
+  }
 }

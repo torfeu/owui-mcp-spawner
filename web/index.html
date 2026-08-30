@@ -12,15 +12,19 @@
   <header>
     <div class="header-title">
       <span class="logo">⬡</span>
-      <h1>OWUI MCP Spawner <span class="app-version" id="app-version"></span><a class="update-badge hidden" id="update-badge" target="_blank" rel="noopener"></a></h1>
+      <h1>OWUI MCP Spawner <button type="button" class="app-version" id="app-version" title="About this spawner"></button><a class="update-badge hidden" id="update-badge" target="_blank" rel="noopener"></a></h1>
     </div>
-    <button class="btn btn-secondary" id="editor-btn">+ New Tool</button>
-    <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
-    <button class="btn btn-primary hidden" id="login-btn">Login</button>
-    <button class="btn btn-ghost hidden" id="logout-btn" title="Log out">Logout</button>
-    <button class="btn btn-ghost btn-settings" id="perm-btn" title="Users &amp; permissions">🔑</button>
-    <button class="btn btn-ghost btn-settings" id="stats-btn" title="Usage statistics">📊</button>
-    <button class="btn btn-ghost btn-settings" id="settings-btn" title="Settings">⚙</button>
+    <div class="header-create">
+      <button class="btn btn-ghost" id="editor-btn">+ New Tool</button>
+      <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-ghost" id="perm-btn" title="Users &amp; permissions">Permissions</button>
+      <button class="btn btn-ghost" id="stats-btn" title="Usage statistics">Statistics</button>
+      <button class="btn btn-ghost" id="settings-btn" title="Settings">Settings</button>
+      <button class="btn btn-primary hidden" id="login-btn">Login</button>
+      <button class="btn btn-danger hidden" id="logout-btn" title="Log out">Logout</button>
+    </div>
   </header>
 
   <main>
@@ -37,13 +41,13 @@
       <table id="instances-table">
         <thead>
           <tr>
-            <th>ID</th>
-            <th>Name</th>
-            <th>Category</th>
-            <th>Status</th>
-            <th class="admin-col">Port</th>
-            <th class="admin-col">Venv</th>
-            <th class="admin-col">URL</th>
+            <th class="sortable" data-sort="id" title="Sort by ID">ID</th>
+            <th class="sortable" data-sort="name" title="Sort by name">Name</th>
+            <th class="sortable" data-sort="category" title="Sort by category">Category</th>
+            <th class="sortable" data-sort="status" title="Sort by status — ascending puts healthy first, descending puts failures first">Status</th>
+            <th class="sortable admin-col" data-sort="port" title="Sort by port">Port</th>
+            <th class="sortable admin-col" data-sort="venv" title="Sort by venv">Venv</th>
+            <th class="sortable admin-col" data-sort="url" title="Sort by URL">URL</th>
             <th class="admin-col">Actions</th>
           </tr>
         </thead>
@@ -70,7 +74,10 @@
         <label>Category</label>
         <input type="text" id="upload-category" placeholder="e.g. Smart Home, Search, Utilities" />
         <label>Venv</label>
-        <select id="upload-venv"></select>
+        <div class="venv-picker">
+          <select id="upload-venv"></select>
+          <input type="text" id="upload-venv-new" class="hidden" placeholder="new-venv-name" />
+        </div>
         <label>Port</label>
         <input type="number" id="upload-port" min="1024" max="65535" placeholder="auto (leave empty)" />
       </div>
@@ -108,7 +115,10 @@
           <input type="text" id="edit-endpoint" />
 
           <label>Venv</label>
-          <select id="edit-venv"></select>
+          <div class="venv-picker">
+            <select id="edit-venv"></select>
+            <input type="text" id="edit-venv-new" class="hidden" placeholder="new-venv-name" />
+          </div>
 
           <label>Auto Start</label>
           <input type="checkbox" id="edit-autostart" />
@@ -119,9 +129,21 @@
             <option value="optional">optional — pass through, enforce nothing</option>
             <option value="required">required — verified user + access rules</option>
           </select>
+
+          <label title="Give this instance a folder under content/&lt;id&gt;/ for the files its tools produce. Output valves are filled with that path, and download links the tool returns are rewritten to this server.">File storage</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="edit-content-enabled" />
+            Keep files this tool produces
+          </label>
+
+          <label title="The prefix the tool's own links start with. Tools written for OpenWebUI return /cache/files/… — that part is replaced by this server's download URL.">Link prefix</label>
+          <input type="text" id="edit-content-prefix" placeholder="/cache/files/" />
         </div>
         <p id="edit-identity-hint" class="hidden" style="color:var(--text-muted);font-size:12px;margin:-4px 0 0">
           No way to identify a user is configured — set a shared secret under Settings (or accept the plain headers there), or every call to this instance will be refused.
+        </p>
+        <p id="edit-content-hint" class="hidden" style="color:var(--text-muted);font-size:12px;margin:-4px 0 0">
+          No download base URL is set — links would be relative and a chat client would resolve them against itself. Set it under Settings → Files.
         </p>
 
         <h3>Values</h3>
@@ -276,7 +298,10 @@
         </div>
         <div class="meta-field" id="editor-venv-field">
           <label>Venv</label>
-          <select id="editor-venv"></select>
+          <div class="venv-picker">
+            <select id="editor-venv"></select>
+            <input type="text" id="editor-venv-new" class="hidden" placeholder="new-venv-name" />
+          </div>
         </div>
         <div class="meta-field" id="editor-port-field">
           <label>Port</label>
@@ -331,6 +356,7 @@
         <button class="settings-tab settings-tab-active" data-settings-tab="security">Security</button>
         <button class="settings-tab" data-settings-tab="identity">Identity</button>
         <button class="settings-tab" data-settings-tab="system">System</button>
+        <button class="settings-tab" data-settings-tab="files">Files</button>
         <button class="settings-tab" data-settings-tab="maintenance">Maintenance</button>
       </div>
 
@@ -494,6 +520,55 @@
       </div>
       </div>
 
+      <div class="settings-panel hidden" data-settings-panel="files">
+      <div class="settings-section">
+        <h3 class="settings-section-title">File Storage</h3>
+        <div class="settings-status" id="settings-content-status"></div>
+        <p class="modal-hint">Instances with <em>File storage</em> switched on write into <code>content/&lt;id&gt;/</code>. A link the tool returns is rewritten to a download URL of this server carrying a token for that one file — that link and the control tool are the only two ways in. There is no directory listing and no guest view.</p>
+        <div class="form-grid">
+          <label title="Where this server is reachable for whoever reads the chat. The links end up in OpenWebUI, and a relative one would be resolved against OpenWebUI instead.">Download base URL</label>
+          <input type="text" id="settings-content-base-url" placeholder="http://192.168.1.10:7860" />
+
+          <label title="Measured per instance folder: the warning goes in front of a tool result, and only a number about its own folder is something the model can act on.">Quota per instance</label>
+          <div class="input-with-unit">
+            <input type="number" id="settings-content-max" min="0" max="1000000" step="1" placeholder="200" />
+            <span class="input-unit">MB &middot; 0 = no limit</span>
+          </div>
+
+          <label>Warn from</label>
+          <div class="input-with-unit">
+            <input type="number" id="settings-content-warn" min="1" max="100" step="1" placeholder="80" />
+            <span class="input-unit">% full</span>
+          </div>
+
+          <label>When full</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-content-block" />
+            Refuse calls instead of only warning
+          </label>
+
+          <label>Keep files for</label>
+          <div class="input-with-unit">
+            <input type="number" id="settings-content-retention" min="0" max="3650" step="1" placeholder="0" />
+            <span class="input-unit">days &middot; 0 = keep forever</span>
+          </div>
+
+          <label title="whole folder: for tools that write a set of files belonging together, where keeping half of it is worse than keeping none.">Delete</label>
+          <select id="settings-content-mode">
+            <option value="file_age">each file on its own age</option>
+            <option value="whole_folder">the whole folder once its oldest file expires</option>
+          </select>
+        </div>
+      </div>
+      <div class="settings-section settings-section-last">
+        <h3 class="settings-section-title">Stored Files</h3>
+        <div id="settings-content-list" class="venv-list"></div>
+        <div class="venv-create-row">
+          <button type="button" class="btn btn-danger btn-sm" id="settings-content-clear">Delete all stored files</button>
+        </div>
+      </div>
+      </div>
+
       <div class="settings-panel hidden" data-settings-panel="maintenance">
       <div class="settings-section">
         <h3 class="settings-section-title">Usage Tracking</h3>
@@ -527,6 +602,23 @@
         <button class="btn btn-primary" id="settings-save">Save Settings</button>
         <button class="btn btn-danger" id="settings-restart">Restart Spawner</button>
         <button class="btn btn-ghost" id="settings-cancel">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="about-modal" class="modal hidden">
+    <div class="modal-backdrop" id="about-backdrop"></div>
+    <div class="modal-content modal-narrow">
+      <h2>OWUI MCP Spawner <span class="app-version" id="about-version"></span></h2>
+      <p class="about-line">© 2026 Torsten Feustel — MIT License</p>
+      <p class="about-line">
+        <a href="https://github.com/torfeu/owui-mcp-spawner" target="_blank" rel="noopener">github.com/torfeu/owui-mcp-spawner</a>
+      </p>
+      <p class="about-line about-third-party">
+        Uses <a href="https://codemirror.net" target="_blank" rel="noopener">CodeMirror</a> (MIT).
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="about-close">Close</button>
       </div>
     </div>
   </div>

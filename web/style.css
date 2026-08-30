@@ -46,6 +46,22 @@ header {
   gap: 10px;
 }
 
+/* Two groups, not seven loose buttons: creating something sits in the middle,
+   everything else on the right. `space-between` on the header does the placing
+   — with three children it pins title and actions to the edges and leaves the
+   create group in between. Both groups wrap rather than overflow. */
+.header-create,
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.header-actions {
+  justify-content: flex-end;
+}
+
 .logo {
   font-size: 22px;
   color: var(--primary);
@@ -110,6 +126,23 @@ th {
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
 }
+
+/* Sortable column headers. The arrow only appears on the active column —
+   a row of arrows on every header reads as decoration, not as state. */
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+th.sortable:hover {
+  color: var(--text);
+}
+th.sorted-asc,
+th.sorted-desc {
+  color: var(--primary);
+}
+th.sorted-asc::after  { content: " \2191"; }   /* ↑ */
+th.sorted-desc::after { content: " \2193"; }   /* ↓ */
 
 td {
   padding: 12px 16px;
@@ -286,6 +319,61 @@ tbody tr:last-child td {
   flex: 1;
 }
 
+/* Venv chooser: the select, plus a name field that only appears once
+   "+ New venv…" is picked. Stacked rather than side by side — in the upload
+   and edit dialogs this sits in a two-column grid with no room for both. */
+.venv-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* A number field with its unit next to it — "200 [MB · 0 = no limit]".
+   The unit carries the meaning of the edge cases, so the label stays short. */
+.input-with-unit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* Beats the global `input[type=number] { width: 100% }` further down, which
+   would otherwise push the unit out of the dialog. */
+.input-with-unit input[type="number"] {
+  width: 7em;
+  flex: 0 0 auto;
+}
+.input-unit {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ── Stored files (Settings → Files) ── */
+/* Indented under the instance row it belongs to, so an expanded folder still
+   reads as part of that row and not as a second list. */
+.content-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: -2px 0 4px 16px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.content-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.content-file-row a {
+  color: var(--info);
+  word-break: break-all;
+}
+.content-over {
+  color: var(--warning);
+}
+
 /* ── Modal ── */
 .modal {
   position: fixed;
@@ -318,6 +406,7 @@ tbody tr:last-child td {
 }
 
 .modal-wide { max-width: 700px; }
+.modal-narrow { max-width: 380px; }
 
 .modal-content h2 {
   font-size: 16px;
@@ -1049,13 +1138,6 @@ button.update-badge { font-family: inherit; cursor: pointer; }
 
 /* ── Settings ── */
 
-.btn-settings {
-  font-size: 17px;
-  padding: 6px 10px;
-  line-height: 1;
-  margin-left: 8px;
-}
-
 /* ── Settings tabs ── */
 .settings-tabs {
   display: flex;
@@ -1212,11 +1294,40 @@ body.guest .admin-col { display: none; }
 
 .cell-muted { color: var(--text-muted); }
 
+/* Doubles as the About trigger — a button, so it is reachable by keyboard,
+   but stripped back to the plain grey text it has always been. The update
+   badge sits right next to it in the same heading: keeping this element small
+   and self-contained is what stops a click meant for the badge landing here. */
 .app-version {
   font-size: 12px;
   font-weight: 400;
   color: var(--text-muted);
   vertical-align: middle;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+}
+
+button.app-version {
+  cursor: pointer;
+}
+button.app-version:hover,
+button.app-version:focus-visible {
+  color: var(--text);
+}
+
+.about-line {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.about-line a {
+  color: var(--info);
+}
+.about-third-party {
+  margin-top: 14px;
+  font-size: 12px;
 }
 
 /* ── Users & permissions ── */

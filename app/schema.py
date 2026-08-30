@@ -53,6 +53,35 @@ class MachineIdentity(BaseModel):
         return Identity(sub=self.sub, name=self.name, role=self.role, source=SOURCE_MACHINE)
 
 
+class ContentConfig(BaseModel):
+    """Where this instance may put the files it produces — off by default.
+
+    Opt-in per instance (decision 4): most tools never write a file, and an
+    instance that does not ask for storage should not get a folder, a valve
+    filled behind its back, or its results rewritten.
+
+    *url_prefix* is what the tool's own links start with. Tools written for
+    OpenWebUI return `/cache/files/...`, which resolves against OpenWebUI in
+    the browser and finds nothing of ours — the runner rewrites that prefix to
+    our download URL on the way out.
+    """
+
+    enabled: bool = False
+    url_prefix: str = "/cache/files/"
+
+    @field_validator("url_prefix")
+    @classmethod
+    def _ensure_trailing_slash(cls, v: str) -> str:
+        # Without the trailing slash the rewrite pattern captures "/name.docx"
+        # as the filename, which the path check refuses — every link would then
+        # silently stay unrewritten. Normalised here so a hand-edited config is
+        # covered the same as the API and the UI.
+        v = str(v).strip()
+        if v and not v.endswith("/"):
+            v += "/"
+        return v
+
+
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(ge=1024, le=65535)
@@ -98,6 +127,7 @@ class MCPConfig(BaseModel):
     identity_mode: IdentityMode = IdentityMode.off
     # Stands in when no user token arrives — for callers that have no login.
     machine_identity: Optional[MachineIdentity] = None
+    content: ContentConfig = ContentConfig()
 
     @field_validator("id")
     @classmethod

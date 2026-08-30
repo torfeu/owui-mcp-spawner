@@ -117,7 +117,11 @@ export async function fetchVenvs() {
   }
 }
 
-export function fillVenvSelect(select, venvs, selected) {
+// Sentinel for "let me type a name". Deliberately contains a character the
+// server's venv-name rule rejects, so it can never collide with a real venv.
+export const NEW_VENV = "+new";
+
+export function fillVenvSelect(select, venvs, selected, { allowNew = false } = {}) {
   select.innerHTML = venvs.map(venv =>
     `<option value="${esc(venv.name)}"${venv.name === selected ? " selected" : ""}>${esc(venv.name)}${venv.is_default ? " (default)" : ""}</option>`
   ).join("");
@@ -128,6 +132,48 @@ export function fillVenvSelect(select, venvs, selected) {
     option.selected = true;
     select.appendChild(option);
   }
+  if (allowNew) select.appendChild(new Option("+ New venv…", NEW_VENV));
+}
+
+/** Wire a venv select to the text field that appears when "+ New venv…" is picked.
+ *
+ * Called on every dialog open (the select is repopulated then), so the change
+ * listener is attached exactly once per element — re-adding it each open would
+ * pile up a listener per visit for the session.
+ */
+export function bindNewVenvField(selectId, inputId) {
+  const select = document.getElementById(selectId);
+  const input = document.getElementById(inputId);
+  const sync = () => {
+    const creating = select.value === NEW_VENV;
+    input.classList.toggle("hidden", !creating);
+    if (creating) input.focus(); else input.value = "";
+  };
+  if (!select.dataset.newVenvBound) {
+    select.dataset.newVenvBound = "1";
+    select.addEventListener("change", sync);
+  }
+  sync();
+}
+
+/**
+ * The venv the dialog is asking for, or null when the typed name is unusable.
+ * The server validates the name again and creates the venv on demand — this
+ * only spares the user a round trip for the obvious mistakes.
+ */
+export function venvChoice(selectId, inputId) {
+  const select = document.getElementById(selectId);
+  if (select.value !== NEW_VENV) return select.value;
+  const name = document.getElementById(inputId).value.trim();
+  if (!name) {
+    showAlert("error", "Enter a name for the new venv");
+    return null;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    showAlert("error", `Invalid venv name '${name}': letters, digits, _ and - only`);
+    return null;
+  }
+  return name;
 }
 
 export function showAlert(type, message) {

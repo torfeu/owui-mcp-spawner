@@ -112,7 +112,7 @@ Data comes from `GET /api/usage?days=N`, fetched when the dialog opens — never
 
 ## Settings page
 
-The web UI includes a **⚙ Settings** page (top-right button) for managing common runtime options, grouped into four tabs — **Security**, **Identity**, **System** and **Maintenance**. All panels stay loaded, so **Save Settings** submits the whole dialog whichever tab is open; the tab you last used is remembered in the browser.
+The web UI includes a **⚙ Settings** page (top-right button) for managing common runtime options, grouped into five tabs — **Security**, **Identity**, **System**, **Files** and **Maintenance**. All panels stay loaded, so **Save Settings** submits the whole dialog whichever tab is open; the tab you last used is remembered in the browser.
 
 - **Password** — set or change the password (requires current password if one is already set); persisted as SHA-256 hash in `runtime/settings.json`
 - **Edit mode** — switch between full / upload-only / readonly at runtime
@@ -121,6 +121,7 @@ The web UI includes a **⚙ Settings** page (top-right button) for managing comm
 - **User Identity** — the secret OpenWebUI signs its forwarded user token with, plus the switch that accepts its plain, unsigned user headers instead (see *Per-user identity*). The secret field is write-only: no reveal button and no generator, because the value is a copy of what another system already has, not one this server invents
 - **Shared MCP Port** — expose all MCPs through one port as `/mcp/<id>` (see below)
 - **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
+- **File Storage** — the download base URL, the per-instance quota with its warning threshold, whether a full folder only warns or refuses calls, and how long stored files are kept (see *File storage*). The same tab lists what is stored, per instance, with a download link and a delete button per file
 - **Usage Tracking** — how long individual tool calls are kept (7 / 30 / 90 / 365 days or indefinitely); the per-function totals are always kept
 - **Update Check** — off by default; when enabled, the server asks GitHub once a day whether a newer release exists, plus a **Check now** button for a one-off check (see below)
 - **Restart** — restart the spawner process from the UI
@@ -174,12 +175,61 @@ Notes:
 
 Every instance runs in its own Python virtual environment under `runtime/venvs/<name>/`, so a tool's third-party dependencies are fully isolated — conflicting versions across tools no longer collide, and nothing pollutes the spawner process itself.
 
-- Instances default to the **`default`** venv, which is created on first use with the base packages the runner needs (`mcp<2`, `uvicorn`, `starlette`, `pydantic`, `httpx`). `mcp` carries a ceiling because the 2.x line rebuilt the low-level `Server` API the runner registers its handlers with; lifting it means porting the runner first.
+- Instances default to the **`default`** venv, which is created on first use with the base packages the runner needs (`mcp>=2`, `uvicorn`, `starlette`, `pydantic`, `httpx`). `mcp` carries a floor because the runner speaks the 2.x low-level `Server` API; against the 1.x line it refuses to start with a line telling you to upgrade that venv. Venvs built before that port keep their old `mcp` — the base packages are installed once, never re-installed — so they need `pip install -U 'mcp>=2'` once, or a fresh venv.
 - A venv is **created on demand**: assigning an instance to a new venv name (or creating a tool with one) builds it automatically. You can also create/delete venvs explicitly on the Settings page.
 - Validation, dependency installs and the runtime all use the instance's venv interpreter, so an import-time check sees exactly the packages the tool will have at runtime.
 - The dashboard shows each instance's venv in a **Venv** column; the **Edit** dialog has a venv dropdown to move an instance (deps are reinstalled into the target venv and the instance restarts if running).
 
 > **Upgrading from ≤ v0.0.6:** on the first start, existing instances' dependencies are installed into the `default` venv once (a one-time migration, guarded by `runtime/.venv_migrated`). The first start therefore takes longer and needs network access for pip. Already-running instances keep using the old interpreter until restarted.
+
+---
+
+## File storage
+
+Tools that produce files — a `.docx`, a chart, an export — need somewhere to put them and a way to hand them to whoever asked. **Off by default and opt-in per instance:** most tools never write a file, and one that does not ask for storage gets no folder, no filled Valve and no rewritten result.
+
+Switch **File storage** on in **Edit → Config**. The instance then gets `content/<id>/`, and the path reaches the tool three ways, so a tool written for OpenWebUI usually runs unchanged:
+
+1. **Valve autofill** — a Valve called `content_dir`, `output_dir` or anything ending in `_export_dir` (e.g. `docx_export_dir`) is filled with the folder at startup. A value you set yourself always wins.
+2. **Environment** — `MCP_CONTENT_DIR` and `MCP_CONTENT_URL` are passed to the runner process.
+3. **Relative paths** — runners start with the project root as working directory, so writing to `content/<id>/…` lands in the right place by itself.
+
+**Links get rewritten.** Tools written for OpenWebUI return `/cache/files/<name>` — a path that resolves against OpenWebUI in the browser and finds nothing of this server. The runner replaces that prefix (configurable per instance) in the tool's *result* with a full download URL. The tool's code is never touched, and only names that really exist in the folder are rewritten.
+
+**Two ways to a file, and no third.** The link in the chat carries a token for exactly that one file: `HMAC(server secret, "<instance>/<file>")`, truncated. It is derived, not stored — no index that can drift out of step with the folder, it survives a restart, and withdrawing access means deleting the file. The other way is the control tool over the authenticated API. There is no directory listing under `/content/` and no guest view: a file nobody has a link to cannot be found. The token proves the link came from us for this one file; it is not a user identity, so anyone the link is forwarded to can fetch that file — and nothing else.
+
+**Quota, per instance folder.** Set a limit and a warning threshold under **Settings → Files**. Past the threshold the runner puts one short line *in front of* the tool's result — in front, because a result is often an instruction block to the model and anything appended below it gets swallowed. Refusing calls outright when the folder is full is a separate switch and off by default: a warning the model can act on is worth more than a refusal it cannot. The honest limit is the call, not the write — a tool's own `open()` cannot be intercepted without touching its code.
+
+**Retention** is off by default. With a window set, the daily housekeeping either drops each file on its own age or empties a folder as soon as its oldest file expires — the second one for tools that write a set of files belonging together, where keeping half of it is worse than keeping none.
+
+`content/` is gitignored, and it must be excluded from any rsync deployment — otherwise the next deploy deletes what the tools produced. Deleting an instance takes its folder with it.
+
+### Writing a tool that produces files
+
+There is nothing to import and no API to call. A tool needs exactly two things: a Valve for the output directory, and a link that starts with the prefix. Everything else is the framework's job.
+
+```python
+class Tools:
+    class Valves(BaseModel):
+        # Filled with content/<id>/ at startup. Leave the default empty —
+        # a value you type in yourself always wins over the autofill.
+        output_dir: str = Field(default="", description="Where to write files")
+
+    def write_note(self, title: str, text: str) -> str:
+        """Write a note and return a download link for it."""
+        target = Path(self.valves.output_dir or os.environ.get("MCP_CONTENT_DIR") or "content")
+        target.mkdir(parents=True, exist_ok=True)
+        name = f"{slugify(title)}_{secrets.token_hex(3)}.md"
+        (target / name).write_text(f"# {title}\n\n{text}\n", encoding="utf-8")
+        # The bare convention prefix, not a full URL: the runner turns this
+        # into an absolute, tokenised link — it is the only party that knows
+        # the server's public address.
+        return f"Saved as [{name}](/cache/files/{name})"
+```
+
+Two rules worth stating outright. **Never build the filename from user input verbatim** — a name is part of a path, and two callers with the same title must not overwrite each other; derive a slug and add a random tail. And **return the link, not the path**: the file lives on the server, so a path is of no use to whoever asked for it.
+
+A complete, runnable version ships as [`examples/example_content_tool.py`](examples/example_content_tool.py) — paste it into the editor (**New Tool → Install as MCP**), switch **File storage** on for the instance, and call `where_do_files_go()`. It reports which of the three paths is in force and warns explicitly when storage is still off, which is the mistake that otherwise shows up as a dead link.
 
 ---
 
@@ -350,7 +400,7 @@ Deny by default: an unknown user, a missing file and an unreadable file all mean
 
 Forbidden tools are hidden from `tools/list` **and** refused when called by name — the listing is a courtesy, the call is the boundary. A router or any other proxy in front enforces nothing.
 
-The shipped **MCP tool router** (v0.0.8) passes the user token on to whichever instance it routes to, unchanged, alongside its own Bearer token — and forwards nothing else of the incoming request. In the plain-header mode it rebuilds those four headers instead, since there is no token to hand on. Give the router `identity_mode: optional` so its runner verifies the caller; the instance behind it decides what that identity is worth. The router's directory is not filtered by the rules: a forbidden tool is still listed, and refused when called.
+The shipped **MCP tool router** (v0.0.9) passes the user token on to whichever instance it routes to, unchanged, alongside its own Bearer token — and forwards nothing else of the incoming request. In the plain-header mode it rebuilds those four headers instead, since there is no token to hand on. Give the router `identity_mode: optional` so its runner verifies the caller; the instance behind it decides what that identity is worth. The router's directory is not filtered by the rules: a forbidden tool is still listed, and refused when called.
 
 ### Per-user credentials
 
@@ -450,7 +500,7 @@ Both are optional and independent — unset means "password only", exactly as be
 | Method | Route | Description |
 |---|---|---|
 | `GET` | `/api/auth-check` | Token validation endpoint |
-| `GET` | `/api/settings` | Spawner settings — auth, edit mode (plus `edit_mode_locked`), MCP token status, `read_token_set`, `agent_token_set`, `shared_port`, `shared_proxy_running`, `usage_retention_days`, `user_jwt_secret_set`, `user_trust_headers` and `update` (cached update-check result) |
+| `GET` | `/api/settings` | Spawner settings — auth, edit mode (plus `edit_mode_locked`), MCP token status, `read_token_set`, `agent_token_set`, `shared_port`, `shared_proxy_running`, `usage_retention_days`, `user_jwt_secret_set`, `user_trust_headers`, the `content_*` storage settings and `update` (cached update-check result) |
 | `PUT` | `/api/settings` | Update settings *(password only — it sets the password and both API tokens)* |
 | `GET` | `/api/settings/mcp-token` | Retrieve current MCP token value *(password only; blocked by `--no-token-edit`)* |
 | `GET` | `/api/settings/read-token` | Retrieve current API read token value *(password only; blocked by `--no-token-edit`)* |
@@ -470,7 +520,7 @@ Both are optional and independent — unset means "password only", exactly as be
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
 | `POST` | `/api/instances/upload` | Upload & install a new tool; accepts optional `category`, `venv` and `port` form fields. Category is stored in the MCP config without modifying the uploaded tool JSON *(blocked by `--no-edit`)* |
 | `POST` | `/api/tools/create` | Create & install a new tool from raw Python code in one step; accepts optional `category` (installs deps, validates in the venv, fills values) *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts), `identity_mode`. `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts), `identity_mode`, `content` (storage on/off and link prefix). `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
 | `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code; installs newly declared `requirements:` and syncs Valve values *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/venvs` | List virtual environments with instance counts |
 | `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
@@ -486,6 +536,11 @@ Both are optional and independent — unset means "password only", exactly as be
 | `POST` | `/api/tools/validate` | Validate tool code; pass an optional `instance_id` to validate in that instance's venv so its installed dependencies resolve *(blocked by `--no-code-edit`)* |
 | `POST` | `/api/tools/export` | Export tool as OpenWebUI JSON *(blocked by `--no-code-edit`)* |
 | `DELETE` | `/api/instances/{id}` | Delete *(blocked by `--no-edit`)* |
+| `GET` | `/api/content` | Stored files per instance — count, bytes, age of the oldest, quota percentage — plus the storage settings the numbers are measured against |
+| `GET` | `/api/content/{id}` | The files of one instance with size, mtime and a ready-made tokenised download link |
+| `DELETE` | `/api/content/{id}/{file}` | Delete one stored file; its link stops working immediately *(blocked by `--no-edit`)* |
+| `DELETE` | `/api/content/{id}` | Empty one instance's folder, keeping the folder *(blocked by `--no-edit`)* |
+| `DELETE` | `/api/content` | Empty the whole store *(blocked by `--no-edit`)* |
 
 ### Open routes (no auth required)
 
@@ -495,6 +550,7 @@ Both are optional and independent — unset means "password only", exactly as be
 | `GET` | `/api/instances` | Instance list — full records (status, ports, URLs, venv, lock state, `bundled_update`, `identity_mode`) with a valid token, reduced guest records without one (see *Guest mode*). `?include=specs` adds each instance's function catalog; opt-in because the default payload is polled by every open tab, and never served to guests |
 | `GET` | `/api/instances/{id}` | Single instance — same token-dependent shape as the list |
 | `GET` | `/api/tools/template` | Starter template for the editor |
+| `GET` | `/content/{id}/{file}?t=…` | Download one stored file. No login — the token in the query is the credential, and it is valid for that one file only. Always served as an attachment with `nosniff`; a wrong token and a missing file give the same `404` |
 
 ---
 
@@ -547,7 +603,7 @@ class Tools:
 
 Valve fields become configurable values in the web UI (Edit → Values).
 
-A complete, runnable version of this pattern ships as [`examples/example_valve_tool.py`](examples/example_valve_tool.py) — paste it into the editor (**New Tool → Install as MCP**) or hand it to `create_tool`. It exposes two methods: `greet(name)` uses the valve, `current_setting()` reports it back, so you can change the value in **Edit → Values** and see the change take effect after the automatic restart.
+A complete, runnable version of this pattern ships as [`examples/example_valve_tool.py`](examples/example_valve_tool.py) — paste it into the editor (**New Tool → Install as MCP**) or hand it to `create_tool`. It exposes two methods: `greet(name)` uses the valve, `current_setting()` reports it back, so you can change the value in **Edit → Values** and see the change take effect after the automatic restart. A second example, [`examples/example_content_tool.py`](examples/example_content_tool.py), shows the pattern for a tool that produces files (see *File storage*).
 
 ### Dependencies
 
@@ -664,7 +720,9 @@ The definition lives in `examples/mcp-manager-control.json` (instance id `mcp_ma
 1. Upload `examples/mcp-manager-control.json` (or paste it into the editor) to create and install the `mcp_manager_control` instance, then start it.
 2. In your client add it as an MCP server at `http://<host>:<port>/mcp`, with the Bearer token if MCP auth is enabled.
 
-**Available tools (25):** `list_instances`, `get_instance`, `get_instance_config`, `get_instance_specs`, `get_settings`, `get_usage_stats`, `get_install_log`, `get_runtime_log`, `get_tool_code`, `get_tool_template`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `restart_manager`, `create_tool`, `upload_tool`, `save_tool_code`, `validate_tool_code`, `export_tool`, `update_instance_category`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv`, `delete_instance`.
+**Available tools (28):** `list_instances`, `get_instance`, `get_instance_config`, `get_instance_specs`, `get_settings`, `get_usage_stats`, `get_install_log`, `get_runtime_log`, `get_tool_code`, `get_tool_template`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `restart_manager`, `create_tool`, `upload_tool`, `save_tool_code`, `validate_tool_code`, `export_tool`, `update_instance_category`, `update_instance_values`, `update_instance_dependencies`, `update_instance_venv`, `delete_instance`, `list_content`, `read_content`, `delete_content`.
+
+`list_content` and `read_content` are the model's window on the *File storage*: an overview by default, the file names and their links when an instance is named, and a text file in full — a binary one comes back as type, size and link instead of as bytes in the chat. `delete_content` sits behind its own `allow_content_delete` Valve, off by default.
 
 **Security — enforced server-side, granular per action.** The control instance carries one `allow_*` Valve per action (`allow_delete`, `allow_create_tool`, `allow_restart`, `allow_manager_restart`, …). Read-only actions are on by default; destructive ones (e.g. `delete_instance`) stay disabled until you flip their Valve in **Edit → Values** (the spawner restarts the instance itself, so the change takes effect right away) — so an agent can never do more than you've allowed. Write operations also need a credential, supplied to the control instance via the `auth_token` Valve; `manager_url` points it at the spawner API. Give it the [agent token](#api-tokens) rather than the password — it does the same job, is revocable on its own, and cannot read out the other credentials or set a new password. With every write Valve off, the read token is enough and the reach shrinks to reading. The global edit mode (`--no-edit` / `--no-code-edit`) still applies on top.
 
@@ -767,7 +825,7 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 .venv/bin/python -m unittest discover -v
 ```
 
-The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_auth_lockout.py` covers the failed-credential counter — the doubling, the quiet period that starts when a block *ends* rather than at the last attempt, and the two things that must not count. `tests/test_venv_base_packages.py` guards the `mcp` ceiling in both places that declare it. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
+The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_auth_lockout.py` covers the failed-credential counter — the doubling, the quiet period that starts when a block *ends* rather than at the last attempt, and the two things that must not count. `tests/test_venv_base_packages.py` guards the `mcp` floor in both places that declare it. `tests/test_content.py` covers the file storage from both ends — path traversal, symlinks and dotfiles refused, a per-file token that opens nothing else, links rewritten without touching the rest of a result, the quota warning standing *in front of* it, both retention modes, and a Valve the user set never being overwritten. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
 
 ---
 
@@ -778,9 +836,10 @@ app/
   manager.py            Entry point (CLI) — --host, --port, --no-edit, --no-code-edit, --mcp-token, --no-token-edit
   admin_server.py       FastAPI app assembly, static web server, instance watchdog
   routes/               API endpoints — auth.py, instances.py, tools.py, logs.py, settings.py,
-                        venvs.py, usage.py, permissions.py
+                        venvs.py, usage.py, permissions.py, content.py
   api_helpers.py        Shared route helpers (edit-mode/lock guards, instance serialization, version + specs lookup)
   activity.py           Usage tracking (runtime/usage.db, written by the runners, pruned by the manager)
+  content_store.py      Files the tools produce (content/<id>/) — paths, per-file tokens, quota, retention
   update_check.py       Optional GitHub release check (off by default, server-side, cached)
   shared_proxy.py       Streaming reverse proxy for the shared MCP port (/mcp/<id>)
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
@@ -802,8 +861,10 @@ app/
   security.py           Package validation, secret masking
   logger.py             Logging setup (rotating log)
 configs/                Per-server JSON configs (one file = one MCP)
+content/                Files produced by instances with File storage on (gitignored)
 tools/                  Uploaded OpenWebUI tool JSONs
-examples/               example_valve_tool.py (minimal tool with a Valve), the
+examples/               example_valve_tool.py (minimal tool with a Valve),
+                        example_content_tool.py (a tool that produces files), the
                         control tool JSON (manage the spawner via MCP), the
                         tool router JSON (one connection for all instances),
                         identity-probe.json (who is calling? — diagnostic) and

@@ -50,14 +50,14 @@ def free_port() -> int:
 
 
 async def call_mcp(url: str, text: str) -> str:
-    async with streamable_http_client(url) as (read, write, _):
+    async with streamable_http_client(url) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
             if [tool.name for tool in tools.tools] != ["echo"]:
                 raise AssertionError("Unexpected MCP tool list")
             result = await session.call_tool("echo", {"text": text})
-            if result.isError:
+            if result.is_error:
                 raise AssertionError(f"MCP call failed: {result.content}")
             return result.content[0].text
 

@@ -18,8 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from mcp import types
-from mcp.server.lowlevel.server import request_ctx
-from mcp.shared.context import RequestContext
+from mcp.server.lowlevel.server import ServerRequestContext
 
 import app.policy as policy
 from app.identity import get_current_identity
@@ -61,6 +60,23 @@ class FakeRequest:
         self.headers = headers
 
 
+def make_context(headers: dict | None, method: str = "tools/call") -> ServerRequestContext:
+    """The context the SDK hands a handler, with the HTTP request we want.
+
+    *headers* None stands for "no HTTP request at all" — the stdio case, and
+    what a handler sees when nothing carried it over the wire.
+    """
+    return ServerRequestContext(
+        session=None,
+        lifespan_context=None,
+        protocol_version="2025-06-18",
+        method=method,
+        request_id=1,
+        meta=None,
+        request=FakeRequest(headers) if headers is not None else None,
+    )
+
+
 def redirect_registry(case):
     """Send the identity roster into a temp file for the duration of a test.
 
@@ -94,32 +110,18 @@ class HandlerTestCase(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.record.stop)
         redirect_registry(self)
 
-    def _context(self, headers: dict | None):
-        return RequestContext(
-            request_id=1, meta=None, session=None, lifespan_context=None,
-            request=FakeRequest(headers) if headers is not None else None,
-        )
-
     async def call(self, server, name, headers=None):
-        handler = server.request_handlers[types.CallToolRequest]
-        token = request_ctx.set(self._context(headers))
-        try:
-            result = await handler(types.CallToolRequest(
-                method="tools/call",
-                params=types.CallToolRequestParams(name=name, arguments={}),
-            ))
-        finally:
-            request_ctx.reset(token)
-        return "\n".join(part.text for part in result.root.content)
+        handler = server.get_request_handler("tools/call").handler
+        result = await handler(
+            make_context(headers),
+            types.CallToolRequestParams(name=name, arguments={}),
+        )
+        return "\n".join(part.text for part in result.content)
 
     async def list_tools(self, server, headers=None):
-        handler = server.request_handlers[types.ListToolsRequest]
-        token = request_ctx.set(self._context(headers))
-        try:
-            result = await handler(types.ListToolsRequest(method="tools/list"))
-        finally:
-            request_ctx.reset(token)
-        return [tool.name for tool in result.root.tools]
+        handler = server.get_request_handler("tools/list").handler
+        result = await handler(make_context(headers, method="tools/list"), None)
+        return [tool.name for tool in result.tools]
 
 
 class IdentityModeTests(HandlerTestCase):
@@ -466,15 +468,20 @@ class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
         self.fail("runner did not come up")
 
     async def _whoami(self, headers):
+        import httpx2
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
 
         url = f"http://127.0.0.1:{self.port}/mcp"
-        async with streamablehttp_client(url, headers=headers, timeout=10) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                listed = [tool.name for tool in (await session.list_tools()).tools]
-                answer = (await session.call_tool("whoami", {})).content[0].text
+        # Since mcp 2.x the headers no longer go to the transport but to an
+        # HTTP client handed to it — which is the point of this test: the
+        # header has to reach the handler through that longer path.
+        async with httpx2.AsyncClient(headers=headers, timeout=10) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listed = [tool.name for tool in (await session.list_tools()).tools]
+                    answer = (await session.call_tool("whoami", {})).content[0].text
         return listed, answer
 
     async def test_the_header_survives_a_real_call_and_the_tool_sees_the_user(self):
@@ -492,36 +499,25 @@ class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
 
 class ResolveIdentityTests(unittest.TestCase):
     """The header-reading helper on its own, including the stdio case where
-    there is no HTTP request at all."""
+    there is no HTTP request at all (`ctx.request is None`)."""
 
     def setUp(self):
         redirect_registry(self)
 
-    class FakeServer:
-        def __init__(self, request):
-            self._request = request
-
-        @property
-        def request_context(self):
-            if self._request is None:
-                raise LookupError("no request context")
-            return RequestContext(request_id=1, meta=None, session=None,
-                                  lifespan_context=None, request=self._request)
-
     def test_off_never_looks_at_the_header(self):
-        server = self.FakeServer(FakeRequest({"x-openwebui-user-jwt": "nonsense"}))
-        self.assertEqual(_resolve_identity(server, IdentityMode.off), (None, ""))
+        ctx = make_context({"x-openwebui-user-jwt": "nonsense"})
+        self.assertEqual(_resolve_identity(ctx, IdentityMode.off), (None, ""))
 
-    def test_no_request_context_is_not_a_crash(self):
+    def test_no_http_request_is_not_a_crash(self):
         with patch.dict(os.environ, {"MCP_USER_JWT_SECRET": SECRET}):
-            identity, refusal = _resolve_identity(self.FakeServer(None), IdentityMode.required)
+            identity, refusal = _resolve_identity(make_context(None), IdentityMode.required)
         self.assertIsNone(identity)
         self.assertIn("header", refusal)
 
     def test_a_valid_token_resolves(self):
         with patch.dict(os.environ, {"MCP_USER_JWT_SECRET": SECRET}):
             identity, refusal = _resolve_identity(
-                self.FakeServer(FakeRequest({"x-openwebui-user-jwt": mint()})),
+                make_context({"x-openwebui-user-jwt": mint()}),
                 IdentityMode.required,
             )
         self.assertEqual(refusal, "")
@@ -531,7 +527,7 @@ class ResolveIdentityTests(unittest.TestCase):
         token = mint(secret="some-other-secret")
         with patch.dict(os.environ, {"MCP_USER_JWT_SECRET": SECRET}):
             _, refusal = _resolve_identity(
-                self.FakeServer(FakeRequest({"x-openwebui-user-jwt": token})),
+                make_context({"x-openwebui-user-jwt": token}),
                 IdentityMode.required,
             )
         self.assertTrue(refusal)

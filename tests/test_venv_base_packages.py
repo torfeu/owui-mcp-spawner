@@ -1,11 +1,12 @@
-"""The base packages every instance venv gets — and why `mcp` carries a ceiling.
+"""The base packages every instance venv gets — and why `mcp` carries a floor.
 
-`mcp` 2.x rebuilt the low-level `Server` API. `mcp_runner.build_server()` still
-registers handlers with the 1.x decorators, so an instance venv that resolves
-`mcp` to 2.x dies at startup with "'Server' object has no attribute
-'list_tools'". Existing venvs keep the 1.x they installed long ago and show
-nothing; every venv created after the 2.0 release falls over. These tests fail
-if the ceiling is dropped without porting the runner.
+The runner speaks the mcp 2.x low-level `Server` API (handlers as constructor
+arguments). Against the 1.x line it does not start at all, so an instance venv
+must never resolve `mcp` to 1.x. The other direction is what these tests once
+guarded: before v0.2.2 the pin was a ceiling, because the runner still used the
+1.x decorators. Whichever way the runner is ported, both places have to move
+together — the manager's own dependency and the venvs it builds — and these
+tests fail if only one of them does.
 """
 import tomllib
 import unittest
@@ -27,17 +28,17 @@ def _mcp_requirement(specs: list[str]) -> Requirement:
     raise AssertionError(f"no 'mcp' requirement among {specs}")
 
 
-class McpCeilingTests(unittest.TestCase):
-    def test_instance_venvs_never_resolve_mcp_2(self):
+class McpFloorTests(unittest.TestCase):
+    def test_instance_venvs_never_resolve_mcp_1(self):
         req = _mcp_requirement(venv_manager.BASE_PACKAGES)
-        self.assertFalse(req.specifier.contains(Version("2.0.0")))
-        self.assertTrue(req.specifier.contains(Version("1.29.1")))
+        self.assertFalse(req.specifier.contains(Version("1.29.1")))
+        self.assertTrue(req.specifier.contains(Version("2.1.1")))
 
-    def test_the_manager_itself_carries_the_same_ceiling(self):
+    def test_the_manager_itself_carries_the_same_floor(self):
         data = tomllib.loads((BASE_DIR / "pyproject.toml").read_text())
         req = _mcp_requirement(data["project"]["dependencies"])
-        self.assertFalse(req.specifier.contains(Version("2.0.0")))
-        self.assertTrue(req.specifier.contains(Version("1.29.1")))
+        self.assertFalse(req.specifier.contains(Version("1.29.1")))
+        self.assertTrue(req.specifier.contains(Version("2.1.1")))
 
 
 if __name__ == "__main__":

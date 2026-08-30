@@ -110,5 +110,94 @@ class ControlToolRegressionTests(unittest.TestCase):
         self.assertEqual({"category": "Smart Home"}, post.call_args.kwargs["data"])
 
 
+class ContentToolTests(unittest.TestCase):
+    """What the model gets to see of the file storage.
+
+    The rule that matters here is the house rule: little by default, detail on
+    request. The overview must not be a JSON dump, and a .docx must never end
+    up in the chat as bytes.
+    """
+
+    OVERVIEW = {
+        "instances": [
+            {"instance": "docs", "files": 2, "bytes": 3 * 1024 * 1024,
+             "oldest": None, "limit_bytes": 10 * 1024 * 1024, "percent": 30},
+        ],
+        "total_bytes": 3 * 1024 * 1024, "total_files": 2,
+    }
+    FILES = {
+        "instance": "docs", "bytes": 3 * 1024 * 1024, "files": 2,
+        "items": [
+            {"name": "report.docx", "size": 2 * 1024 * 1024, "modified": None,
+             "url": "/content/docs/report.docx?t=abc"},
+            {"name": "notes.md", "size": 1024, "modified": None,
+             "url": "/content/docs/notes.md?t=def"},
+        ],
+    }
+
+    def test_the_overview_is_one_line_per_instance_and_not_a_json_dump(self):
+        tools = load_control_tools()
+        tools._get = Mock(return_value=json.dumps(self.OVERVIEW))
+
+        result = tools.list_content()
+
+        self.assertIn("docs: 2 file(s), 3.0 MB", result)
+        self.assertIn("30 % of quota", result)
+        self.assertNotIn("{", result)
+
+    def test_naming_an_instance_gives_the_files_with_their_links(self):
+        tools = load_control_tools()
+        tools._get = Mock(return_value=json.dumps(self.FILES))
+
+        result = tools.list_content("docs")
+
+        self.assertIn("report.docx", result)
+        # Relative links from the manager are made absolute here — the model
+        # hands this to a user, who has no manager URL to resolve it against.
+        self.assertIn("http://127.0.0.1:7860/content/docs/report.docx?t=abc", result)
+
+    def test_a_binary_file_is_described_and_never_dumped(self):
+        tools = load_control_tools()
+        tools._get = Mock(return_value=json.dumps(self.FILES))
+        response = Mock(status_code=200, content=b"PK\x03\x04\x00binary")
+
+        with patch("httpx.get", return_value=response):
+            result = tools.read_content("docs", "report.docx")
+
+        self.assertIn("binary docx file", result)
+        self.assertIn("/content/docs/report.docx?t=abc", result)
+
+    def test_a_text_file_comes_back_and_is_capped(self):
+        tools = load_control_tools()
+        tools._get = Mock(return_value=json.dumps(self.FILES))
+        response = Mock(status_code=200, content=("x" * 50).encode())
+
+        with patch("httpx.get", return_value=response):
+            full = tools.read_content("docs", "notes.md")
+            cut = tools.read_content("docs", "notes.md", max_chars=10)
+
+        self.assertEqual("x" * 50, full)
+        self.assertTrue(cut.startswith("x" * 10))
+        self.assertIn("cut off after 10 characters of 50", cut)
+
+    def test_deleting_is_off_until_it_is_switched_on(self):
+        tools = load_control_tools()
+        tools._delete = Mock()
+
+        result = tools.delete_content("docs", "report.docx")
+
+        self.assertIn("allow_content_delete", result)
+        tools._delete.assert_not_called()
+
+    def test_an_empty_filename_empties_the_whole_folder(self):
+        tools = load_control_tools()
+        tools.valves.allow_content_delete = True
+        tools._delete = Mock(return_value="{}")
+
+        tools.delete_content("docs")
+
+        tools._delete.assert_called_once_with("/api/content/docs")
+
+
 if __name__ == "__main__":
     unittest.main()

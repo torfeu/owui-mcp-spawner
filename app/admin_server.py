@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import shared_proxy
 from .activity import prune as prune_usage
+from .content_store import ensure_secret, prune as prune_content
 from .api_helpers import APP_VERSION
 from .config_store import (BASE_DIR, find_free_port, get_instance_state, is_port_free, load_all_configs, resolve_tool_path, save_config, set_instance_state)
 from .dependency_manager import install_dependencies
@@ -19,7 +20,7 @@ from .settings_store import atomic_write_text
 from .tool_editor import validate_tool_code
 from .update_check import update_check_loop
 from .venv_manager import python_path
-from .routes import auth, instances, logs, permissions, settings, tools, usage, venvs
+from .routes import auth, content, instances, logs, permissions, settings, tools, usage, venvs
 
 logger = get_manager_logger()
 WATCHDOG_INTERVAL = 10
@@ -44,11 +45,13 @@ async def _watchdog_loop() -> None:
 PRUNE_INTERVAL = 24 * 60 * 60
 
 async def _prune_usage_loop() -> None:
-    """Drop usage events past the retention window — once a day, in the manager.
+    """Daily housekeeping: usage events and stored files past their window.
 
     Deliberately not in the runners: ten processes attempting the same
-    housekeeping would only fight over the write lock. `totals` is never
-    pruned, so "ever used" survives any retention setting.
+    housekeeping would only fight over the write lock — and over each other's
+    files. `totals` is never pruned, so "ever used" survives any retention
+    setting; content retention is off by default and deletes nothing until
+    somebody sets a window.
     """
     # The old JSON counters were superseded by runtime/usage.db before anyone
     # collected real data with them.
@@ -69,6 +72,12 @@ async def _prune_usage_loop() -> None:
                 logger.info(f"Pruned {removed} usage event(s) past the retention window")
         except Exception as e:
             logger.debug(f"Usage pruning failed: {e}")
+        try:
+            removed = await asyncio.to_thread(prune_content)
+            if removed:
+                logger.info(f"Deleted {removed} stored file(s) past the retention window")
+        except Exception as e:
+            logger.debug(f"Content pruning failed: {e}")
         await asyncio.sleep(PRUNE_INTERVAL)
 
 _SPECS_MIGRATION_MARKER = BASE_DIR / "runtime" / ".specs_migrated"
@@ -195,6 +204,11 @@ async def _lifespan(app: FastAPI):
     sync_state_from_pids()
     logger.info("OWUI MCP Spawner started")
 
+    # Create the download-token secret here rather than letting the first
+    # runner do it: two runners starting at once would race, and the loser's
+    # already-handed-out links would stop verifying.
+    await asyncio.to_thread(ensure_secret)
+
     await _migrate_existing_venv_deps()
 
     # Shared MCP port: start the reverse proxy before auto-starting instances
@@ -204,7 +218,12 @@ async def _lifespan(app: FastAPI):
         if not ok:
             logger.error(f"Shared MCP port disabled for this run: {err}")
 
-    # Auto-start instances with lifecycle.auto_start = True that aren't already running
+    # Auto-start instances with lifecycle.auto_start = True that aren't already
+    # running. Port checks stay sequential (they read and rewrite configs), the
+    # starts themselves run concurrently: serial starts put the whole boot —
+    # and every MCP client — on hold for the *sum* of the startup times, up to
+    # 15 s per instance that never opens its port.
+    to_start: list[str] = []
     for cfg in load_all_configs().values():
         if not cfg.lifecycle.auto_start:
             continue
@@ -223,7 +242,15 @@ async def _lifespan(app: FastAPI):
                 inst.url = f"http://{inst.host}:{new_port}{inst.endpoint}"
                 set_instance_state(inst)
         logger.info(f"Auto-starting '{cfg.id}'")
-        await asyncio.to_thread(start_instance, cfg.id)
+        to_start.append(cfg.id)
+    if to_start:
+        # Safe concurrently: start_instance holds a per-instance lock around
+        # its spawn phase, venv creation has its own per-venv lock, and
+        # pids.json writes go through _pids_lock.
+        await asyncio.gather(
+            *(asyncio.to_thread(start_instance, instance_id) for instance_id in to_start),
+            return_exceptions=True,
+        )
 
     watchdog = asyncio.create_task(_watchdog_loop())
     # No-op while the update check is switched off (the default) — it reads the
@@ -242,7 +269,7 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
 for router in (auth.router, instances.router, tools.router, logs.router, venvs.router,
-               settings.router, usage.router, permissions.router):
+               settings.router, usage.router, permissions.router, content.router):
     app.include_router(router)
 
 @app.middleware("http")

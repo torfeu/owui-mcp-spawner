@@ -257,11 +257,16 @@ def usage_summary(days: int = 7) -> dict:
             ):
                 entry = result.setdefault(
                     instance,
-                    {"calls": 0, "recent": 0, "first_call": first_call,
+                    {"calls": 0, "recent": 0, "first_call": 0,
                      "last_call": 0, "last_tool": "", "tools": {}},
                 )
                 entry["calls"] += calls
-                entry["first_call"] = min(entry["first_call"] or first_call, first_call or 0)
+                # first_call is nullable in the table (legacy rows never get it
+                # backfilled). Folding a None through min() would either raise
+                # or turn the answer into 0 — "since 1970". Ignore the missing
+                # ones and keep the earliest real timestamp.
+                if first_call and (not entry["first_call"] or first_call < entry["first_call"]):
+                    entry["first_call"] = first_call
                 if (last_call or 0) > entry["last_call"]:
                     entry["last_call"] = last_call or 0
                     entry["last_tool"] = tool

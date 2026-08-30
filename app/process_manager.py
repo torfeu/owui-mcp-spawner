@@ -22,6 +22,24 @@ RUNNER_SCRIPT = Path(__file__).parent / "mcp_runner.py"
 # Serializes read-modify-write cycles on pids.json (endpoints run in worker threads)
 _pids_lock = threading.Lock()
 
+# One lock per instance around the check-and-spawn phase of start_instance.
+# Without it two concurrent starts (double click, agent + human) both pass the
+# "already running" check and spawn two runners — the loser's bind failure then
+# marks the healthy instance failed and drops its pids entry, leaving the
+# winner running but untracked. Only the spawn phase is locked; the health-check
+# wait stays outside so a concurrent stop_instance can still interrupt it.
+_start_locks: dict[str, threading.Lock] = {}
+_start_locks_guard = threading.Lock()
+
+
+def _start_lock_for(instance_id: str) -> threading.Lock:
+    with _start_locks_guard:
+        lock = _start_locks.get(instance_id)
+        if lock is None:
+            lock = threading.Lock()
+            _start_locks[instance_id] = lock
+        return lock
+
 # How long start_instance waits for the runner to open its port
 START_TIMEOUT = 15.0
 
@@ -203,62 +221,83 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     if not cfg:
         return False, "Config not found"
 
-    inst = get_instance_state(instance_id)
-    if inst and inst.status == MCPStatus.running:
-        pid = inst.pid
-        if pid and _is_pid_alive(pid) and _pid_is_our_runner(pid):
-            return False, "Already running"
+    with _start_lock_for(instance_id):
+        inst = get_instance_state(instance_id)
+        if inst and inst.status == MCPStatus.running:
+            pid = inst.pid
+            if pid and _is_pid_alive(pid) and _pid_is_our_runner(pid):
+                return False, "Already running"
+        # A start that got past this lock is either waiting for its port (pid
+        # alive) or crashed mid-start (pid dead / never set) — only the first
+        # is a reason to refuse.
+        if inst and inst.status == MCPStatus.starting and inst.pid and _is_pid_alive(inst.pid):
+            return False, "Already starting"
 
-    # Sync instance state with fresh config (port/host may have changed)
-    inst.port = cfg.server.port
-    inst.host = cfg.server.host
-    inst.endpoint = cfg.server.endpoint
-    inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
-    inst.status = MCPStatus.starting
-    inst.error = ""
-    set_instance_state(inst)
-
-    # The runner must use the instance's venv so the tool's deps are importable.
-    venv_ok, venv_err = ensure_venv(cfg.venv)
-    if not venv_ok:
-        inst.status = MCPStatus.dependency_error
-        inst.error = venv_err
+        # Sync instance state with fresh config (port/host may have changed)
+        inst.port = cfg.server.port
+        inst.host = cfg.server.host
+        inst.endpoint = cfg.server.endpoint
+        inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
+        inst.status = MCPStatus.starting
+        inst.error = ""
         set_instance_state(inst)
-        return False, venv_err
-    runner_python = str(python_path(cfg.venv))
 
-    config_path = BASE_DIR / "configs" / f"{instance_id}.json"
-    log_path = get_runtime_log_path(instance_id)
-    _rotate_runtime_log(log_path)
-    log_file = open(log_path, "a")
+        # The runner must use the instance's venv so the tool's deps are importable.
+        venv_ok, venv_err = ensure_venv(cfg.venv)
+        if not venv_ok:
+            inst.status = MCPStatus.dependency_error
+            inst.error = venv_err
+            set_instance_state(inst)
+            return False, venv_err
+        runner_python = str(python_path(cfg.venv))
 
-    try:
-        cmd = [runner_python, str(RUNNER_SCRIPT), "--config", str(config_path)]
-        # Shared-port mode: instances stay on localhost, only the proxy is public
-        from .settings_store import load_settings
-        if load_settings().get("shared_port"):
-            runner_host = "127.0.0.1"
-        else:
-            runner_host = os.environ.get("MCP_RUNNER_HOST")
-        if runner_host:
-            cmd += ["--host", runner_host]
+        config_path = BASE_DIR / "configs" / f"{instance_id}.json"
+        log_path = get_runtime_log_path(instance_id)
+        _rotate_runtime_log(log_path)
+        log_file = open(log_path, "a")
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=log_file,
-            cwd=str(BASE_DIR),
-        )
-    except Exception as e:
-        inst.status = MCPStatus.failed
-        inst.error = str(e)
+        try:
+            cmd = [runner_python, str(RUNNER_SCRIPT), "--config", str(config_path)]
+            # Shared-port mode: instances stay on localhost, only the proxy is public
+            from .settings_store import load_settings
+            if load_settings().get("shared_port"):
+                runner_host = "127.0.0.1"
+            else:
+                runner_host = os.environ.get("MCP_RUNNER_HOST")
+            if runner_host:
+                cmd += ["--host", runner_host]
+
+            # Content store: create the folder before the tool can try to write into
+            # it, and pass the path explicitly. Popen otherwise inherits the
+            # manager's environment unchanged, so env stays None when the store is
+            # off — an instance that never opted in sees nothing new.
+            env = None
+            if cfg.content.enabled:
+                from .content_store import ensure_instance_dir, instance_url
+                content_dir = ensure_instance_dir(cfg.id)
+                if content_dir is not None:
+                    env = dict(os.environ)
+                    env["MCP_CONTENT_DIR"] = str(content_dir)
+                    env["MCP_CONTENT_URL"] = instance_url(cfg.id)
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=log_file,
+                cwd=str(BASE_DIR),
+                env=env,
+            )
+        except Exception as e:
+            inst.status = MCPStatus.failed
+            inst.error = str(e)
+            set_instance_state(inst)
+            return False, str(e)
+
+        # Expose the PID while still 'starting' so a concurrent stop_instance can
+        # actually kill the process instead of silently missing it. Set inside
+        # the lock: from here on a second start sees "Already starting" above.
+        inst.pid = proc.pid
         set_instance_state(inst)
-        return False, str(e)
-
-    # Expose the PID while still 'starting' so a concurrent stop_instance can
-    # actually kill the process instead of silently missing it.
-    inst.pid = proc.pid
-    set_instance_state(inst)
 
     def _stopped_concurrently() -> bool:
         # _state holds live object references, so a stop_instance() running in

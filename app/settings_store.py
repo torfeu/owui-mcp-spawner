@@ -28,14 +28,32 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+# (path, mtime_ns, size) → parsed dict. Settings are read on every tool call
+# (content quota, retention, base URL) and on every poll; parsing the same
+# unchanged file each time is pure waste. The key includes the path so tests
+# that repoint SETTINGS_FILE are never served another file's cache, and any
+# write — ours or an editor's — changes mtime_ns and invalidates it.
+_cache: tuple[tuple, dict] | None = None
+
+
 def load_settings() -> dict:
     """Return the persisted settings dict (empty dict if file missing or unreadable)."""
+    global _cache
     try:
-        if SETTINGS_FILE.exists():
-            return json.loads(SETTINGS_FILE.read_text())
+        st = SETTINGS_FILE.stat()
+        key = (str(SETTINGS_FILE), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    if _cache is not None and _cache[0] == key:
+        return dict(_cache[1])
+    try:
+        data = json.loads(SETTINGS_FILE.read_text())
     except Exception:
-        pass
-    return {}
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    _cache = (key, data)
+    return dict(data)
 
 
 def save_settings(updates: dict) -> None:

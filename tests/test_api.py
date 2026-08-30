@@ -12,7 +12,7 @@ import app.api_helpers as api_helpers
 import app.auth as auth
 import app.lockout as lockout
 from app.admin_server import app
-from app.schema import IdentityMode
+from app.schema import ContentConfig, IdentityMode
 
 
 EXPECTED_API_ROUTES = {
@@ -57,6 +57,11 @@ EXPECTED_API_ROUTES = {
     ("GET", "/api/usage"),
     ("POST", "/api/server/restart"),
     ("DELETE", "/api/instances/{instance_id}"),
+    ("GET", "/api/content"),
+    ("GET", "/api/content/{instance_id}"),
+    ("DELETE", "/api/content"),
+    ("DELETE", "/api/content/{instance_id}"),
+    ("DELETE", "/api/content/{instance_id}/{filename}"),
 }
 
 
@@ -126,7 +131,7 @@ class ApiContractTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp",
             "pid": 123, "error": "secret detail",
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -150,7 +155,7 @@ class ApiContractTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp",
             "pid": 123, "error": None,
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -374,6 +379,10 @@ class ReadTokenTests(unittest.TestCase):
         # points at files, it never carries their content.
         "/api/identities",
         "/api/policy",
+        # File names and sizes, no file contents — the download route that does
+        # serve content is not under /api and has its own per-file token.
+        "/api/content",
+        "/api/content/{instance_id}",
     }
     # Hand out a credential verbatim — password only, even though they are GETs.
     ADMIN_ONLY = {
@@ -458,7 +467,7 @@ class ReadTokenTests(unittest.TestCase):
             "category": "Tests", "status": type("Status", (), {"value": "running"})(),
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp", "pid": 123, "error": None,
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -576,11 +585,18 @@ class AgentTokenTests(unittest.TestCase):
         return path.replace("{instance_id}", "no-such-instance").replace("{name}", "no-such-venv")
 
     def test_agent_token_opens_every_route_except_the_admin_ones(self):
-        # Restart and update-check are patched: both would act on the real
-        # world, and this sweep is about the door, not the room behind it.
+        # Restart, update-check and the content deletions are patched: they
+        # would act on the real world, and this sweep is about the door, not
+        # the room behind it. DELETE /api/content is the one route here that
+        # takes no instance id, so nothing upstream turns it into a harmless
+        # 404 — unpatched, this sweep empties the running installation's file
+        # storage, and the suite also runs on the server.
         with (
             patch("app.routes.settings._restart_after_delay"),
             patch("app.routes.settings.check_manually", AsyncMock(return_value={"ok": True})),
+            patch("app.routes.content.clear_all", return_value=0),
+            patch("app.routes.content.clear_instance", return_value=0),
+            patch("app.routes.content.delete_file", return_value=True),
         ):
             checked = 0
             for route in app.routes:
@@ -757,7 +773,7 @@ class BundledVersionTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp", "pid": 1, "error": None,
         })()
         fake_config = type("Config", (), {"id": "demo", "locked": False, "venv": "default",
-                                          "identity_mode": IdentityMode.off})()
+                                          "identity_mode": IdentityMode.off, "content": ContentConfig()})()
         try:
             with (
                 patch("app.routes.instances.get_all_states", return_value=[fake_state]),

@@ -17,6 +17,12 @@ def validate_package_spec(spec: str) -> bool:
         return False
     try:
         req = Requirement(spec)
+        # A PEP 508 direct reference ("pkg @ https://host/x.whl") parses as a
+        # normal requirement but points pip at an arbitrary URL — exactly what
+        # the git+/http prefixes above exist to block. The startswith check
+        # never sees it because the spec starts with the package name.
+        if req.url:
+            return False
         return bool(_SAFE_PACKAGE_RE.match(req.name))
     except InvalidRequirement:
         return False

@@ -6,11 +6,12 @@ from .. import shared_proxy
 from ..activity import forget as forget_usage, read_usage
 from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
 from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
+from ..content_store import forget_instance as forget_content
 from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
-from ..schema import IdentityMode, MCPStatus, ServerConfig, InstallConfig
+from ..schema import ContentConfig, IdentityMode, MCPStatus, ServerConfig, InstallConfig
 from ..security import is_secret_field, mask_secrets, SECRET_MASK
 from ..venv_manager import DEFAULT_VENV
 router = APIRouter()
@@ -31,6 +32,7 @@ def _config_fields(cfg) -> dict:
         "venv": cfg.venv if cfg else DEFAULT_VENV,
         "bundled_update": bundled["version"] if bundled and bundled["update_available"] else "",
         "identity_mode": cfg.identity_mode.value if cfg else IdentityMode.off.value,
+        "content_enabled": cfg.content.enabled if cfg else False,
     }
 
 @router.get("/api/instances")
@@ -119,7 +121,7 @@ async def update_config(instance_id: str, body: dict) -> dict:
 
     # Sub-objects come from arbitrary JSON — reject wrong shapes with a 422
     # instead of crashing on .get()/.items() below.
-    for key in ("server", "values", "install", "lifecycle"):
+    for key in ("server", "values", "install", "lifecycle", "content"):
         if key in body and not isinstance(body[key], dict):
             raise HTTPException(422, f"'{key}' must be an object")
 
@@ -169,6 +171,20 @@ async def update_config(instance_id: str, body: dict) -> dict:
         cfg.lifecycle.auto_start = lc.get("auto_start", cfg.lifecycle.auto_start)
         cfg.lifecycle.restart_on_change = lc.get("restart_on_change", cfg.lifecycle.restart_on_change)
 
+    content_changed = False
+    if "content" in body:
+        c = body["content"]
+        enabled = c.get("enabled", cfg.content.enabled)
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "content.enabled must be true or false")
+        prefix = str(c.get("url_prefix", cfg.content.url_prefix)).strip()
+        if prefix and not prefix.startswith("/"):
+            raise HTTPException(422, "content.url_prefix must start with '/'")
+        new_content = ContentConfig(enabled=enabled, url_prefix=prefix)
+        if new_content != cfg.content:
+            cfg.content = new_content
+            content_changed = True
+
     identity_changed = False
     if "identity_mode" in body:
         raw_mode = str(body["identity_mode"]).strip().lower()
@@ -209,7 +225,7 @@ async def update_config(instance_id: str, body: dict) -> dict:
     # Values only take effect at runner startup, so a changed value needs a
     # restart just like a changed address — gated by restart_on_change below.
     needs_restart = (server_changed or venv_changed or deps_changed or values_changed
-                     or identity_changed)
+                     or identity_changed or content_changed)
     restarted = False
     if inst:
         inst.name = cfg.name
@@ -220,7 +236,8 @@ async def update_config(instance_id: str, body: dict) -> dict:
                 # venv / picks up freshly installed dependencies.
                 reason = "venv" if venv_changed else "dependencies" if deps_changed \
                     else "server config" if server_changed \
-                    else "identity mode" if identity_changed else "values"
+                    else "identity mode" if identity_changed \
+                    else "content storage" if content_changed else "values"
                 logger.info(f"{reason} changed for '{instance_id}', restarting")
                 await asyncio.to_thread(restart_instance, instance_id)
                 restarted = True
@@ -344,7 +361,10 @@ async def export_instance(instance_id: str, request: Request) -> JSONResponse:
 async def delete_instance(instance_id: str) -> dict:
     require_not_locked(instance_id)
     inst = get_instance_state(instance_id)
-    if inst and inst.status == MCPStatus.running:
+    # 'starting' counts as alive: deleting inside the startup window would
+    # otherwise skip the stop and orphan the runner that is just coming up —
+    # config and state gone, process holding the port.
+    if inst and inst.status in (MCPStatus.running, MCPStatus.starting):
         ok, err = await asyncio.to_thread(stop_instance, instance_id)
         if not ok:
             # Deleting the config while the process is still alive would orphan
@@ -354,6 +374,10 @@ async def delete_instance(instance_id: str) -> dict:
     if not delete_config(instance_id):
         raise HTTPException(404, "Config not found")
     forget_usage(instance_id)
+    # The files go with the instance. Nothing else can reach them afterwards:
+    # the folder is addressed by instance id, and that id is now free to be
+    # reused by something entirely unrelated.
+    forget_content(instance_id)
     if cfg:
         tool_path = resolve_tool_path(cfg).resolve()
         # Only delete the tool file if no other instance still references it (B8).
