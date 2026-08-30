@@ -1,21 +1,37 @@
-import { API, apiFetch, downloadBlob, esc, showAlert, state } from "./common.js";
+import { API, apiFetch, downloadBlob, esc, formatBytes, showAlert, state } from "./common.js";
+import { instanceStat } from "./system.js";
 
 let instances = [];
 export async function loadInstances() {
   try {
     instances = await apiFetch(API);
     updateCategoryOptions();
-    renderTable(sortInstances(filteredInstances()));
+    updateStatusOptions();
+    render();
   } catch (e) {
     // silently skip poll errors
   }
 }
 
+// The one path to the table: filter, sort, then hand the whole result to
+// renderTable, which cuts the current page out of it. The poll comes through
+// here too, so the page the user is on survives a re-render.
+function render() {
+  renderTable(sortInstances(filteredInstances()));
+}
+
 // ── Search & category filter ──────────────────────────────────────────────────
 
 export function bindFilter() {
-  document.getElementById("filter-search").addEventListener("input", () => renderTable(sortInstances(filteredInstances())));
-  document.getElementById("filter-category").addEventListener("change", () => renderTable(sortInstances(filteredInstances())));
+  // Every filter change can shrink the result under the current page, so all
+  // three go back to page 1 — the only page that is always populated.
+  const bind = (id, event) => document.getElementById(id).addEventListener(event, () => {
+    page = 1;
+    render();
+  });
+  bind("filter-search", "input");
+  bind("filter-category", "change");
+  bind("filter-status", "change");
 }
 
 // ── Column sorting ────────────────────────────────────────────────────────────
@@ -49,7 +65,9 @@ export function bindSorting() {
       } catch {
         // Remembering the column is a convenience, not a requirement.
       }
-      renderTable(sortInstances(filteredInstances()));
+      // A new order makes the current page number meaningless — start over.
+      page = 1;
+      render();
     });
   }
   markSortedHeader();
@@ -114,34 +132,121 @@ function updateCategoryOptions() {
   if (cats.includes(current)) sel.value = current;
 }
 
+let lastStatusKey = "";
+
+// Built from the statuses that are actually present, in lifecycle order rather
+// than alphabetically (same reasoning as the Status column sort), so the
+// dropdown never offers a choice that can only come back empty. Guarded
+// against needless rebuilds like the categories are, for the same reason.
+function updateStatusOptions() {
+  const sel = document.getElementById("filter-status");
+  const rank = s => {
+    const i = STATUS_ORDER.indexOf(s);
+    return i === -1 ? STATUS_ORDER.length : i;
+  };
+  const stats = [...new Set(instances.map(i => i.status).filter(Boolean))].sort((a, b) => rank(a) - rank(b));
+  const key = stats.join("\x00");
+  if (key === lastStatusKey) return;
+  lastStatusKey = key;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All statuses</option>' +
+    stats.map(st => `<option value="${esc(st)}">${esc(st)}</option>`).join("");
+  if (stats.includes(current)) sel.value = current;
+}
+
 function filteredInstances() {
   const q = document.getElementById("filter-search").value.trim().toLowerCase();
   const cat = document.getElementById("filter-category").value;
+  const status = document.getElementById("filter-status").value;
   return instances.filter(inst => {
     if (cat && (inst.category || "").trim() !== cat) return false;
+    if (status && inst.status !== status) return false;
     if (!q) return true;
     return [inst.id, inst.name, inst.description, inst.category]
       .some(f => (f || "").toLowerCase().includes(q));
   });
 }
 
+// ── Pagination ────────────────────────────────────────────────────────────────
+
+// The page size is remembered, the page number is not: a reloaded dashboard
+// should start at the top, but it should keep the row count that was asked for.
+const PAGE_SIZE_STORAGE_KEY = "instances-page-size";
+const PAGE_SIZES = [10, 20, 50, 200];
+let pageSize = 20;
+let page = 1;
+
+export function bindPagination() {
+  try {
+    const stored = parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY) || "", 10);
+    if (PAGE_SIZES.includes(stored)) pageSize = stored;
+  } catch {
+    // Private mode or a garbled value: the default page size is a fine fallback.
+  }
+  const sel = document.getElementById("page-size");
+  sel.value = String(pageSize);
+  sel.addEventListener("change", () => {
+    pageSize = parseInt(sel.value, 10) || 20;
+    page = 1;
+    try {
+      localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(pageSize));
+    } catch {
+      // Remembering the size is a convenience, not a requirement.
+    }
+    render();
+  });
+  // Bound once: these controls live in the static markup, unlike the table body
+  // that is rewritten on every poll.
+  document.getElementById("page-prev").addEventListener("click", () => { page = Math.max(1, page - 1); render(); });
+  document.getElementById("page-next").addEventListener("click", () => { page += 1; render(); });
+}
+
+// Clamps the page against the current result set, updates the bar and returns
+// the slice to draw. A filter that shrinks the list under the current page
+// pulls the user back to the last page that still has rows, instead of leaving
+// them staring at an empty table.
+function paginate(rows) {
+  const bar = document.getElementById("pagination");
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  page = Math.min(Math.max(page, 1), totalPages);
+
+  // Below the smallest page size the bar can never do anything — hide it
+  // rather than show three dead controls. Above it the bar stays put even on a
+  // single page, so the size dropdown remains reachable.
+  if (!rows.length || instances.length <= PAGE_SIZES[0]) {
+    bar.classList.add("hidden");
+    return rows;
+  }
+  bar.classList.remove("hidden");
+
+  const from = (page - 1) * pageSize;
+  const slice = rows.slice(from, from + pageSize);
+  document.getElementById("pagination-info").textContent = `${from + 1}–${from + slice.length} of ${rows.length}`;
+  document.getElementById("pagination-page").textContent = `Page ${page} / ${totalPages}`;
+  document.getElementById("page-prev").disabled = page === 1;
+  document.getElementById("page-next").disabled = page === totalPages;
+  return slice;
+}
+
 function renderTable(rows) {
   const tbody = document.getElementById("instances-body");
+  const pageRows = paginate(rows);
 
-  if (!rows.length) {
+  if (!pageRows.length) {
     // `instances` is the unfiltered module-level list — if it has entries,
     // the filter (not the empty install) produced the empty view.
     const msg = instances.length ? "No instances match the current filter." : "No MCP instances yet. Upload a JSON to get started.";
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">${msg}</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = rows.map(inst => `
+  tbody.innerHTML = pageRows.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
       <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
-      <td>${statusBadge(inst.status, inst.error)}</td>
+      <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}</td>
+      <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
       <td class="admin-col">${inst.port ?? ""}</td>
       <td class="admin-col"><span class="venv-badge">${esc(inst.venv || 'default')}</span></td>
       <td class="url-cell admin-col">${inst.url ? `<a href="${esc(inst.url)}" target="_blank">${esc(inst.url)}</a>` : ""}</td>
@@ -172,6 +277,48 @@ function bundledMark(inst) {
   }
   return ` <button class="update-badge update-badge-sm" data-action="updateexample" data-id="${esc(inst.id)}"
     title="Update to ${esc(inst.bundled_update)} from the copy shipped with this spawner">${label}</button>`;
+}
+
+// The health check's verdict, next to the status the process manager reports.
+// The two answer different questions: "running" means the process exists, the
+// dot means the MCP endpoint actually replied. No dot until the first pass has
+// probed it — a colour invented before a measurement is worse than none.
+function healthDot(inst) {
+  const health = inst.health;
+  if (!health || !health.status || health.status === "unknown") return "";
+  const when = health.checked_at ? `, checked ${timeAgo(health.checked_at)}` : "";
+  if (health.status === "ok") {
+    const count = health.tools;
+    const tools = count === null || count === undefined
+      ? "" : ` with ${count} tool${count === 1 ? "" : "s"}`;
+    // An instance that demands a verified user answers the check with an empty
+    // catalog on purpose. Without this line "0 tools" reads as "broken".
+    const note = health.note ? ` — ${health.note}` : "";
+    return ` <span class="health-dot health-dot-ok" title="${esc(`MCP answered${tools}${when}${note}`)}">●</span>`;
+  }
+  const repeated = health.failures > 1 ? ` (${health.failures} in a row)` : "";
+  const restarts = health.restarts ? ` · restarted ${health.restarts}×` : "";
+  const why = health.error || "no reason given";
+  return ` <span class="health-dot health-dot-bad" title="${esc(`No MCP answer${repeated}: ${why}${restarts}${when}`)}">●</span>`;
+}
+
+function timeAgo(epochSeconds) {
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - epochSeconds));
+  if (seconds < 90) return `${seconds} s ago`;
+  const minutes = Math.round(seconds / 60);
+  return minutes < 90 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
+}
+
+// The instance's own process tree, measured by the system monitor. A dash
+// means "not measured" — a stopped instance, or a manager without psutil — and
+// never gets confused with a real zero.
+function memoryCell(inst) {
+  const stats = instanceStat(inst.id);
+  if (!stats) return "—";
+  const cpu = stats.cpu_percent === null || stats.cpu_percent === undefined
+    ? "" : ` · ${Math.round(stats.cpu_percent)} % CPU`;
+  const procs = stats.processes > 1 ? `${stats.processes} processes` : "1 process";
+  return `<span title="${esc(procs)}${esc(cpu)}">${formatBytes(stats.rss)}</span>`;
 }
 
 function statusBadge(status, error = "") {

@@ -195,6 +195,50 @@ def _validate_in_process(code: str) -> dict:
     }
 
 
+def valve_names(code: str) -> set[str] | None:
+    """The valves a tool declares, read out of `class Tools: class Valves`.
+
+    Parsed, never executed: this answers a question on an API request, and
+    exec()ing a tool's module-level code to find out what it configures would
+    be a fine way to run arbitrary code on a `PUT`.
+
+    Returns None when the classes are not found or the code does not parse —
+    "cannot tell" is not the same as "has none", and the caller must not turn
+    the first into a refusal.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    def _find_class(body, name):
+        for node in body:
+            if isinstance(node, ast.ClassDef) and node.name == name:
+                return node
+        return None
+
+    tools_class = _find_class(tree.body, "Tools")
+    if tools_class is None:
+        return None
+    valves_class = _find_class(tools_class.body, "Valves")
+    if valves_class is None:
+        return None
+
+    names = set()
+    for node in valves_class.body:
+        # `name: str = Field(...)` — the shape every valve in this project uses
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        # `name = "value"` without an annotation still works in pydantic
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names or None
+
+
 def generate_openwebui_json(
     code: str, tool_id: str, name: str, description: str,
     validation: dict | None = None,

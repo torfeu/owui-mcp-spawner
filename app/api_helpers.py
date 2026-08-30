@@ -21,7 +21,7 @@ from .dependency_manager import install_dependencies
 from .logger import get_manager_logger
 from .process_manager import restart_instance
 from .schema import MCPConfig, MCPInstance, MCPStatus, ServerConfig, InstallConfig, ToolSourceConfig
-from .tool_editor import generate_openwebui_json, parse_requirements, validate_tool_code
+from .tool_editor import generate_openwebui_json, parse_requirements, valve_names, validate_tool_code
 from .update_check import is_newer
 from .venv_manager import DEFAULT_VENV, python_path
 
@@ -39,6 +39,7 @@ LOG_TAIL_MAX_BYTES = 256 * 1024
 RESERVED_IDS = {"example"}
 _version_cache: dict[str, tuple[float, str]] = {}
 _specs_cache: dict[str, tuple[float, dict]] = {}
+_valves_cache: dict[str, tuple[float, set | None]] = {}
 _examples_index: tuple[float, dict[str, str]] = (-1.0, {})
 _background_tasks: set = set()
 
@@ -235,6 +236,34 @@ def _category_from_code(code: str) -> str:
     # "category:" would swallow whatever stands on the next line.
     match = re.search(r'^[ \t]*category:[ \t]*(\S[^\n]*)$', code[:800], re.MULTILINE)
     return match.group(1).strip() if match else ""
+
+
+def _valve_names_from_tool_file(cfg) -> set | None:
+    """Which valves this instance's tool declares, or None if it cannot be told.
+
+    Read from the tool code by parsing it, not from `cfg.values`: those two
+    agree only as long as nothing wrong was ever written into the config, and
+    a key written by mistake would otherwise vouch for itself forever.
+
+    mtime-cached like the specs beside it — this is asked on a config write,
+    not on the polled list, but re-parsing a tool on every keystroke-sized
+    save is still wasted work.
+    """
+    try:
+        tool_path = resolve_tool_path(cfg)
+        if not tool_path.exists():
+            return None
+        mtime = tool_path.stat().st_mtime
+        cached = _valves_cache.get(str(tool_path))
+        if cached and cached[0] == mtime:
+            return cached[1]
+        raw = json.loads(tool_path.read_text())
+        entry = raw[0] if isinstance(raw, list) and raw else raw
+        names = valve_names(entry.get("content", "")) if isinstance(entry, dict) else None
+    except Exception:
+        return None
+    _valves_cache[str(tool_path)] = (mtime, names)
+    return names
 
 
 def _specs_from_tool_file(cfg) -> dict:

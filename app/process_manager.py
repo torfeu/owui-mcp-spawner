@@ -40,6 +40,20 @@ def _start_lock_for(instance_id: str) -> threading.Lock:
             _start_locks[instance_id] = lock
         return lock
 
+def start_in_progress(instance_id: str) -> bool:
+    """True while a start or restart holds this instance's spawn lock.
+
+    The health check asks before it judges an instance: a runner that is still
+    coming up has no open port yet, and marking it unhealthy would be a race
+    with the very start that is about to succeed.
+    """
+    lock = _start_lock_for(instance_id)
+    if lock.acquire(blocking=False):
+        lock.release()
+        return False
+    return True
+
+
 # How long start_instance waits for the runner to open its port
 START_TIMEOUT = 15.0
 

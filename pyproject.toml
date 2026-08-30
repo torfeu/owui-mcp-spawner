@@ -17,6 +17,7 @@ dependencies = [
     "packaging>=24.0",
     "starlette>=0.36.0",
     "httpx>=0.27.0",
+    "psutil>=5.9.0",  # system monitor; imported defensively so an old venv still boots
 ]
 
 [tool.setuptools.dynamic]

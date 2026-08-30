@@ -13,6 +13,7 @@ from .content_store import ensure_secret, prune as prune_content
 from .api_helpers import APP_VERSION
 from .config_store import (BASE_DIR, find_free_port, get_instance_state, is_port_free, load_all_configs, resolve_tool_path, save_config, set_instance_state)
 from .dependency_manager import install_dependencies
+from .health import health_loop
 from .logger import get_manager_logger
 from .process_manager import check_running_instances, start_instance, sync_state_from_pids
 from .schema import MCPStatus
@@ -20,7 +21,8 @@ from .settings_store import atomic_write_text
 from .tool_editor import validate_tool_code
 from .update_check import update_check_loop
 from .venv_manager import python_path
-from .routes import auth, content, instances, logs, permissions, settings, tools, usage, venvs
+from .routes import (agent_identities, auth, content, instances, logs, permissions,
+                     settings, system, tools, usage, venvs)
 
 logger = get_manager_logger()
 WATCHDOG_INTERVAL = 10
@@ -260,16 +262,21 @@ async def _lifespan(app: FastAPI):
     # subprocess each and must not hold up the boot or the auto-start above.
     specs = asyncio.create_task(_migrate_tool_specs())
     pruner = asyncio.create_task(_prune_usage_loop())
+    # Its own clock: the watchdog runs every ten seconds and only reads a pid,
+    # while a health pass opens an MCP session per instance.
+    health = asyncio.create_task(health_loop())
     yield
     watchdog.cancel()
     updates.cancel()
     specs.cancel()
     pruner.cancel()
+    health.cancel()
     await shared_proxy.stop_proxy()
 
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
 for router in (auth.router, instances.router, tools.router, logs.router, venvs.router,
-               settings.router, usage.router, permissions.router, content.router):
+               settings.router, usage.router, permissions.router, content.router,
+               system.router, agent_identities.router):
     app.include_router(router)
 
 @app.middleware("http")

@@ -2,9 +2,9 @@ import asyncio
 import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from .. import shared_proxy
+from .. import health, shared_proxy
 from ..activity import forget as forget_usage, read_usage
-from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
+from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _valve_names_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
 from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
 from ..content_store import forget_instance as forget_content
 from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
@@ -55,6 +55,9 @@ async def list_instances(request: Request, include: str = "") -> list[dict]:
             cfg = configs.get(s.id)
             d = _instance_to_dict(s, display_host, shared)
             d.update(_config_fields(cfg))
+            # None until the first pass has probed it — the UI shows nothing
+            # rather than guessing at a colour.
+            d["health"] = health.for_instance(s.id)
             if want_specs:
                 d["specs"] = _specs_from_tool_file(cfg)["specs"] if cfg else []
             result.append(_guest_view(d) if guest else d)
@@ -70,6 +73,7 @@ async def get_instance(instance_id: str, request: Request) -> dict:
     cfg = load_config(instance_id)
     d = _instance_to_dict(inst, _request_host(request), shared_proxy.configured_port())
     d.update(_config_fields(cfg))
+    d["health"] = health.for_instance(instance_id)
     if not await is_request_authenticated(request):
         return _guest_view(d)
     return d
@@ -148,6 +152,29 @@ async def update_config(instance_id: str, body: dict) -> dict:
         cfg.server = new_server
     values_changed = False
     if "values" in body:
+        # A name that is not a valve of this tool cannot take effect: the loader
+        # skips anything the Valves class does not declare (tool_loader, the
+        # hasattr check), so accepting it would persist a setting that does
+        # nothing and answer "ok". That is how `{"lifecycle": {...}}` — which
+        # belongs at the top level of this body, not inside `values` — was
+        # stored as a valve and reported as saved.
+        #
+        # Asked of the tool code, not of `cfg.values`: the two agree only while
+        # nothing wrong has ever been written into the config, and the very key
+        # this guard exists to catch was already sitting in `values` — vouching
+        # for itself. None means the valves could not be determined (tool file
+        # missing, no Valves class, unparsable code); that is "cannot tell",
+        # not "has none", so nothing is refused.
+        declared = _valve_names_from_tool_file(cfg)
+        if declared is not None:
+            unknown = [k for k in body["values"] if k not in declared]
+            if unknown:
+                raise HTTPException(422, (
+                    f"'{instance_id}' has no valve named {', '.join(repr(k) for k in unknown)}. "
+                    f"Its valves are: {', '.join(sorted(declared))}. "
+                    "auto_start and restart_on_change are not valves — they belong in "
+                    "the 'lifecycle' field of this request, beside 'values'."
+                ))
         # GET /config masks secrets; a client echoing the config back must not
         # overwrite the real values with the mask.
         old_values = dict(cfg.values)

@@ -21,6 +21,7 @@ from mcp import types
 from mcp.server.lowlevel.server import ServerRequestContext
 
 import app.policy as policy
+from app import agent_identity
 from app.identity import get_current_identity
 from app.mcp_runner import _resolve_identity, build_server
 from app.schema import IdentityMode, MachineIdentity, MCPConfig, ServerConfig, ToolSourceConfig
@@ -96,6 +97,28 @@ def redirect_registry(case):
     case.addCleanup(registry.close)
 
 
+def isolate_agent_store(case):
+    """Point the agent-identity store at an empty temp file for one test.
+
+    Without this a test reads whatever `runtime/agent_identities.json` holds on
+    the machine it runs on — and a configured agent identity changes the answer
+    of `_resolve_identity` for *every* mode, not just the agent cases. That is
+    the "green here, red on the server" trap in its purest form: locally the
+    file does not exist, on the server it will.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    patcher = patch.dict(
+        os.environ,
+        {"MCP_AGENT_IDENTITIES_FILE": str(pathlib.Path(tmp.name) / "agent_identities.json")},
+    )
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    os.environ.pop(agent_identity.ENV_IDENTITIES, None)
+    agent_identity._file_cache.clear()
+    case.addCleanup(agent_identity._file_cache.clear)
+
+
 class HandlerTestCase(unittest.IsolatedAsyncioTestCase):
     """Runs the real handlers with a request context we control."""
 
@@ -109,6 +132,7 @@ class HandlerTestCase(unittest.IsolatedAsyncioTestCase):
         self.record.start()
         self.addCleanup(self.record.stop)
         redirect_registry(self)
+        isolate_agent_store(self)
 
     async def call(self, server, name, headers=None):
         handler = server.get_request_handler("tools/call").handler
@@ -396,6 +420,126 @@ class MachineIdentityTests(HandlerTestCase):
             self.assertEqual(await self.call(self.server, "read_item", {}), "read by codex-agent")
 
 
+class AgentIdentityTests(HandlerTestCase):
+    """A named agent token — one caller, one credential.
+
+    The step beyond MachineIdentityTests above: the machine identity is one
+    identity for whoever holds the instance's Bearer token, this is one per
+    agent. The order it has to keep is the point of every test here —
+
+        signed user JWT  >  agent identity  >  machine identity
+
+    — and above all that a *broken* user token never falls through to it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+
+        policy_file = root / "policy.json"
+        policy_file.write_text(json.dumps({"users": {
+            "claude-code": {"instances": {"inst": ["read_item"]}},
+            "codex-machine": {"instances": {"inst": "*"}},
+            "sub-anna": {"instances": {"inst": "*"}},
+        }}))
+        self.store = root / "agent_identities.json"
+        self.env2 = patch.dict(os.environ, {
+            "MCP_IDENTITY_POLICY": str(policy_file),
+            "MCP_AGENT_IDENTITIES_FILE": str(self.store),
+        })
+        self.env2.start()
+        self.addCleanup(self.env2.stop)
+        os.environ.pop(agent_identity.ENV_IDENTITIES, None)
+        agent_identity._file_cache.clear()
+        self.addCleanup(agent_identity._file_cache.clear)
+        policy._cache = policy._cache_key = None
+        self.addCleanup(lambda: setattr(policy, "_cache", None))
+
+        _, self.token = agent_identity.create("claude-code", "Claude Code", "agent")
+
+    def _server(self, machine=None, mode=IdentityMode.required):
+        config = make_config(mode=mode)
+        config.machine_identity = machine
+        return build_server(config, TOOL_DEFS, DemoTools())
+
+    def _auth(self, token=None):
+        return {"authorization": f"Bearer {token or self.token}"}
+
+    async def test_the_token_names_the_caller(self):
+        self.assertEqual(
+            await self.call(self._server(), "read_item", self._auth()), "read by claude-code")
+
+    async def test_the_agent_is_bound_by_the_rules_like_anyone_else(self):
+        """The whole reason for naming them: an agent can be given three tools
+        instead of all of them, and the listing says so too."""
+        server = self._server()
+        self.assertEqual(await self.list_tools(server, self._auth()), ["read_item"])
+        self.assertIn("Access denied", await self.call(server, "delete_item", self._auth()))
+
+    async def test_two_agents_are_two_callers(self):
+        """Behind the shared Bearer token these were the same caller."""
+        _, other = agent_identity.create("codex-machine")
+        server = self._server()
+        self.assertEqual(await self.call(server, "read_item", self._auth()), "read by claude-code")
+        self.assertEqual(
+            await self.call(server, "delete_item", self._auth(other)), "deleted by codex-machine")
+
+    async def test_a_revoked_token_stops_working_at_once(self):
+        server = self._server()
+        agent_identity.delete("claude-code")
+        self.assertIn("Access denied", await self.call(server, "read_item", self._auth()))
+
+    async def test_a_signed_user_token_wins_over_the_agent_token(self):
+        headers = {**self._auth(), "x-openwebui-user-jwt": mint(sub="sub-anna")}
+        self.assertEqual(
+            await self.call(self._server(), "read_item", headers), "read by sub-anna")
+
+    async def test_a_broken_user_token_is_refused_and_not_downgraded(self):
+        """The line the whole ordering rests on: a forged JWT must not be
+        quietly demoted into the working agent identity sitting next to it."""
+        for label, token in (
+            ("wrong secret", mint(secret="some-other-secret")),
+            ("expired", mint(exp=1)),
+        ):
+            with self.subTest(token=label):
+                headers = {**self._auth(), "x-openwebui-user-jwt": token}
+                answer = await self.call(self._server(), "read_item", headers)
+                self.assertIn("Access denied", answer)
+                self.assertNotIn("read by", answer)
+
+    async def test_the_agent_token_wins_over_the_machine_identity(self):
+        machine = MachineIdentity(sub="codex-machine", name="Codex CLI", role="agent")
+        server = self._server(machine=machine)
+        # Named token → the name. No token → the instance-wide stand-in.
+        self.assertEqual(await self.call(server, "read_item", self._auth()), "read by claude-code")
+        self.assertEqual(await self.call(server, "read_item", {}), "read by codex-machine")
+
+    async def test_an_unknown_bearer_token_falls_back_to_the_machine_identity(self):
+        """A token that belongs to nobody is not a claim to be somebody — the
+        shared MCP Bearer token looks exactly like this, and every existing
+        agent CLI sends it."""
+        machine = MachineIdentity(sub="codex-machine", name="Codex CLI", role="agent")
+        answer = await self.call(
+            self._server(machine=machine), "read_item", self._auth("mcp-shared-token"))
+        self.assertEqual(answer, "read by codex-machine")
+
+    async def test_it_works_without_any_user_jwt_secret(self):
+        """An installation with agents but no OpenWebUI must still be able to
+        run `required` — before this, `required` there was a dead end."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MCP_USER_JWT_SECRET", None)
+            server = self._server()
+            self.assertEqual(
+                await self.call(server, "read_item", self._auth()), "read by claude-code")
+            self.assertIn("Access denied", await self.call(server, "read_item", {}))
+
+    async def test_identity_mode_off_ignores_the_token_like_everything_else(self):
+        server = self._server(mode=IdentityMode.off)
+        self.assertEqual(await self.call(server, "read_item", self._auth()), "read by nobody")
+
+
 class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
     """One real runner over real streamable HTTP.
 
@@ -410,6 +554,7 @@ class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
         import socket
 
         redirect_registry(self)
+        isolate_agent_store(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = pathlib.Path(self.tmp.name)
@@ -497,12 +642,148 @@ class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Access denied", answer)
 
 
+class AgentTokenTransportTests(unittest.IsolatedAsyncioTestCase):
+    """The door, over a real socket: does an agent's own token get in?
+
+    The handler tests above start *after* the ASGI Bearer check, which only
+    ever knew the one shared token. If that gate did not learn about agent
+    tokens, every agent would still have to carry the shared one as well, and
+    the whole feature would be decorative. Only a real request proves it.
+    """
+
+    SHARED = "the-shared-mcp-token"
+
+    async def asyncSetUp(self):
+        import socket
+
+        redirect_registry(self)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+
+        policy_file = root / "policy.json"
+        policy_file.write_text(json.dumps(
+            {"users": {"claude-code": {"instances": {"live_agent": ["whoami"]}}}}))
+        store = root / "agent_identities.json"
+        self.env = patch.dict(os.environ, {
+            "MCP_IDENTITY_POLICY": str(policy_file),
+            "MCP_AGENT_IDENTITIES_FILE": str(store),
+            "MCP_BEARER_TOKEN": self.SHARED,
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        os.environ.pop("MCP_USER_JWT_SECRET", None)
+        agent_identity._file_cache.clear()
+        self.addCleanup(agent_identity._file_cache.clear)
+        policy._cache = policy._cache_key = None
+        self.addCleanup(lambda: setattr(policy, "_cache", None))
+        _, self.token = agent_identity.create("claude-code", "Claude Code", "agent")
+
+        tool_file = root / "live_agent.json"
+        tool_file.write_text(json.dumps({
+            "id": "live_agent", "name": "live agent",
+            "content": (
+                "class Tools:\n"
+                "    def whoami(self) -> str:\n"
+                '        """Report the caller."""\n'
+                "        from app.identity import get_current_identity\n"
+                "        who = get_current_identity()\n"
+                "        return f'sub={who.sub}' if who else 'anonymous'\n"
+            ),
+            "specs": [{"name": "whoami", "description": "Report the caller.",
+                       "parameters": {"type": "object", "properties": {}}}],
+        }))
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
+
+        config_file = root / "live_agent_config.json"
+        config_file.write_text(json.dumps({
+            "id": "live_agent", "name": "live agent",
+            "server": {"host": "127.0.0.1", "port": self.port, "endpoint": "/mcp"},
+            "tool_source": {"type": "openwebui_json", "path": str(tool_file)},
+            "identity_mode": "required",
+        }))
+
+        from app.mcp_runner import run_server
+        self.server_task = asyncio.create_task(run_server(str(config_file)))
+        self.addCleanup(self.server_task.cancel)
+
+        for _ in range(100):
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+                writer.close()
+                await writer.wait_closed()
+                return
+            except OSError:
+                await asyncio.sleep(0.05)
+        self.fail("runner did not come up")
+
+    async def _whoami(self, token):
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        url = f"http://127.0.0.1:{self.port}/mcp"
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx2.AsyncClient(headers=headers, timeout=10) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listed = [tool.name for tool in (await session.list_tools()).tools]
+                    answer = (await session.call_tool("whoami", {})).content[0].text
+        return listed, answer
+
+    async def test_an_agent_token_opens_the_door_and_names_the_caller(self):
+        listed, answer = await self._whoami(self.token)
+        self.assertEqual(listed, ["whoami"])
+        self.assertEqual(answer, "sub=claude-code")
+
+    async def test_the_shared_token_still_gets_in_but_is_nobody(self):
+        """Nothing existing breaks: the shared token opens the port exactly as
+        before. It just does not answer "who", which is the point."""
+        listed, answer = await self._whoami(self.SHARED)
+        self.assertEqual(listed, [])
+        self.assertIn("Access denied", answer)
+
+    async def _status(self, token):
+        """The bare HTTP answer of the gate, without the SDK in the way.
+
+        The client wraps a rejected request into an MCPError that no longer
+        carries the status code, and "some exception happened" would also pass
+        for a runner that never started. This asks the socket directly.
+        """
+        import httpx2
+
+        async with httpx2.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{self.port}/mcp",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+        return response.status_code
+
+    async def test_a_token_belonging_to_nobody_is_still_a_401(self):
+        self.assertEqual(401, await self._status("mcpa_not-a-real-token"))
+
+    async def test_a_revoked_token_is_refused_at_the_door_without_a_restart(self):
+        """The file is re-read per call, so revoking is immediate — that is the
+        difference between the file and the environment variable."""
+        self.assertNotEqual(401, await self._status(self.token))
+        agent_identity.delete("claude-code")
+        self.assertEqual(401, await self._status(self.token))
+
+
 class ResolveIdentityTests(unittest.TestCase):
     """The header-reading helper on its own, including the stdio case where
     there is no HTTP request at all (`ctx.request is None`)."""
 
     def setUp(self):
         redirect_registry(self)
+        isolate_agent_store(self)
 
     def test_off_never_looks_at_the_header(self):
         ctx = make_context({"x-openwebui-user-jwt": "nonsense"})

@@ -30,10 +30,15 @@
   <main>
     <div id="alert-area"></div>
 
+    <div class="system-bar admin-col hidden" id="system-bar"></div>
+
     <div class="filter-bar">
       <input type="search" id="filter-search" placeholder="Search name, ID or description…" />
       <select id="filter-category">
         <option value="">All categories</option>
+      </select>
+      <select id="filter-status">
+        <option value="">All statuses</option>
       </select>
     </div>
 
@@ -45,6 +50,7 @@
             <th class="sortable" data-sort="name" title="Sort by name">Name</th>
             <th class="sortable" data-sort="category" title="Sort by category">Category</th>
             <th class="sortable" data-sort="status" title="Sort by status — ascending puts healthy first, descending puts failures first">Status</th>
+            <th class="admin-col" title="Memory used by the instance and its child processes">RAM</th>
             <th class="sortable admin-col" data-sort="port" title="Sort by port">Port</th>
             <th class="sortable admin-col" data-sort="venv" title="Sort by venv">Venv</th>
             <th class="sortable admin-col" data-sort="url" title="Sort by URL">URL</th>
@@ -53,10 +59,25 @@
         </thead>
         <tbody id="instances-body">
           <tr class="empty-row">
-            <td colspan="8">No MCP instances yet. Upload a JSON to get started.</td>
+            <td colspan="9">No MCP instances yet. Upload a JSON to get started.</td>
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div class="pagination-bar hidden" id="pagination">
+      <span class="pagination-info" id="pagination-info"></span>
+      <div class="pagination-controls">
+        <button class="btn btn-secondary btn-sm" id="page-prev" title="Previous page">‹ Prev</button>
+        <span class="pagination-page" id="pagination-page"></span>
+        <button class="btn btn-secondary btn-sm" id="page-next" title="Next page">Next ›</button>
+        <select id="page-size" title="Rows per page">
+          <option value="10">10 / page</option>
+          <option value="20">20 / page</option>
+          <option value="50">50 / page</option>
+          <option value="200">200 / page</option>
+        </select>
+      </div>
     </div>
   </main>
 
@@ -482,6 +503,26 @@
           Token editing is disabled on this server (<code>--no-token-edit</code>).
         </div>
       </div>
+      <div class="settings-section settings-section-last">
+        <h3 class="settings-section-title">Agent Identities</h3>
+        <div class="settings-status" id="settings-agents-status"></div>
+        <p class="modal-hint">A token per calling agent — Claude Code, Codex, a cron job. Behind the shared MCP Bearer token they are all the same caller; with one of these each has a name, so the access rules, the usage figures and the log can tell them apart. Assigned, not proven: whoever holds the token <em>is</em> that agent. Give rights to it in <strong>Users &amp; permissions</strong>, where it appears under its id.</p>
+        <div id="settings-agent-list" class="venv-list"></div>
+        <div class="agent-create-row">
+          <input type="text" id="settings-agent-new-id" placeholder="agent-id (letters, digits, . - _)" />
+          <input type="text" id="settings-agent-new-name" placeholder="Display name (optional)" />
+          <input type="text" id="settings-agent-new-role" placeholder="Role (optional)" />
+          <button type="button" class="btn btn-secondary btn-sm" id="settings-agent-create">Issue Token</button>
+        </div>
+        <div id="settings-agent-token-box" class="agent-token-box hidden">
+          <div class="agent-token-warning">Copy this token now — only its hash is stored, so it cannot be shown again.</div>
+          <div class="token-input-wrap">
+            <input type="text" id="settings-agent-token-value" readonly />
+            <button type="button" class="btn btn-ghost btn-token-toggle" id="settings-agent-token-copy" title="Copy to clipboard">⧉</button>
+          </div>
+        </div>
+        <div id="settings-agent-env" class="settings-locked hidden"></div>
+      </div>
       </div>
 
       <div class="settings-panel hidden" data-settings-panel="system">
@@ -506,6 +547,24 @@
         <div class="venv-create-row">
           <input type="text" id="settings-venv-new" placeholder="new-venv-name" />
           <button type="button" class="btn btn-secondary btn-sm" id="settings-venv-create">Create Venv</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-section-title">Health Check</h3>
+        <p class="modal-hint">Every minute the manager asks each running instance for its tool list — the same request OpenWebUI makes. A wedged runner keeps its process and its open port, so only an answer proves it is alive. Auto-restart is off by default; when it is on it gives up after three restarts and leaves the instance alone.</p>
+        <div class="form-grid">
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-health-enabled" />
+            Check running instances
+          </label>
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-health-autorestart" />
+            Restart an instance that stops answering
+          </label>
+          <label>Failures before restart</label>
+          <input type="number" id="settings-health-failures" min="1" max="20" />
         </div>
       </div>
       <div class="settings-section settings-section-last">

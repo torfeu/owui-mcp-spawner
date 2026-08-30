@@ -12,7 +12,7 @@ account without ever displaying a password.
 """
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import identity_registry
+from .. import agent_identity, identity_registry
 from ..auth import require_admin_auth, require_auth
 from ..api_helpers import require_upload_or_edit
 from ..identity import PLAIN_HEADERS, header_name, identity_configured, trust_plain_headers
@@ -25,11 +25,13 @@ logger = get_manager_logger()
 
 @router.get("/api/identities", dependencies=[Depends(require_auth)])
 async def list_identities() -> dict:
-    """Everyone the runners have seen, plus everyone a rule already names.
+    """Everyone the runners have seen, plus everyone a rule or a token names.
 
-    Both halves matter: a person who has called but has no rule is the one you
-    want to grant something to, and a rule for someone who has never called is
-    the one you want to notice — a typo in a user id looks exactly like that.
+    Three halves, really. A person who has called but has no rule is the one
+    you want to grant something to; a rule for someone who has never called is
+    the one you want to notice — a typo in a user id looks exactly like that;
+    and an agent identity exists the moment its token is issued, so it has to
+    be assignable before its first call rather than after it.
     """
     try:
         policy = load_policy()
@@ -38,22 +40,38 @@ async def list_identities() -> dict:
         policy, policy_error = {}, str(e)
     users = policy.get("users") if isinstance(policy.get("users"), dict) else {}
 
+    agents = {record["sub"]: record for record in agent_identity.public_list()}
+
     seen = identity_registry.known()
-    entries = [{**row, "has_rules": row["sub"] in users} for row in seen]
-    known_subs = {row["sub"] for row in seen}
+    entries = [{**row, "has_rules": row["sub"] in users, "agent": row["sub"] in agents}
+               for row in seen]
+    listed = {row["sub"] for row in seen}
     # Rules whose user has never appeared: shown last, marked, never hidden.
     for sub, entry in users.items():
-        if sub in known_subs:
+        if sub in listed:
             continue
+        listed.add(sub)
         entries.append({
             "sub": sub, "email": str(entry.get("email", "")), "name": "", "role": "",
             "source": "", "first_seen": 0, "last_seen": 0, "last_instance": "",
-            "has_rules": True, "never_seen": True,
+            "has_rules": True, "never_seen": True, "agent": sub in agents,
+        })
+    # Agents that have been issued a token but have not called yet — the
+    # normal state right after creating one, and exactly when you want to give
+    # it its rules.
+    for sub, record in agents.items():
+        if sub in listed:
+            continue
+        entries.append({
+            "sub": sub, "email": "", "name": record["name"], "role": record["role"],
+            "source": "", "first_seen": record["created_at"], "last_seen": 0,
+            "last_instance": "", "has_rules": sub in users, "never_seen": True,
+            "agent": True,
         })
 
     return {
         "identities": entries,
-        "identity_configured": identity_configured(),
+        "identity_configured": identity_configured() or agent_identity.configured(),
         "trust_headers": trust_plain_headers(),
         "header": header_name(),
         "plain_header": PLAIN_HEADERS["sub"],

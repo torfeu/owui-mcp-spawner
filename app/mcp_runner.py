@@ -16,7 +16,7 @@ from typing import Optional
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from app import content_store
+from app import agent_identity, content_store
 from app.activity import flush as flush_usage, record_call
 from app.identity import (PLAIN_HEADERS, Identity, IdentityError, configured_secret,
                           header_name, identity_configured, identity_from_headers,
@@ -96,29 +96,43 @@ def _resolve_identity(ctx, mode: IdentityMode, instance_id: str = "",
     was needed". A reason without an identity is a refusal the caller should
     hear about — with the *reason*, never the token.
 
-    *machine* stands in when no user token arrives: a configured identity for
-    callers without a login. A real token always wins over it, and a *broken*
-    token is still a refusal — falling back to the machine identity there would
-    turn a forged token into a working one.
+    Three sources, in this order — the order is the whole point:
+
+        signed user JWT  >  agent identity  >  machine identity
+
+    *machine* stands in when nothing else arrives: one configured identity for
+    every caller without a login. An **agent identity** sits in between — a
+    named token belonging to one agent (app/agent_identity.py), so Claude Code
+    and a cron job are no longer the same caller behind the shared Bearer
+    token. A real user token always wins over both, and a *broken* one is still
+    a refusal: falling through to a token further down the list would turn a
+    forged JWT into a working identity.
     """
     if mode == IdentityMode.off:
         return None, ""
-    if not identity_configured() and machine is None:
+    headers = _request_headers(ctx)
+    if not identity_configured() and machine is None and not agent_identity.configured():
         # required with no way to establish an identity is a misconfiguration,
         # not an open door.
         if mode == IdentityMode.required:
             return None, ("this instance requires an identified user, but the server "
-                          "has neither a user-JWT secret nor trusted user headers "
-                          "configured")
+                          "has neither a user-JWT secret, trusted user headers nor "
+                          "an agent identity configured")
         return None, ""
-    headers = _request_headers(ctx)
     try:
         identity = identity_from_headers(headers)
     except IdentityError as e:
-        if machine is not None and not _claims_an_identity(headers):
-            # Nobody claimed to be anybody — this is the agent-CLI case.
-            record_identity(machine, instance_id)
-            return machine, ""
+        if not _claims_an_identity(headers):
+            # Nobody claimed to be a *user* — this is the agent-CLI case. The
+            # named token goes first: it says who, where the machine identity
+            # only says "somebody holding the instance's Bearer token".
+            agent = agent_identity.identify_request(headers)
+            if agent is not None:
+                record_identity(agent, instance_id)
+                return agent, ""
+            if machine is not None:
+                record_identity(machine, instance_id)
+                return machine, ""
         if mode == IdentityMode.required:
             return None, str(e)
         # optional: an absent or broken token is not fatal, but silence here
@@ -341,6 +355,13 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
     mcp_auth_token = os.environ.get("MCP_BEARER_TOKEN") or None
     if mcp_auth_token:
         logger.info("MCP Bearer token authentication enabled")
+    agents = agent_identity.load()
+    if agents:
+        logger.info(
+            f"{len(agents)} agent identit{'y' if len(agents) == 1 else 'ies'} "
+            f"(source: {agent_identity.source()}): "
+            f"{', '.join(sorted(a['sub'] for a in agents))}"
+        )
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -363,7 +384,13 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
             auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
             # RFC 7235: the auth scheme is case-insensitive
             provided = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-            if not hmac.compare_digest(provided, mcp_auth_token):
+            # An agent's own token opens the same door as the shared one — it
+            # is a credential this installation issued, and refusing it here
+            # would mean every agent still has to carry the shared token too.
+            # Which of the two arrived is decided again per call, in
+            # _resolve_identity: this gate only answers "may you talk to me".
+            if (not hmac.compare_digest(provided, mcp_auth_token)
+                    and agent_identity.identify(provided) is None):
                 from starlette.responses import Response
                 await Response(
                     "Unauthorized", status_code=401,

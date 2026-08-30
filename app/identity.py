@@ -70,6 +70,9 @@ PLAIN_HEADERS = {
 SOURCE_TOKEN = "signed token"
 SOURCE_HEADERS = "unsigned headers"
 SOURCE_MACHINE = "machine identity (configured)"
+# A named agent that presented its own token — see app/agent_identity.py.
+# Assigned like the machine identity, but per caller rather than per instance.
+SOURCE_AGENT = "agent identity (token)"
 
 # Clocks between the OpenWebUI host and this one are rarely identical, and the
 # forwarded token lives ~5 minutes. Without a little slack the first symptom of

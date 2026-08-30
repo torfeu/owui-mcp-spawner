@@ -114,6 +114,31 @@ class ProbeOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("signature", output)
         self.assertNotIn("UNSIGNED", output)
 
+    async def test_every_source_is_named_for_what_it_is(self):
+        """Found live on 30.08.: an agent token came back labelled "taken from
+        OpenWebUI's plain headers — UNSIGNED", which sends the reader to check
+        ENABLE_FORWARD_USER_INFO_HEADERS for a setup OpenWebUI is not part of.
+        The machine identity had the same problem since v0.2.0. Four sources
+        reach this branch, and only one of them was ever proved."""
+        from app.identity import SOURCE_AGENT, SOURCE_HEADERS, SOURCE_MACHINE, SOURCE_TOKEN
+
+        expected = {
+            SOURCE_TOKEN: "signature",
+            SOURCE_HEADERS: "UNSIGNED",
+            SOURCE_AGENT: "agent token",
+            SOURCE_MACHINE: "machine identity",
+        }
+        for source, wanted in expected.items():
+            with self.subTest(source=source):
+                with identity_scope(Identity(sub="sub-anna", source=source)):
+                    output = await self.probe.whoami()
+                self.assertIn(wanted, output)
+                # The two assigned sources must not borrow the header wording —
+                # that is the whole point of telling them apart.
+                if source in (SOURCE_AGENT, SOURCE_MACHINE):
+                    self.assertIn("assigned, not proven", output)
+                    self.assertNotIn("OpenWebUI's plain headers", output)
+
     async def test_an_unknown_user_is_told_so_plainly(self):
         with identity_scope(Identity(sub="nobody-here")):
             output = await self.probe.whoami()

@@ -1,7 +1,8 @@
 import { applyEditMode, clearToken, getToken, hideLoginModal, setToken, showLoginModal, state } from "./common.js";
 import { bindEdit, openEdit } from "./config.js";
 import { openEditorForInstance } from "./editor.js";
-import { bindFilter, bindSorting, configureInstanceActions, loadInstances } from "./instances.js";
+import { bindFilter, bindPagination, bindSorting, configureInstanceActions, loadInstances } from "./instances.js";
+import { loadSystemStats } from "./system.js";
 import { bindInfo, openInfo } from "./info.js";
 import { bindLogs, openLogs } from "./logs.js";
 import { bindPermissions } from "./permissions.js";
@@ -91,6 +92,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindPermissions();
   bindFilter();
   bindSorting();
+  bindPagination();
 
   const statusResponse = await fetch("/api/auth-status");
   const status = await statusResponse.json();
@@ -103,12 +105,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   state.guestMode = state.authEnabled && !getToken();
   applyEditMode();
-  loadInstances();
+  poll();
   refreshUpdateBadge();
   startPolling();
 });
 
+// The system stats are fetched first so the table's RAM column and the tiles
+// come out of the same round — a column lagging one poll behind the row it
+// sits in is the kind of small lie a monitor should not tell.
+async function poll() {
+  await loadSystemStats();
+  await loadInstances();
+}
+
 function startPolling() {
   clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(loadInstances, 4000);
+  state.pollTimer = setInterval(poll, 4000);
 }

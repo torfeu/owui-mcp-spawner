@@ -1242,6 +1242,39 @@ button.update-badge { font-family: inherit; cursor: pointer; }
   margin-top: 6px;
 }
 
+/* Issuing an agent identity: three fields and a button. Wraps rather than
+   squeezing — at 375 px three inputs side by side leave no room to read what
+   you typed. */
+.agent-create-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.agent-create-row input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+/* The token, shown exactly once. Deliberately loud: this is the only moment it
+   exists anywhere outside the holder's hands. */
+.agent-token-box {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: rgba(245,158,11,.10);
+  border: 1px solid rgba(245,158,11,.35);
+}
+.agent-token-warning {
+  font-size: 13px;
+  color: var(--warning);
+  margin-bottom: 8px;
+}
+.agent-token-box input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
 .settings-locked {
   font-size: 13px;
   color: var(--text-muted);
@@ -1249,6 +1282,9 @@ button.update-badge { font-family: inherit; cursor: pointer; }
   background: var(--surface2);
   border-radius: var(--radius);
   border: 1px solid var(--border);
+  /* An absolute store path is one unbreakable "word" — at 375 px it pushes the
+     whole dialog sideways unless it is allowed to break mid-token. */
+  overflow-wrap: anywhere;
 }
 
 /* ── Guest mode & filter bar ── */
@@ -1280,6 +1316,128 @@ body.guest .admin-col { display: none; }
   border-radius: var(--radius);
   color: var(--text);
   font-size: 13px;
+}
+
+/* ── System monitor ── */
+
+/* Auto-fit rather than four fixed columns: the number of tiles depends on how
+   many drives the machine has, and a second row is better than four squeezed
+   columns. */
+.system-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.sys-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.sys-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+}
+
+.sys-value {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.sys-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sys-meter {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.sys-meter-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+}
+
+.sys-meter-warn { background: var(--warning); }
+.sys-meter-critical { background: var(--danger); }
+
+/* The health check's dot, right of the status badge. Small on purpose: the
+   badge answers "is it running", the dot answers "does it answer" — a second
+   full badge would read as a competing status. */
+/* The dot belongs beside the badge, not under it — wrapped onto its own line
+   it reads as a stray mark rather than as a second opinion on the same row. */
+.status-cell { white-space: nowrap; }
+
+.health-dot {
+  font-size: 9px;
+  margin-left: 2px;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.health-dot-ok { color: var(--success); }
+.health-dot-bad { color: var(--danger); }
+
+/* "38 MB" broken over two lines makes the row taller than the number is worth. */
+.mem-cell { white-space: nowrap; }
+
+/* The one line the bar shows when there is nothing to measure with. It stands
+   in the tile grid, so it has to be told to take the whole row rather than sit
+   in the first of four columns. */
+.system-note {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Pagination ── */
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.pagination-info,
+.pagination-page {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-bar select {
+  padding: 5px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
 }
 
 .category-badge {
@@ -1379,6 +1537,8 @@ button.app-version:focus-visible {
 .perm-sub { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, monospace; }
 .perm-dot { color: var(--success); font-size: 10px; }
 .perm-warn { color: var(--warning); font-weight: 700; }
+/* An agent identity in the people list — a token, not a person. */
+.perm-agent { color: var(--text-muted); font-size: 12px; }
 
 #perm-detail { min-height: 0; overflow-y: auto; padding-right: 4px; }
 .perm-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
@@ -1484,6 +1644,10 @@ button.app-version:focus-visible {
 
   main {
     padding: 10px 8px;
+  }
+
+  .system-bar {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   }
 
   .filter-bar {

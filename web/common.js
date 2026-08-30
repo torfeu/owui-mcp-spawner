@@ -109,6 +109,16 @@ export async function downloadBlob(url, filename, opts = {}) {
   URL.revokeObjectURL(objectUrl);
 }
 
+// Shared by the storage settings and the system monitor. TB is in the list
+// because a disk tile is the one place a four-digit GB figure shows up.
+export function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value < 10 && unit ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
 export async function fetchVenvs() {
   try {
     return await apiFetch("/api/venvs");

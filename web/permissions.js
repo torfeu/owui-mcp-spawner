@@ -97,10 +97,19 @@ function renderPeople() {
     const active = selected?.kind === "user" && selected.key === row.sub ? " perm-active" : "";
     const marks = [];
     if (policy.users[row.sub]) marks.push('<span class="perm-dot" title="has rules">●</span>');
-    if (row.never_seen) marks.push('<span class="perm-warn" title="never called — check for a typo">?</span>');
+    if (row.agent) marks.push('<span class="perm-agent" title="agent identity — a token, not a person">⚙</span>');
+    // "Never called" reads as a typo for a person, but it is the normal state
+    // of an agent whose token was issued a minute ago — and giving it its
+    // rules now is exactly the point.
+    if (row.never_seen && !row.agent) {
+      marks.push('<span class="perm-warn" title="never called — check for a typo">?</span>');
+    }
+    // A user id is an unreadable UUID and gets cut; an agent id was typed by
+    // hand and is the thing you recognise it by, so it stays whole.
+    const idText = row.sub.length <= 20 ? esc(row.sub) : `${esc(row.sub.slice(0, 8))}…`;
     return `<li class="perm-item${active}" data-kind="user" data-key="${esc(row.sub)}">
       <span class="perm-name">${esc(label)}</span>${marks.join("")}
-      <span class="perm-sub">${esc(row.sub.slice(0, 8))}…</span></li>`;
+      <span class="perm-sub">${idText}</span></li>`;
   }).join("") || '<li class="modal-hint">Nobody has called yet.</li>';
 
   const roles = new Set([...Object.keys(policy.roles), ...identities.map(r => r.role).filter(Boolean)]);

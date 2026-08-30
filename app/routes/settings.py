@@ -1,7 +1,7 @@
 import os
 import threading
 from fastapi import APIRouter, Depends, HTTPException
-from .. import shared_proxy
+from .. import health, shared_proxy
 from ..api_helpers import _rebind_running_instances, _restart_after_delay, require_token_edit, str_field
 from ..auth import (agent_token, auth_enabled, edit_mode, edit_mode_locked, mcp_bearer_token,
                     read_token, require_admin_auth, require_auth, token_edit_enabled,
@@ -36,6 +36,12 @@ async def get_settings() -> dict:
         "shared_port": shared_proxy.configured_port(),
         "shared_proxy_running": shared_proxy.proxy_running(),
         "usage_retention_days": retention_days(),
+        # The health check. Auto-restart is off by default: restarting a tool
+        # nobody asked to restart is a decision, not a convenience.
+        "health_check_enabled": health.enabled(),
+        "health_autorestart": health.autorestart(),
+        "health_failures_before_restart": health.failures_before_restart(),
+        "health_max_restarts": health.MAX_RESTARTS,
         # The content store. Quota and warning threshold apply per instance
         # folder — the warning ends up in front of a tool result, and only a
         # number about its own folder is something the model can act on.
@@ -196,9 +202,9 @@ async def update_settings(body: dict) -> dict:
     # ── Content store ─────────────────────────────────────────────────────
     # Collected, not applied: like everything above, a rejected request must
     # leave nothing half-saved.
-    content_changes: dict = {}
+    store_changes: dict = {}
 
-    def _content_int(key: str, low: int, high: int, current: int) -> None:
+    def _bounded_int(key: str, low: int, high: int, current: int) -> None:
         if key not in body:
             return
         raw = body[key]
@@ -211,18 +217,18 @@ async def update_settings(body: dict) -> dict:
         if not low <= value <= high:
             raise HTTPException(400, f"{key} must be between {low} and {high}")
         if value != current:
-            content_changes[key] = value
+            store_changes[key] = value
 
-    _content_int("content_max_mb", 0, 1_000_000, content_max_bytes() // (1024 * 1024))
-    _content_int("content_warn_percent", 1, 100, content_warn_percent())
-    _content_int("content_retention_days", 0, 3650, content_retention_days())
+    _bounded_int("content_max_mb", 0, 1_000_000, content_max_bytes() // (1024 * 1024))
+    _bounded_int("content_warn_percent", 1, 100, content_warn_percent())
+    _bounded_int("content_retention_days", 0, 3650, content_retention_days())
 
     if "content_block_when_full" in body:
         raw = body["content_block_when_full"]
         if not isinstance(raw, bool):
             raise HTTPException(400, "content_block_when_full must be true or false")
         if raw != content_block_when_full():
-            content_changes["content_block_when_full"] = raw
+            store_changes["content_block_when_full"] = raw
 
     if "content_retention_mode" in body:
         mode = str(body["content_retention_mode"]).strip()
@@ -231,7 +237,7 @@ async def update_settings(body: dict) -> dict:
                 400, f"content_retention_mode must be one of: {', '.join(RETENTION_MODES)}"
             )
         if mode != content_retention_mode():
-            content_changes["content_retention_mode"] = mode
+            store_changes["content_retention_mode"] = mode
 
     if "content_base_url" in body:
         # Absolute on purpose: the links this builds end up in an OpenWebUI
@@ -243,7 +249,18 @@ async def update_settings(body: dict) -> dict:
         if len(url) > 300:
             raise HTTPException(400, "content_base_url is too long")
         if url != content_base_url():
-            content_changes["content_base_url"] = url or None
+            store_changes["content_base_url"] = url or None
+
+    for key, current in (("health_check_enabled", health.enabled()),
+                         ("health_autorestart", health.autorestart())):
+        if key in body:
+            raw = body[key]
+            if not isinstance(raw, bool):
+                raise HTTPException(400, f"{key} must be true or false")
+            if raw != current:
+                store_changes[key] = raw
+
+    _bounded_int("health_failures_before_restart", 1, 20, health.failures_before_restart())
 
     shared_change = None  # ("disable", None) or ("enable", port)
     current_shared = shared_proxy.configured_port()
@@ -307,10 +324,10 @@ async def update_settings(body: dict) -> dict:
         # delete anything before the next pass, and `totals` never at all.
         changed.append("usage_retention_days")
 
-    if content_changes:
+    if store_changes:
         from ..settings_store import save_settings
-        save_settings(content_changes)
-        changed.extend(sorted(content_changes))
+        save_settings(store_changes)
+        changed.extend(sorted(store_changes))
         # Read fresh on every call, in both the manager and the runners — no
         # restart, unlike the identity settings above.
 

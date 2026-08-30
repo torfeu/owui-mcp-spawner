@@ -16,6 +16,11 @@ from app.schema import ContentConfig, IdentityMode
 
 
 EXPECTED_API_ROUTES = {
+    ("GET", "/api/agent-identities"),
+    ("POST", "/api/agent-identities"),
+    ("PUT", "/api/agent-identities/{sub}"),
+    ("DELETE", "/api/agent-identities/{sub}"),
+    ("POST", "/api/agent-identities/{sub}/token"),
     ("GET", "/api/identities"),
     ("DELETE", "/api/identities/{sub}"),
     ("GET", "/api/policy"),
@@ -62,7 +67,127 @@ EXPECTED_API_ROUTES = {
     ("DELETE", "/api/content"),
     ("DELETE", "/api/content/{instance_id}"),
     ("DELETE", "/api/content/{instance_id}/{filename}"),
+    ("GET", "/api/system/stats"),
 }
+
+
+class ValveNameTests(unittest.TestCase):
+    """A write that cannot take effect must not answer "ok".
+
+    `lifecycle` was sent inside `values`, where it belongs one level up. It was
+    stored as a valve of that name, the loader skipped it (it is not on the
+    Valves class), auto_start never moved — and the answer was `{"ok": true}`.
+    """
+
+    def setUp(self):
+        # The suite also runs on the server, where a password *is* set. These
+        # tests are about what the route does with the body, not about its auth —
+        # same guard as ReadTokenTests. Second time this trap has been sprung.
+        original = auth._password_hash
+        auth._password_hash = None
+        self.addCleanup(lambda: setattr(auth, "_password_hash", original))
+
+    def _config(self):
+        from app.schema import MCPConfig, ServerConfig, ToolSourceConfig
+
+        return MCPConfig(
+            id="demo", name="Demo",
+            server=ServerConfig(host="127.0.0.1", port=8199, endpoint="/mcp"),
+            tool_source=ToolSourceConfig(path="tools/demo.json"),
+            values={"api_url": "https://example.invalid", "timeout_seconds": 10},
+        )
+
+    VALVES = {"api_url", "timeout_seconds"}
+
+    def _put(self, body, config=None, declared=VALVES):
+        # Nothing reaches disk: the config is handed in and the writes are
+        # patched away. The suite runs against the live installation.
+        with patch("app.routes.instances.load_config", return_value=config or self._config()), \
+             patch("app.routes.instances._valve_names_from_tool_file", return_value=declared), \
+             patch("app.routes.instances.require_not_locked"), \
+             patch("app.routes.instances.save_config"), \
+             patch("app.routes.instances.set_instance_state"), \
+             patch("app.routes.instances.get_instance_state", return_value=None):
+            return TestClient(app).put("/api/instances/demo", json=body)
+
+    def test_a_name_that_is_not_a_valve_is_refused(self):
+        response = self._put({"values": {"lifecycle": {"auto_start": False}}})
+
+        self.assertEqual(422, response.status_code)
+        detail = response.json()["detail"]
+        self.assertIn("'lifecycle'", detail)
+        self.assertIn("api_url", detail)          # says what it *does* have
+
+    def test_the_refusal_names_the_field_that_was_meant(self):
+        detail = self._put({"values": {"auto_start": False}}).json()["detail"]
+
+        self.assertIn("auto_start and restart_on_change are not valves", detail)
+
+    def test_a_real_valve_still_goes_through(self):
+        response = self._put({"values": {"timeout_seconds": 30}})
+
+        self.assertEqual(200, response.status_code)
+
+    def test_lifecycle_at_the_top_level_is_the_way_to_do_it(self):
+        response = self._put({"lifecycle": {"auto_start": False}})
+
+        self.assertEqual(200, response.status_code)
+
+    def test_a_key_the_bug_already_wrote_is_still_refused(self):
+        # The first version of this guard asked `cfg.values`, and the very key
+        # it existed to catch was already sitting there — vouching for itself.
+        # The valves come from the tool code now, which the bug never touched.
+        polluted = self._config()
+        polluted.values["lifecycle"] = {"auto_start": False}
+
+        response = self._put({"values": {"lifecycle": {"auto_start": True}}}, config=polluted)
+
+        self.assertEqual(422, response.status_code)
+
+    def test_valves_that_cannot_be_determined_are_not_second_guessed(self):
+        # Tool file missing, no Valves class, code that does not parse: that is
+        # "cannot tell", not "has none", and must not turn into a refusal.
+        response = self._put({"values": {"anything": 1}}, declared=None)
+
+        self.assertEqual(200, response.status_code)
+
+
+class ValveDiscoveryTests(unittest.TestCase):
+    """Reading the valve names out of a tool — parsed, never executed."""
+
+    def test_the_declared_valves_are_found(self):
+        from app.tool_editor import valve_names
+
+        code = (
+            "from pydantic import BaseModel, Field\n"
+            "class Tools:\n"
+            "    class Valves(BaseModel):\n"
+            "        api_url: str = Field(default='')\n"
+            "        timeout_seconds: int = 10\n"
+            "        plain = 'x'\n"
+            "    def do(self): pass\n"
+        )
+        self.assertEqual({"api_url", "timeout_seconds", "plain"}, valve_names(code))
+
+    def test_the_tool_code_is_never_executed(self):
+        # A tool's module level runs on install and on start — not on a config
+        # write. Parsing keeps a PUT from being an execution primitive.
+        from app.tool_editor import valve_names
+
+        code = (
+            "raise SystemExit('module level ran')\n"
+            "class Tools:\n"
+            "    class Valves:\n"
+            "        api_url: str = ''\n"
+        )
+        self.assertEqual({"api_url"}, valve_names(code))
+
+    def test_what_cannot_be_read_comes_back_as_none(self):
+        from app.tool_editor import valve_names
+
+        self.assertIsNone(valve_names("def ("))                       # unparsable
+        self.assertIsNone(valve_names("x = 1"))                       # no Tools
+        self.assertIsNone(valve_names("class Tools:\n    pass\n"))    # no Valves
 
 
 class ApiContractTests(unittest.TestCase):
@@ -379,10 +504,17 @@ class ReadTokenTests(unittest.TestCase):
         # points at files, it never carries their content.
         "/api/identities",
         "/api/policy",
+        # The agents and when they were issued a token — never the token, and
+        # not even its hash. Issuing one is admin-only; reading the roster is
+        # what a monitoring client wants.
+        "/api/agent-identities",
         # File names and sizes, no file contents — the download route that does
         # serve content is not under /api and has its own per-file token.
         "/api/content",
         "/api/content/{instance_id}",
+        # Load figures, not secrets — and monitoring is precisely what a
+        # read-only token is for.
+        "/api/system/stats",
     }
     # Hand out a credential verbatim — password only, even though they are GETs.
     ADMIN_ONLY = {
@@ -417,7 +549,9 @@ class ReadTokenTests(unittest.TestCase):
 
     @staticmethod
     def _fill(path):
-        return path.replace("{instance_id}", "no-such-instance").replace("{name}", "no-such-venv")
+        return (path.replace("{instance_id}", "no-such-instance")
+                    .replace("{name}", "no-such-venv")
+                    .replace("{sub}", "no-such-user"))
 
     def test_every_get_route_is_classified(self):
         actual = {
@@ -553,6 +687,14 @@ class AgentTokenTests(unittest.TestCase):
         ("PUT", "/api/settings"),
         # Assigning an account to a person hands them that account's data.
         ("PUT", "/api/policy"),
+        # Issuing an agent identity mints a credential, and POST
+        # /api/agent-identities takes no id — without this line the sweep
+        # would write a junk identity into the running installation's store,
+        # the same way DELETE /api/content once emptied its file storage.
+        ("POST", "/api/agent-identities"),
+        ("POST", "/api/agent-identities/{sub}/token"),
+        ("PUT", "/api/agent-identities/{sub}"),
+        ("DELETE", "/api/agent-identities/{sub}"),
     }
 
     PASSWORD = "admin-password"

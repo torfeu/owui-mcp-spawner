@@ -1,4 +1,4 @@
-import { apiFetch, applyEditMode, esc, fetchVenvs, setToken, showAlert, state } from "./common.js";
+import { apiFetch, applyEditMode, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
 
 // All three token fields get the same controls — one wiring for all of them,
 // so they cannot drift apart.
@@ -48,6 +48,8 @@ document.getElementById("settings-backdrop").addEventListener("click", closeSett
 document.getElementById("settings-save").addEventListener("click", saveSettings);
 document.getElementById("settings-restart").addEventListener("click", restartManager);
 document.getElementById("settings-venv-create").addEventListener("click", createVenv);
+document.getElementById("settings-agent-create").addEventListener("click", createAgentIdentity);
+document.getElementById("settings-agent-token-copy").addEventListener("click", copyIssuedToken);
 document.getElementById("settings-update-now").addEventListener("click", runUpdateCheck);
 document.getElementById("settings-content-clear").addEventListener("click", clearAllContent);
 
@@ -108,6 +110,11 @@ function closeSettings() {
   identitySecret.value = "";
   identitySecret.disabled = false;
   document.getElementById("settings-identity-clear").checked = false;
+  // A freshly issued agent token must not still be on screen the next time the
+  // dialog opens — it is shown once, and closing the dialog is that once
+  // ending.
+  document.getElementById("settings-agent-token-box").classList.add("hidden");
+  document.getElementById("settings-agent-token-value").value = "";
 }
 
 async function loadSettingsData() {
@@ -209,6 +216,10 @@ async function loadSettingsData() {
     }
     retention.value = stored;
 
+    document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
+    document.getElementById("settings-health-autorestart").checked = !!data.health_autorestart;
+    document.getElementById("settings-health-failures").value = data.health_failures_before_restart ?? 3;
+
     renderContentSettings(data);
     await renderContentFiles();
 
@@ -226,6 +237,7 @@ async function loadSettingsData() {
     hint.style.display = hint.textContent ? "" : "none";
 
     await renderVenvSettings();
+    await renderAgentIdentities();
     settingsLoaded = true;
   } catch (e) {
     showAlert("error", "Could not load settings: " + e.message);
@@ -345,14 +357,6 @@ export async function refreshUpdateBadge() {
   } catch {
     // A failed settings call must not break the dashboard over a badge.
   }
-}
-
-export function formatBytes(bytes) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes, unit = 0;
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
-  return `${value < 10 && unit ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
 function renderContentSettings(data) {
@@ -500,6 +504,134 @@ async function renderVenvSettings() {
   });
 }
 
+// ── Agent identities ────────────────────────────────────────────────────────
+// Applied immediately, like the venv list next to it, not through Save: each
+// one is its own route, and issuing a credential is not something to leave
+// sitting in a form until somebody presses a button somewhere else.
+
+async function renderAgentIdentities() {
+  const list = document.getElementById("settings-agent-list");
+  const status = document.getElementById("settings-agents-status");
+  const envBox = document.getElementById("settings-agent-env");
+  let data;
+  try {
+    data = await apiFetch("/api/agent-identities");
+  } catch (e) {
+    list.innerHTML = "";
+    status.textContent = "Could not load the agent identities: " + e.message;
+    status.className = "settings-status settings-status-warn";
+    return;
+  }
+
+  const agents = data.identities || [];
+  status.textContent = agents.length
+    ? `${agents.length} agent identit${agents.length === 1 ? "y" : "ies"}`
+    : "No agent identities — every agent is the same caller behind the shared token";
+  status.className = "settings-status " + (agents.length ? "settings-status-ok" : "");
+
+  // Which of the two delivery paths is in force. Without this line, "I changed
+  // the token and nothing happened" is the first question anybody asks: with
+  // the environment variable set, the file this dialog writes is never read.
+  const editable = data.editable !== false;
+  envBox.classList.toggle("hidden", editable);
+  if (!editable) {
+    envBox.innerHTML = `Agent identities come from <code>${esc(data.env_var)}</code> on this
+      server. The environment wins over <code>${esc(data.path)}</code>, so they cannot be
+      changed here — unset the variable to manage them from this dialog.`;
+  }
+  for (const id of ["settings-agent-new-id", "settings-agent-new-name",
+                    "settings-agent-new-role", "settings-agent-create"]) {
+    document.getElementById(id).disabled = !editable;
+  }
+
+  list.innerHTML = agents.map(a => {
+    const label = a.name ? `${esc(a.name)} · ${esc(a.sub)}` : esc(a.sub);
+    const bits = [a.role ? `role ${esc(a.role)}` : "", a.created_at
+      ? `issued ${new Date(a.created_at * 1000).toLocaleDateString()}` : ""].filter(Boolean);
+    const buttons = editable
+      ? `<button class="btn btn-secondary btn-sm" data-agent-roll="${esc(a.sub)}"
+           title="Issue a new token — the current one stops working at once">New token</button>
+         <button class="btn btn-danger btn-sm" data-agent-del="${esc(a.sub)}">Revoke</button>`
+      : "";
+    return `<div class="venv-row">
+      <span class="venv-badge">${label}</span>
+      <span class="venv-meta">${bits.join(" · ")}</span>
+      ${buttons}
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll("[data-agent-roll]").forEach(btn => {
+    btn.addEventListener("click", () => regenerateAgentToken(btn.dataset.agentRoll));
+  });
+  list.querySelectorAll("[data-agent-del]").forEach(btn => {
+    btn.addEventListener("click", () => revokeAgentIdentity(btn.dataset.agentDel));
+  });
+}
+
+function showIssuedToken(token) {
+  const box = document.getElementById("settings-agent-token-box");
+  document.getElementById("settings-agent-token-value").value = token;
+  box.classList.remove("hidden");
+  box.scrollIntoView({ block: "nearest" });
+}
+
+async function copyIssuedToken() {
+  const input = document.getElementById("settings-agent-token-value");
+  try {
+    await navigator.clipboard.writeText(input.value);
+    showAlert("success", "Token copied to the clipboard.");
+  } catch {
+    // Clipboard access needs a secure context; over plain HTTP in a LAN it is
+    // simply not there. Select the text instead of claiming a copy happened.
+    input.select();
+    showAlert("error", "Could not reach the clipboard — the token is selected, copy it by hand.");
+  }
+}
+
+async function createAgentIdentity() {
+  const idInput = document.getElementById("settings-agent-new-id");
+  const nameInput = document.getElementById("settings-agent-new-name");
+  const roleInput = document.getElementById("settings-agent-new-role");
+  const sub = idInput.value.trim();
+  if (!sub) { showAlert("error", "Enter an id for the agent"); return; }
+  try {
+    const result = await apiFetch("/api/agent-identities", {
+      method: "POST",
+      body: JSON.stringify({ sub, name: nameInput.value.trim(), role: roleInput.value.trim() }),
+    });
+    idInput.value = nameInput.value = roleInput.value = "";
+    showIssuedToken(result.token);
+    showAlert("success", `Agent identity '${sub}' created.`);
+    await renderAgentIdentities();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
+async function regenerateAgentToken(sub) {
+  if (!confirm(`Issue a new token for '${sub}'? The current one stops working immediately.`)) return;
+  try {
+    const result = await apiFetch(
+      `/api/agent-identities/${encodeURIComponent(sub)}/token`, { method: "POST" });
+    showIssuedToken(result.token);
+    showAlert("success", `New token for '${sub}'.`);
+    await renderAgentIdentities();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
+async function revokeAgentIdentity(sub) {
+  if (!confirm(`Revoke '${sub}'? Its token stops working immediately. Any access rules for it stay.`)) return;
+  try {
+    await apiFetch(`/api/agent-identities/${encodeURIComponent(sub)}`, { method: "DELETE" });
+    showAlert("success", `Agent identity '${sub}' revoked.`);
+    await renderAgentIdentities();
+  } catch (e) {
+    showAlert("error", e.message);
+  }
+}
+
 async function createVenv() {
   const input = document.getElementById("settings-venv-new");
   const name = input.value.trim();
@@ -596,6 +728,7 @@ async function saveSettings() {
     ["settings-content-max", "content_max_mb", 0, 1000000, "the quota in MB (0 = no limit)"],
     ["settings-content-warn", "content_warn_percent", 1, 100, "the warning threshold in percent"],
     ["settings-content-retention", "content_retention_days", 0, 3650, "how many days to keep files (0 = forever)"],
+    ["settings-health-failures", "health_failures_before_restart", 1, 20, "how many failed checks before a restart"],
   ];
   for (const [id, key, low, high, what] of numberFields) {
     const raw = document.getElementById(id).value.trim();
@@ -610,6 +743,9 @@ async function saveSettings() {
     }
     body[key] = value;
   }
+  body.health_check_enabled = document.getElementById("settings-health-enabled").checked;
+  body.health_autorestart = document.getElementById("settings-health-autorestart").checked;
+
   body.content_block_when_full = document.getElementById("settings-content-block").checked;
   body.content_retention_mode = document.getElementById("settings-content-mode").value;
 
