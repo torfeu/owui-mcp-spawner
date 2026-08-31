@@ -4,9 +4,7 @@ All notable changes to owui-mcp-spawner. The newest version is at the top.
 Released versions are also tagged on GitHub; the in-progress section is kept up to
 date as work lands, so it is never reconstructed from memory at release time.
 
-## v0.2.2 — in progress (unreleased)
-
-*Kept up to date as work lands; the version number in `app/__init__.py` is bumped only at release.*
+## v0.2.2
 
 **New**
 - **A wrong parameter name now says which one was meant** — calling a tool with an argument it does not have produced `Tools.find_tools() got an unexpected keyword argument 'query'`: true, and the *right* name does not appear in it, although the runner has had the tool's schema in its hands the whole time. A small model that gets no usable answer invents a cause, which is the same rule the tool output already follows, one layer down. The message now names the parameter that is wrong, suggests the nearest real one where there is one (`'serch' — did you mean 'search'?`), names any required parameter that is missing, and lists what the tool actually takes with the required ones marked. It sits in the runner rather than in the tool router, so **every** tool reached through this framework gets it, not just the one where it was noticed. The sharp edge is telling a wrong *call* from a failure *inside* the tool: a `TypeError` raised deeper down must reach the caller unchanged, or the reader goes hunting for a parameter problem that is not there. That is decided by binding the arguments against the method's own signature — Python's own argument matching, so it knows that a tool taking `**kwargs` or dunder parameters legitimately accepts more than its schema lists, where a check against the schema would refuse calls that work. Nothing is refused in any case: the call has already been made by the time the question is asked, and without a schema the original exception text stands rather than being replaced by a message with no names in it

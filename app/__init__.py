@@ -7,4 +7,4 @@ to bump would mean shipping a build that reports itself outdated (or up to
 date) when it is not.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

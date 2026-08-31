@@ -48,7 +48,7 @@ MCP endpoints are then reachable at `http://<your-ip>:<port>/mcp`.
 
 ## Dashboard
 
-The instance table is the main view. Next to ID, name, status, port, venv and URL it shows:
+The instance table is the main view. Next to ID, name, status, **RAM**, port, venv and URL it shows:
 
 - **Category** — a free-text grouping label (e.g. `Smart Home`, `Search`, `Utilities`) that you can set when uploading a JSON, when creating a tool in the editor, or later in **Edit → Category**. It is a spawner-side label: it lives in the MCP config, so changing it neither rewrites the tool nor restarts the instance. A tool may declare a **default** for it in its docstring header, next to `version:`:
 
@@ -69,8 +69,35 @@ Above the table sits a filter bar:
 
 - **Search** — matches ID, name, description and category as you type
 - **Category dropdown** — built from the categories actually in use; `All categories` clears the filter
+- **Status dropdown** — built from the statuses actually present, and ordered along the lifecycle rather than alphabetically (the order the Status column already sorts by), so it never offers a choice that comes back empty
 
-Both filters are client-side and combine. The spawner's own version is shown as a badge next to the title in the header.
+All three filters are client-side and combine. Below the table sits **pagination** — 10/20/50/200 rows per page — which appears only once there are more instances than the smallest page size, so a small installation never sees it. The page survives the four-second poll, and a filter that shrinks the list under the current page pulls you back to the last valid one instead of leaving an empty table. The page size is remembered in the browser; the page number deliberately is not.
+
+Every column header sorts, **RAM included**: descending puts the heaviest instance first, which is the click you want when the machine is busy. Rows whose memory was not measured — a stopped instance, or a manager without `psutil` — carry a dash and collect at the opposite end from the heaviest rather than among the small ones, because a dash is not a zero. Where nothing at all is measured the click is refused and the server's order stands.
+
+The spawner's own version is shown as a badge next to the title in the header.
+
+### System monitor
+
+A row of tiles above the table carries CPU, memory, disk and network rate for the machine, and the table's **RAM** column shows what each instance costs: resident memory of the runner **plus its children**. That sum matters — an instance that shells out to an agent CLI does its real work in a subprocess, and charging the parent alone would show the busiest instance as the cheapest one.
+
+**Every mounted drive gets a tile**, not just the one the spawner is installed on: a machine with a data disk and a backup disk was otherwise described by its system disk alone, the least interesting of the three. Boot and EFI partitions are dropped by size rather than by path (`/boot` is a Linux name, and this has to run wherever it is installed), and two mounts reporting the same size *and* the same free bytes count once — that is one APFS container seen through five volumes, or a bind mount. The install disk keeps its own marker, because it is the one that decides whether the next file can be written.
+
+Two figures need a previous sample to mean anything, and both report **nothing** rather than a fabricated zero until they have one: a `0 %` tile reads as *idle*, not as *not measured yet*. A counter that went backwards — an interface went down, the machine rebooted — is unknown, not a negative spike. And readers do not take each other's measurements: CPU and the network rate are measured against the previous reading, so a second caller arriving within a fifth of a second is handed the last value instead of resetting the window. Without that, an MCP call landing beside a dashboard poll came back "unknown" while a perfectly good measurement existed.
+
+No GPU: every reading there is vendor-specific, and this framework has to run on whatever machine it is put on.
+
+`psutil` is required for this and is an **optional import**. An installation that gets this code before anyone has run `pip` keeps serving: `GET /api/system/stats` answers `available: false` with the command to fix it, the UI shows that one line and stops asking — nothing can change until the manager restarts. The stats ride the dashboard's existing four-second poll and are fetched *before* the instance list, so the RAM column and the tiles come out of the same round. Read-only, open to the read token, hidden from guests. Also reachable from a chat: the control tool's `get_system_stats` returns one prose line for the machine plus the heaviest instances.
+
+### Health check
+
+The watchdog checks the pid, which answers "the process exists" — a different question from "the MCP server still replies". A runner whose event loop is blocked by a synchronous tool call, or one whose port was recycled by another instance, keeps its pid and stays green while every call from a chat times out.
+
+So once a minute the manager makes the request OpenWebUI itself makes — `initialize`, then `tools/list` — against each running instance, and the row gets a dot next to its status badge: green with the tool count, red with the reason. Nothing is inferred from a TCP connect, because an open port is exactly what a wedged process still has.
+
+An instance whose spawn lock is held is **skipped, not judged**: a start still in flight has no open port yet, and a verdict in that window would be a race rather than a diagnosis. An instance in `required` identity mode answers the check with an *empty* catalog on purpose — the runner hides its tools from a caller it cannot identify rather than erroring — so its dot is green and the tooltip says why there are none, instead of leaving "0 tools" to read as *broken*.
+
+Optional **auto-restart** is off by default and deliberately reluctant when on: a configurable number of consecutive failures first, then a growing wait (1, 5, 15 min), a hard cap of three restarts, and forgiveness only after half an hour of good behaviour. A tool that is broken for good must not restart itself every minute — the runtime log is where the reason lives, and a restart loop buries it. Settings under **System → Health Check**.
 
 ### Info view
 
@@ -95,6 +122,20 @@ What makes that safe enough to offer is the snapshot: `PUT /api/instances/{id}/t
 The update is **forward only** — a request to "update" to a version that is not newer is refused with `409`, so a stale page cannot roll a tool back. Locked instances refuse with `403` and read-only mode hides the button entirely; in both cases the badge stays as a plain marker and says why.
 
 Info is metadata, not source: the button stays available under `--no-code-edit` and `--no-edit`, and is hidden in guest mode.
+
+#### Test call
+
+Every function in that list has a **Test** button. It opens a form built from the tool's own schema, calls the tool for real, and shows the raw answer — the verdict, how long it took, and the **length of the answer in characters**.
+
+That last number is the point as much as the answer is. From a chat window a failed tool leaves two candidates and no way to separate them: the tool is broken, or the model called a working tool wrongly. And a default that returns too much gets truncated on its way into a small local model, which then invents a cause for the gap. Both become visible here in seconds.
+
+The form is generated rather than being a JSON text box, because typing JSON by hand is how the wrong call gets made in the first place: string, number, boolean and enum get real fields with the required ones marked, and anything nested gets a JSON field **in the same form**, so no tool schema can leave the panel blocked however exotic it is. A field left blank is not sent, which keeps *call it without this parameter* expressible.
+
+Three outcomes are kept apart, because they send you to different places: the call never arrived (with the cause unwrapped out of the SDK's `ExceptionGroup`), the tool answered with an error, or it worked.
+
+**It can be made as somebody.** A *Call as* picker offers everyone the identity roster and the agent identities know; the spawner signs a short-lived user token with the shared secret for that one request. Without it an instance in `identity_mode: required` answers with an empty catalog, and the panel would be useless on exactly the instances one most wants to test — with it, the same panel answers *what does this user actually get to see?*. The claims are looked up on the server and never taken from the browser, or the dialog could hand a tool a role its owner does not have and the rules would be tested against a fiction. Where the server has neither a user-JWT secret nor trusted headers, the picker is replaced by that reason — once, rather than one silent *Access denied* per attempt.
+
+Password only, and refused on a locked instance: the call runs the instance's real code with the instance's real credentials. The buttons are removed there and in guest mode rather than left to fail. Its budget is 60 s, against the health check's 8 — a runner slower than that is unwell, while a real call may legitimately be generating a document — and the panel counts the seconds so a slow call looks slow rather than hung.
 
 ### Usage statistics
 
@@ -122,6 +163,9 @@ The web UI includes a **⚙ Settings** page (top-right button) for managing comm
 - **Shared MCP Port** — expose all MCPs through one port as `/mcp/<id>` (see below)
 - **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
 - **File Storage** — the download base URL, the per-instance quota with its warning threshold, whether a full folder only warns or refuses calls, and how long stored files are kept (see *File storage*). The same tab lists what is stored, per instance, with a download link and a delete button per file
+- **Agent Identities** — issue, rename or revoke a named token per calling agent; the token is shown once, at creation (see *Agent identities*)
+- **Health Check** — whether the manager probes each running instance once a minute, and whether a failing one is restarted, after how many consecutive failures (see *Health check*)
+- **Backup & Restore** — download the whole manager state as one file, with or without credentials, and put it back (see *Backup and restore*)
 - **Usage Tracking** — how long individual tool calls are kept (7 / 30 / 90 / 365 days or indefinitely); the per-function totals are always kept
 - **Update Check** — off by default; when enabled, the server asks GitHub once a day whether a newer release exists, plus a **Check now** button for a one-off check (see below)
 - **Restart** — restart the spawner process from the UI
@@ -230,6 +274,36 @@ class Tools:
 Two rules worth stating outright. **Never build the filename from user input verbatim** — a name is part of a path, and two callers with the same title must not overwrite each other; derive a slug and add a random tail. And **return the link, not the path**: the file lives on the server, so a path is of no use to whoever asked for it.
 
 A complete, runnable version ships as [`examples/example_content_tool.py`](examples/example_content_tool.py) — paste it into the editor (**New Tool → Install as MCP**), switch **File storage** on for the instance, and call `where_do_files_go()`. It reports which of the three paths is in force and warns explicitly when storage is still off, which is the mistake that otherwise shows up as a dead link.
+
+---
+
+## Backup and restore
+
+**Settings → Maintenance → Backup & Restore** writes the whole manager state into one JSON file. What goes in is exactly what is *not* in git and not in a deployment rsync: the instance configurations, **their tool code**, the server settings, the access rules and the agent roster (hashed — `app/agent_identity.py` stores them that way so that this file can exist). Lose the disk, and without this the code is safe on GitHub while every instance definition is gone.
+
+The tool files are the bulk of it — on a sixteen-instance installation, 1.2 MB of tool code against 68 KB of configs — and they are not optional: a restored config pointing at a file that is not there is worse than no instance, because it looks installed.
+
+Named in the archive itself, so a reader knows what it cannot do for them, **not included**: the venvs (rebuilt through the normal install path), the stored files under `content/` (that would be cloning a machine), the identity roster (`runtime/identities.db`, which rebuilds itself from each user's next call) and the usage numbers (history, not configuration).
+
+**Credentials are a checkbox.** With them the archive restores a working server and *is* a collection of credentials — the MCP, read and agent tokens, the user-JWT secret, the file key, and every API key in the instance valves. The filename then carries `-with-secrets` and the dialog says what that means, because a backup whose contents nobody can tell by looking is one that ends up in the wrong folder. Without them the file may be kept anywhere, and the price is stated too: no instance holding an API key will run until the keys are entered again, and old download links stay broken because the file key is a different one.
+
+### Restoring writes only what is not there
+
+One rule, everywhere — not per category and not per switch:
+
+- an instance whose id already exists is **skipped and named**
+- a setting already set stays
+- an agent already known keeps its own hash
+- rules for a user who already has some are left alone
+- `content.key` is written **only** where there is none, because replacing it silently invalidates every download link this server has ever handed out
+
+On an empty machine — the case this exists for — nothing is there, so everything lands. On a running one a mistaken click costs nothing, which matters more here than anywhere else: a restore is the most destructive endpoint this project has.
+
+A port already taken on the target is reassigned through `find_free_port()` and **reported**, never quietly, so an OpenWebUI registration still pointing at the old number is something you learn here rather than in a chat window. A redacted valve arrives as a marker and is **dropped** rather than installed — an instance with a missing key fails loudly, one holding `********` fails in a way that reads like a broken tool — and the report names what is missing. Restored instances are not installed or started; their venv is built the normal way from the dashboard.
+
+**Check** runs all of it as a dry run and shows the same report without writing anything. A real run that turned out to change nothing says so, rather than reporting *Restored* over a list whose every line reads *kept* — replaying a backup onto the server it came from is the normal case, and it is the proof that a mistaken click is free.
+
+Both routes are password only and closed by `--no-token-edit`.
 
 ---
 
@@ -376,6 +450,35 @@ It stands in when no user token arrives, and the rules then apply to the machine
 
 A real token still wins over it, and a **broken** token is still refused — falling back to the machine identity there would quietly upgrade a forged token into a working one.
 
+### Agent identities (one token per calling agent)
+
+A machine identity names an instance's anonymous caller — one name per *instance*, not one per caller. Behind the shared MCP Bearer token, Claude Code, Codex and a cron job were still the same caller: the rules could not tell them apart, the usage figures counted them together, and the log said nothing about who it had been.
+
+An **agent identity** is a token of its own for each of them, issued under **Settings → Identity → Agent Identities**. It maps 1:1 to the same `Identity` the user-JWT path produces, so everything downstream keeps working unchanged — rules, the 🔑 dialog, the roster, the usage numbers. A new identity appears in **Users & permissions** under its own id **before its first call**, which is exactly when you want to give it its rules.
+
+Called *agent identity*, not *agent token*: `MCP_MANAGER_AGENT_TOKEN` already exists and is something else entirely — the manager-API credential for agents that write.
+
+Assigned rather than proven: whoever holds the token *is* that agent. That is no weaker than the shared token it sits beside, and it buys the thing that was missing — two agents with the same rights still get two tokens, revocable one at a time. The runner's Bearer gate knows about them, so an agent carries only its own token and not the shared one as well; a token belonging to nobody is still a `401`.
+
+The precedence is the part that has to be right:
+
+```
+signed user JWT  >  agent identity  >  machine identity
+```
+
+A **broken** user token stays a refusal at the first step — it never falls through to the agent token beside it, or a forged JWT would be quietly demoted into a working identity.
+
+**Tokens are stored hashed**, a deliberate break with the API tokens in `runtime/settings.json`: the point is that a backup of this file gives nothing away (see *Backup and restore*). The price is that a token is shown once, at creation, and a new one is the only way back. Plain SHA-256 is enough where it would not be for a password — these are 256 bits of `secrets` output, so there is no dictionary to run.
+
+Two delivery paths, and **a set environment variable wins** — the same precedence `configure_api_tokens()` already uses, so it is one rule for the installation rather than two:
+
+| | |
+|---|---|
+| `MCP_AGENT_IDENTITIES` | a JSON list read once at start, for containers and units that want no extra state file. Changes need an instance restart |
+| `runtime/agent_identities.json` | written by the manager, only ever *read* by the runners — the same split as `runtime/content.key`, and for the same reason. A revocation takes effect on the next call, no restart |
+
+Which path is in force is on the screen and in the API response, because *I changed the token and nothing happened* is otherwise the first question. With the environment in charge the write routes answer `409` rather than `ok`: the file they would write is not the file anyone reads.
+
 ### Access rules
 
 `runtime/identity_policy.json` maps the stable OpenWebUI user id (the JWT's `sub`) to what that person may reach. See `examples/identity-policy.example.json`.
@@ -513,8 +616,17 @@ Both are optional and independent — unset means "password only", exactly as be
 | `POST` | `/api/policy/preview` | What would this user be allowed, as the rules stand? Applies the real lookup — role, personal entry, deny, matching switches — to a hypothetical caller |
 | `POST` | `/api/settings/update-check` | Run one update check immediately ("Check now"), ignoring the switch and the 24 h cache; reports failures instead of claiming "up to date". Persists the result only while the check is enabled |
 | `POST` | `/api/server/restart` | Restart the spawner process |
+| `GET` | `/api/agent-identities` | The configured agents and which delivery path is in force — never a token, not even its hash |
+| `POST` | `/api/agent-identities` | Issue one *(password only — it mints a credential; blocked by `--no-token-edit`)*. The token appears in this response and nowhere else, ever |
+| `POST` | `/api/agent-identities/{sub}/token` | Re-issue *(same guards)* |
+| `PUT` | `/api/agent-identities/{sub}` | Rename an agent identity *(same guards)* |
+| `DELETE` | `/api/agent-identities/{sub}` | Revoke one *(same guards)* |
+| `GET` | `/api/system/stats` | CPU, memory, every mounted disk, network rate and per-instance memory. `available: false` with the fix when `psutil` is missing, rather than a 500 |
+| `GET` | `/api/backup` | The whole manager state as one file; `?secrets=true` includes the credentials *(password only; blocked by `--no-token-edit`)* |
+| `POST` | `/api/backup/restore` | Put a backup back — writes only what is not already there, and `dry_run` reports what it would do without doing it *(same guards, plus `--no-edit`)* |
+| `POST` | `/api/instances/{id}/call` | Call one tool and hand back the raw answer *(password only — it runs the instance's code with its credentials; refused on a locked instance)* |
 | `GET` | `/api/instances/{id}/config` | Full config; secret values are masked and `secret_fields` lists which keys the server classified as credentials, so the edit dialog never has to guess |
-| `GET` | `/api/instances/{id}/specs` | Function catalog — `{id, description, specs:[{name, description, parameters}], usage, bundled}`, read from the tool JSON plus the instance's usage counters. `bundled` compares the installed version against the copy shipped in `examples/` (`null` when none ships under that id). Metadata only, therefore **not** blocked by `--no-code-edit` |
+| `GET` | `/api/instances/{id}/specs` | Function catalog — `{id, description, specs:[{name, description, parameters}], usage, bundled}`, read from the tool JSON plus the instance's usage counters. `bundled` compares the installed version against the copy shipped in `examples/` (`null` when none ships under that id), and `test_call` says whether a test call could be made here and why not. Metadata only, therefore **not** blocked by `--no-code-edit` |
 | `GET` | `/api/instances/{id}/tool-code` | Python source of a tool *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/instances/{id}/logs/install` | Install log |
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
@@ -825,7 +937,9 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 .venv/bin/python -m unittest discover -v
 ```
 
-The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_auth_lockout.py` covers the failed-credential counter — the doubling, the quiet period that starts when a block *ends* rather than at the last attempt, and the two things that must not count. `tests/test_venv_base_packages.py` guards the `mcp` floor in both places that declare it. `tests/test_content.py` covers the file storage from both ends — path traversal, symlinks and dotfiles refused, a per-file token that opens nothing else, links rewritten without touching the rest of a result, the quota warning standing *in front of* it, both retention modes, and a Valve the user set never being overwritten. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
+The suite runs against temporary project trees and never touches real instance configs or processes. It covers the public API contract, auth and edit-mode dependencies, the API-token boundaries (every `GET` route classified, every route swept with both tokens), guest data exposure, instance locking, schema and package validation, secret masking, port allocation and shared-proxy collisions. `tests/test_update_check.py` covers the version comparison, the caching and the fact that a disabled check never contacts GitHub. `tests/test_control_tool.py` keeps the shipped control tool honest — its specs must match the docstrings of its code. `tests/test_identity.py`, `test_policy.py`, `test_runner_identity.py` and `test_identity_probe.py` cover per-user identity: what token verification *refuses* (tampered, expired, wrong issuer, `alg: none`), deny-by-default from every direction, that a tool hidden from one user cannot be called by name either, that fifty interleaved calls by two users stay apart, and that no secret or token reaches a log line or a tool's output. One of them starts a real runner and calls it over streamable HTTP — the assumption everything rests on, and the one an SDK upgrade could remove silently. `tests/test_auth_lockout.py` covers the failed-credential counter — the doubling, the quiet period that starts when a block *ends* rather than at the last attempt, and the two things that must not count. `tests/test_venv_base_packages.py` guards the `mcp` floor in both places that declare it. `tests/test_content.py` covers the file storage from both ends — path traversal, symlinks and dotfiles refused, a per-file token that opens nothing else, links rewritten without touching the rest of a result, the quota warning standing *in front of* it, both retention modes, and a Valve the user set never being overwritten. `tests/test_backup.py` covers the archive and the one rule the restore obeys — that a redacted backup contains no secret anywhere, that nothing existing is ever overwritten, that a taken port is reassigned and reported, and that both shapes of tool file are accepted (an OpenWebUI export is a *list holding one tool object*, which a fixture invented as a bare dict will not tell you). `tests/test_tool_call.py` covers the test call: that the chosen identity travels as a token the runner verifies, that its claims come from the server rather than the request, and that the route is closed to everything but the password. `tests/test_call_help.py` covers the argument help, above all the line it must not cross — a `TypeError` raised *inside* a tool is passed through untouched. `tests/test_e2e.py` additionally spawns a real manager process and drives a full tool lifecycle over HTTP and MCP, including direct and shared-port calls. See `tests/README.md`.
+
+The suite writes nowhere near the live installation, and that is checked rather than assumed: three times a test has reached a real file under `runtime/` — the file storage, the usage database, the settings file — and each time it was found by snapshotting `configs/`, `tools/`, `content/` and `runtime/` around a full run and diffing. Twice it was invisible on a development machine and only showed on the server, where the file exists and holds something worth protecting. **Any new state file under `runtime/` needs an `isolate_*` helper before the first test reads or writes it**, and any route that acts without a mandatory instance id has to be listed in the route sweep's `ADMIN_ONLY` — an unguarded one is run for real, with a valid token, on whatever machine the suite runs on.
 
 ---
 
@@ -836,21 +950,27 @@ app/
   manager.py            Entry point (CLI) — --host, --port, --no-edit, --no-code-edit, --mcp-token, --no-token-edit
   admin_server.py       FastAPI app assembly, static web server, instance watchdog
   routes/               API endpoints — auth.py, instances.py, tools.py, logs.py, settings.py,
-                        venvs.py, usage.py, permissions.py, content.py
+                        venvs.py, usage.py, permissions.py, content.py, system.py,
+                        agent_identities.py, backup.py
   api_helpers.py        Shared route helpers (edit-mode/lock guards, instance serialization, version + specs lookup)
   activity.py           Usage tracking (runtime/usage.db, written by the runners, pruned by the manager)
   content_store.py      Files the tools produce (content/<id>/) — paths, per-file tokens, quota, retention
+  backup.py             The whole manager state as one file, and the way back
+  health.py             Is the instance still answering, or only still running?
+  system_stats.py       CPU, memory, disks, network and per-instance memory (psutil, optional import)
+  tool_call.py          Call one tool of one instance from the dashboard (the manager as MCP client)
   update_check.py       Optional GitHub release check (off by default, server-side, cached)
   shared_proxy.py       Streaming reverse proxy for the shared MCP port (/mcp/<id>)
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
   identity.py           Verified end user of one tool call (forwarded HS256 token → ContextVar)
   identity_registry.py  Roster of users the runners have seen (runtime/identities.db)
+  agent_identity.py     Named token per calling agent (hashed, runtime/agent_identities.json)
   policy.py             Per-user access rules and per-user backend credentials
   auth.py               Auth, guest detection, edit mode, MCP token and API-token helpers
   lockout.py            Failed-credential counter per client address (in memory, see Login lockout)
   settings_store.py     Persistent settings (runtime/settings.json)
   config_store.py       Config file I/O + port management
-  process_manager.py    Subprocess lifecycle (start/stop/restart) + health checks
+  process_manager.py    Subprocess lifecycle (start/stop/restart) + pid watchdog
   tool_loader.py        OpenWebUI JSON → MCP tool definitions
   tool_editor.py        Code validation (isolated subprocess) + OpenWebUI JSON export
   validate_worker.py    Subprocess worker that executes untrusted tool code for validation
@@ -873,9 +993,10 @@ tests/                  unittest suite (API contract, auth/guest, locking, ports
 web/                    Frontend — index.html, style.css and ES modules:
                         app.js (bootstrap), common.js (state/fetch/UI helpers),
                         instances.js, config.js, upload.js, editor.js, logs.js, info.js,
-                        stats.js, permissions.js, settings.js
+                        stats.js, permissions.js, settings.js, system.js, testcall.js
 runtime/                PIDs + logs + venvs + settings.json + usage.db + identities.db
-                        + identity_policy.json + history (gitignored)
+                        + identity_policy.json + agent_identities.json + content.key
+                        + history (gitignored)
 deploy/                 systemd service + env file examples
 ```
 
