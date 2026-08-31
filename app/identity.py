@@ -292,3 +292,53 @@ def _unquote(value: str) -> str:
         return unquote(value)
     except Exception:
         return value
+
+
+# ── signing ───────────────────────────────────────────────────────────────────
+
+# The manager's test call (app/tool_call.py) is the only caller. It needs a
+# token an instance will accept, and the shared secret is the only thing that
+# produces one — the agent tokens next to it are stored hashed and cannot be
+# reconstructed. Kept short: nothing is meant to reuse such a token, and a
+# minute is more than a single tool call needs.
+TEST_CALL_TTL = 60
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def sign_user_jwt(sub: str, *, email: str = "", name: str = "", role: str = "",
+                  ttl: int = TEST_CALL_TTL, secret: Optional[str] = None,
+                  now: Optional[int] = None) -> str:
+    """Mint an HS256 user token the runners will verify. Raises IdentityError.
+
+    The mirror image of verify_user_jwt, and deliberately in the same file: the
+    two have to agree on the issuer, the claim names and the encoding, and the
+    way to keep them agreeing is to let them be read together.
+
+    This is not a login. It is the admin server signing "call as this user" for
+    one deliberate request it makes itself — whoever holds the shared secret
+    could already do it by hand, which is precisely why that secret is the
+    server's most sensitive setting.
+    """
+    if not secret:
+        secret = configured_secret()
+    if not secret:
+        raise IdentityError("no user-JWT secret configured on this server")
+    sub = str(sub or "").strip()
+    if not sub:
+        raise IdentityError("cannot sign a token without a 'sub'")
+
+    issued_at = int(time.time()) if now is None else int(now)
+    header = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"},
+                                       separators=(",", ":")).encode("utf-8"))
+    claims = {"iss": expected_issuer(), "sub": sub, "iat": issued_at,
+              "exp": issued_at + max(1, int(ttl))}
+    for key, value in (("email", email), ("name", name), ("role", role)):
+        if value:
+            claims[key] = str(value)
+    payload = _b64url_encode(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(secret.encode("utf-8"), f"{header}.{payload}".encode("ascii"),
+                         hashlib.sha256).digest()
+    return f"{header}.{payload}.{_b64url_encode(signature)}"

@@ -53,6 +53,7 @@ EXPECTED_API_ROUTES = {
     ("POST", "/api/instances/{instance_id}/lock"),
     ("POST", "/api/instances/{instance_id}/unlock"),
     ("GET", "/api/instances/{instance_id}/export"),
+    ("POST", "/api/instances/{instance_id}/call"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("GET", "/api/settings/mcp-token"),
@@ -695,6 +696,12 @@ class AgentTokenTests(unittest.TestCase):
         ("POST", "/api/agent-identities/{sub}/token"),
         ("PUT", "/api/agent-identities/{sub}"),
         ("DELETE", "/api/agent-identities/{sub}"),
+        # Runs the instance's real code with the instance's real credentials —
+        # the one route here that does something outside this process. The
+        # mandatory instance id makes the sweep hit a 404 first, but the door
+        # is the point: a read-only or agent token must not be able to make the
+        # server call a tool on its behalf.
+        ("POST", "/api/instances/{instance_id}/call"),
     }
 
     PASSWORD = "admin-password"

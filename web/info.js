@@ -1,4 +1,5 @@
 import { API, apiFetch, esc, state } from "./common.js";
+import { mountTestCall } from "./testcall.js";
 // instances.js imports nothing but common.js, so this is not a cycle.
 import { updateFromExample } from "./instances.js";
 
@@ -12,6 +13,7 @@ export async function openInfo(id, inst = null) {
   document.getElementById("info-meta").innerHTML = metaGrid(id, inst, "");
   document.getElementById("info-fn-count").textContent = "";
   document.getElementById("info-functions").innerHTML = '<p class="modal-hint">Loading…</p>';
+  document.getElementById("info-test-bar").classList.add("hidden");
   document.getElementById("info-modal").classList.remove("hidden");
 
   // Fetched on open, never in the poll cycle — the specs of a single instance
@@ -22,6 +24,8 @@ export async function openInfo(id, inst = null) {
       metaGrid(id, inst, data.description, data.usage, data.bundled);
     document.getElementById("info-fn-count").textContent = data.specs.length ? `(${data.specs.length})` : "";
     document.getElementById("info-functions").innerHTML = renderFunctions(data.specs);
+    // After the list is in the DOM: the test panel hangs itself off the items.
+    await mountTestCall(id, data.specs, data.test_call);
 
     // Close first: the update restarts the instance and reloads the list, so a
     // dialog left open would show the state it had before the click.
@@ -99,10 +103,14 @@ function renderFunctions(specs) {
     return '<p class="modal-hint">No function metadata found in the tool file.</p>';
   }
   return `<div class="fn-list">${specs.map(fn => `
-    <div class="fn-item">
-      <div class="fn-name">${esc(fn.name)}</div>
+    <div class="fn-item" data-fn="${esc(fn.name)}">
+      <div class="fn-head">
+        <div class="fn-name">${esc(fn.name)}</div>
+        <button class="btn btn-secondary btn-sm fn-test-btn" data-test-toggle>Test</button>
+      </div>
       ${fn.description ? `<div class="fn-desc">${esc(unwrap(fn.description))}</div>` : ""}
       ${renderParams(fn.parameters)}
+      <div class="fn-test hidden" data-test-panel></div>
     </div>
   `).join("")}</div>`;
 }

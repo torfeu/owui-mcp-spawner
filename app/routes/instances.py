@@ -2,7 +2,7 @@ import asyncio
 import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from .. import health, shared_proxy
+from .. import agent_identity, health, identity_registry, shared_proxy, tool_call
 from ..activity import forget as forget_usage, read_usage
 from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _valve_names_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
 from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
@@ -10,6 +10,7 @@ from ..content_store import forget_instance as forget_content
 from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
+from ..policy import PolicyError, load_policy
 from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
 from ..schema import ContentConfig, IdentityMode, MCPStatus, ServerConfig, InstallConfig
 from ..security import is_secret_field, mask_secrets, SECRET_MASK
@@ -100,6 +101,14 @@ async def get_specs(instance_id: str) -> dict:
         # None unless a tool of the same id ships in examples/ — see
         # _bundled_version_info. Reported, never applied.
         "bundled": await asyncio.to_thread(_bundled_version_info, cfg),
+        # What a test call could do here, so the panel can say why a button is
+        # missing instead of failing once per click. Metadata, like the rest of
+        # this payload — the call itself is admin-only.
+        "test_call": {
+            "identity_mode": cfg.identity_mode.value,
+            "can_identify": tool_call.identity_possible(),
+            "locked": bool(cfg.locked),
+        },
     }
 
 @router.get("/api/instances/{instance_id}/config", dependencies=[Depends(require_auth)])
@@ -383,6 +392,79 @@ async def export_instance(instance_id: str, request: Request) -> JSONResponse:
         content=result,
         headers={"Content-Disposition": f'attachment; filename="{instance_id}-mcp-server.json"'},
     )
+
+def _caller(sub: str) -> dict:
+    """Fill in email, name and role for *sub* from what this server knows.
+
+    The claims are looked up, never taken from the request: the panel says
+    *who* to call as, the server decides what that identity consists of.
+    Otherwise the dialog could hand a tool a role its owner does not have, and
+    the access rules would be testing a fiction.
+
+    An unknown sub is allowed through bare. That is deliberate and matches the
+    rights dialog, where a rule may be written for someone who has not called
+    yet — "what would a new user see?" is a question worth being able to ask.
+    """
+    for row in identity_registry.known():
+        if row["sub"] == sub:
+            return {"sub": sub, "email": row.get("email", ""),
+                    "name": row.get("name", ""), "role": row.get("role", "")}
+    for row in agent_identity.public_list():
+        if row["sub"] == sub:
+            return {"sub": sub, "email": "", "name": row.get("name", ""),
+                    "role": row.get("role", "")}
+    try:
+        users = load_policy().get("users")
+    except PolicyError:
+        users = None
+    entry = users.get(sub) if isinstance(users, dict) else None
+    if isinstance(entry, dict):
+        return {"sub": sub, "email": str(entry.get("email", "")), "name": "", "role": ""}
+    return {"sub": sub, "email": "", "name": "", "role": ""}
+
+
+# require_admin_auth: this runs the instance's real code with the instance's
+# real credentials. The read token may look at the dashboard; it may not make
+# the server do things on its behalf. require_not_locked for the same reason a
+# locked instance refuses an edit — locking it is the user saying "leave this
+# one alone".
+@router.post("/api/instances/{instance_id}/call", dependencies=[Depends(require_auth), Depends(require_admin_auth)])
+async def call_tool(instance_id: str, body: dict) -> dict:
+    """Call one tool and hand back the raw answer.
+
+    Exists to separate two failures that look identical from a chat window: a
+    broken tool, and a small model that called a working tool wrongly. What
+    comes back here is what the model would have received — including the
+    length, which is the usual culprit.
+    """
+    require_not_locked(instance_id)
+    inst = get_instance_state(instance_id)
+    if not inst:
+        raise HTTPException(404, f"Instance '{instance_id}' not found")
+    if inst.status != MCPStatus.running:
+        raise HTTPException(409, f"Instance '{instance_id}' is not running — start it first")
+
+    tool = str(body.get("tool") or "").strip()
+    if not tool:
+        raise HTTPException(422, "No tool named")
+    arguments = body.get("arguments", {})
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise HTTPException(422, "'arguments' must be an object")
+    as_user = str(body.get("as_user") or "").strip()
+
+    result = await tool_call.call(inst, tool, arguments,
+                                  _caller(as_user) if as_user else None)
+    # One line per test call, in the manager log rather than the instance's:
+    # the argument values may be anybody's data, so only the shape is written.
+    logger.info(f"Test call '{instance_id}.{tool}' "
+                f"({', '.join(sorted(arguments)) or 'no arguments'})"
+                f"{f' as {as_user}' if as_user else ''} → "
+                f"{'error: ' + result['error'] if not result.get('ok') else ('tool error' if result.get('is_error') else 'ok')}"
+                f" in {result.get('duration_ms', 0)} ms")
+    return {"instance": instance_id, "tool": tool, "as_user": as_user, **result}
+
 
 @router.delete("/api/instances/{instance_id}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
 async def delete_instance(instance_id: str) -> dict:

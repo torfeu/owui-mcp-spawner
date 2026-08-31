@@ -931,8 +931,120 @@ button.update-badge { font-family: inherit; cursor: pointer; }
 
 .fn-param-desc { color: var(--text-muted); flex: 1 1 100%; }
 
+/* ── Test call (info dialog) ── */
+.test-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.test-as {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.test-as select { flex: 1 1 auto; max-width: 320px; }
+
+.test-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warning);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+}
+
+.fn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Quiet until wanted: the list is read far more often than it is called from. */
+.fn-test-btn { opacity: .7; }
+.fn-test-btn:hover { opacity: 1; }
+
+.fn-test {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.test-form { display: flex; flex-direction: column; gap: 10px; }
+
+.test-field { display: flex; flex-direction: column; gap: 4px; }
+
+.test-field label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.test-field label code { font-family: var(--mono); color: var(--text); }
+
+.test-field input,
+.test-field select,
+.test-field textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.test-json { font-family: var(--mono); font-size: 12px; resize: vertical; }
+
+.test-field-desc { font-size: 11px; color: var(--text-muted); }
+
+.test-actions { display: flex; align-items: center; gap: 10px; }
+
+.test-status { font-size: 12px; color: var(--text-muted); }
+.test-status-error { color: var(--danger); }
+
+.test-result { display: flex; flex-direction: column; gap: 6px; }
+
+.test-verdict { font-size: 12px; font-weight: 600; }
+.test-verdict-ok    { color: var(--success); }
+.test-verdict-warn  { color: var(--warning); }
+.test-verdict-error { color: var(--danger); }
+
+.test-facts { font-size: 11px; color: var(--text-muted); }
+
+.test-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+/* The answer is what a chat would have received — shown as it is, wrapped, and
+   with a ceiling of its own so a long one cannot push the buttons off screen. */
+.test-output {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.test-output-error { color: var(--danger); }
+
 @media (max-width: 700px) {
   .info-meta { grid-template-columns: 1fr; gap: 2px; }
+  /* "Call as" and its dropdown stack rather than squeezing the label onto two lines. */
+  .test-as { flex-direction: column; align-items: stretch; gap: 4px; }
+  .test-as select { max-width: none; }
   .info-label { padding-top: 6px; }
 }
 

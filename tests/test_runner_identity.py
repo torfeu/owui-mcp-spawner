@@ -20,6 +20,7 @@ from unittest.mock import patch
 from mcp import types
 from mcp.server.lowlevel.server import ServerRequestContext
 
+import app.activity as activity
 import app.policy as policy
 from app import agent_identity
 from app.identity import get_current_identity
@@ -117,6 +118,27 @@ def isolate_agent_store(case):
     os.environ.pop(agent_identity.ENV_IDENTITIES, None)
     agent_identity._file_cache.clear()
     case.addCleanup(agent_identity._file_cache.clear)
+
+
+def isolate_usage_db(case):
+    """Point the usage database at a temp file for one test.
+
+    The two transport tests below run a *real* runner, and a real runner counts
+    every call it serves. Without this they add rows to the live
+    `runtime/usage.db` — on this machine and on the server, where the numbers
+    in the dashboard are the ones somebody actually reads. The handler tests
+    above sidestep it by patching `record_call`; these must not, because the
+    path they exist to prove is the whole one.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    activity.close()
+    patcher = patch.object(activity, "DB_PATH", pathlib.Path(tmp.name) / "usage.db")
+    patcher.start()
+    case.addCleanup(activity.close)
+    case.addCleanup(patcher.stop)
+    activity._pending.clear()
+    case.addCleanup(activity._pending.clear)
 
 
 class HandlerTestCase(unittest.IsolatedAsyncioTestCase):
@@ -554,6 +576,7 @@ class LiveTransportTests(unittest.IsolatedAsyncioTestCase):
         import socket
 
         redirect_registry(self)
+        isolate_usage_db(self)
         isolate_agent_store(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -657,6 +680,7 @@ class AgentTokenTransportTests(unittest.IsolatedAsyncioTestCase):
         import socket
 
         redirect_registry(self)
+        isolate_usage_db(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = pathlib.Path(self.tmp.name)
