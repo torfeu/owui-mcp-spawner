@@ -7,14 +7,47 @@ checks what is *not* counted — a request without a credential, and a valid
 credential that merely lacks the scope for a route.
 """
 import hashlib
+import json
 import os
+import pathlib
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 import app.auth as auth
 import app.lockout as lockout
+import app.settings_store as settings_store
 from app.admin_server import app
+
+
+def isolate_settings_file(case):
+    """Point runtime/settings.json at a temp file for one test.
+
+    `auth.set_agent_token()` does not only set an environment variable — it
+    *persists*, through `save_settings`. A test calling it therefore writes the
+    live settings file of whatever machine the suite runs on: on the server
+    that is the file holding the password hash, the three API tokens and the
+    user-JWT secret. It is restored in a `finally`, so the content survives —
+    but only as long as nothing goes wrong in between, and in the window the
+    live file carries a token that is printed in this source. That is not a
+    thing to leave resting on a `finally`.
+
+    Same shape as `isolate_agent_store` and `isolate_usage_db`: env or module
+    path to a temp file, cache dropped, put back by `addCleanup`. Found the way
+    those two were — by diffing the runtime directory around a suite run, this
+    time on the server, where the file exists and locally it did not.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    target = pathlib.Path(tmp.name) / "settings.json"
+    target.write_text(json.dumps(settings_store.load_settings()))
+    patcher = patch.object(settings_store, "SETTINGS_FILE", target)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    settings_store._cache = None
+    case.addCleanup(lambda: setattr(settings_store, "_cache", None))
 
 
 class LockoutCounterTests(unittest.TestCase):
@@ -85,6 +118,7 @@ class LockoutThroughTheApiTests(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(app)
+        isolate_settings_file(self)
         self.original_hash = auth._password_hash
         auth._password_hash = hashlib.sha256(b"right-password").hexdigest()
         lockout.clear_all()
