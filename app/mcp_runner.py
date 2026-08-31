@@ -4,6 +4,7 @@ Usage: python app/mcp_runner.py --config configs/mcp1.json
 """
 import argparse
 import asyncio
+import difflib
 import hmac
 import inspect
 import json
@@ -174,6 +175,67 @@ def require_mcp_2() -> None:
         sys.exit(1)
 
 
+def _is_argument_error(method, arguments: dict) -> bool:
+    """Did this TypeError come from the *call*, or from inside the tool?
+
+    Asked by binding the arguments against the method's own signature rather
+    than by reading the traceback. Binding is Python's own argument matching:
+    when it succeeds the call cannot have failed on its arguments, so the
+    TypeError came from somewhere deeper and must be passed through untouched —
+    rewriting it would send the reader hunting for a parameter problem that
+    does not exist.
+
+    It also settles the case the plan warned about, and settles it exactly: a
+    tool taking `**kwargs` or dunder parameters legitimately accepts more than
+    its schema lists, and `bind()` knows that, where a check against the schema
+    would refuse a call that works. Nothing here refuses anything in any case —
+    the call has already been made by the time this is asked.
+    """
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        # Builtins and C functions have no introspectable signature. Asked in
+        # its own step: a TypeError raised by `signature()` itself must not be
+        # read as one about the caller's arguments. Unknown is not "argument
+        # error" — leave the original message alone.
+        return False
+    try:
+        signature.bind(**arguments)
+    except TypeError:
+        return True
+    return False
+
+
+def _argument_help(tool_name: str, arguments: dict, schema: Optional[dict]) -> str:
+    """Name the parameter that is wrong, and the one that was probably meant.
+
+    The default message is `Tools.find_tools() got an unexpected keyword
+    argument 'query'` — true, and it does not contain the right name, although
+    the runner has had the schema in its hands the whole time. A small model
+    that gets no usable answer invents a cause; this is the same rule as for
+    tool output, one layer down.
+    """
+    properties = (schema or {}).get("properties") or {}
+    if not properties:
+        return ""
+    known = sorted(properties)
+    parts = []
+    for given in arguments:
+        if given in properties:
+            continue
+        close = difflib.get_close_matches(given, known, n=1, cutoff=0.6)
+        parts.append(f"'{given}' is not a parameter of '{tool_name}'"
+                     + (f" — did you mean '{close[0]}'?" if close else ""))
+    missing = [r for r in (schema or {}).get("required") or [] if r not in arguments]
+    if missing:
+        parts.append("missing required " + ", ".join(f"'{m}'" for m in missing))
+    if not parts:
+        return ""
+    required = set((schema or {}).get("required") or [])
+    listed = ", ".join(f"{k} (required)" if k in required else k for k in known)
+    return f"{'; '.join(parts)}. '{tool_name}' takes: {listed}"
+
+
 def build_server(cfg: MCPConfig, mcp_tool_defs: list[dict], tools_instance):
     """Wire the tool methods up as MCP handlers.
 
@@ -293,6 +355,18 @@ def build_server(cfg: MCPConfig, mcp_tool_defs: list[dict], tools_instance):
                 else:
                     result = await asyncio.to_thread(method, **arguments)
             return answer(with_content_notes(str(result)))
+        except TypeError as e:
+            # A wrong parameter name is a framework question, not one tool's:
+            # every tool reached through this handler gets the same answer.
+            if _is_argument_error(method, arguments):
+                schema = next((t.get("inputSchema") for t in mcp_tool_defs
+                               if t["name"] == name), None)
+                hint = _argument_help(name, arguments, schema)
+                if hint:
+                    logger.error(f"Error calling {name}: {e} — answered with: {hint}")
+                    return answer(with_content_notes(f"Error: {hint}"))
+            logger.error(f"Error calling {name}: {e}")
+            return answer(with_content_notes(f"Error: {e}"))
         except Exception as e:
             logger.error(f"Error calling {name}: {e}")
             # Through the same treatment: when a write fails because the folder

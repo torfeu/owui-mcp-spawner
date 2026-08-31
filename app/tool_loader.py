@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -94,6 +95,28 @@ def load_openwebui_json(path: Path) -> Optional[OpenWebUITool]:
 _CONTENT_VALVES = {"content_dir", "output_dir"}
 
 
+# The other valve the manager can answer better than the user can. A tool that
+# talks back to the spawner (the router, the control tool) ships a default of
+# http://127.0.0.1:7860, and on an installation that runs the manager anywhere
+# else that default produces "All connection attempts failed" — true, and
+# nothing anybody can act on. The manager knows its own address; the runner
+# inherits it.
+_MANAGER_VALVE = "manager_url"
+
+
+def manager_url() -> str:
+    """Where the manager answers, as seen from a runner on the same machine.
+
+    `MCP_RUNNER_HOST` is a *bind* address, and 0.0.0.0 is not something you can
+    connect to — the same substitution the health check's probe URL makes.
+    """
+    host = os.environ.get("MCP_RUNNER_HOST") or "127.0.0.1"
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    port = os.environ.get("MCP_MANAGER_PORT") or "7860"
+    return f"http://{host}:{port}"
+
+
 def is_content_valve(name: str) -> bool:
     return name in _CONTENT_VALVES or name.endswith("_export_dir")
 
@@ -147,6 +170,15 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
                     logger.info(f"Valve '{name}' set to the content folder: {content_dir}")
                 except Exception:
                     pass
+        # Same rule, not a second one: filled from what the manager knows, and
+        # a value the user set themselves always wins.
+        if hasattr(getattr(instance, "valves", None), _MANAGER_VALVE) \
+                and not str(values.get(_MANAGER_VALVE, "")).strip():
+            try:
+                setattr(instance.valves, _MANAGER_VALVE, manager_url())
+                logger.info(f"Valve '{_MANAGER_VALVE}' set to {manager_url()}")
+            except Exception:
+                pass
         return instance
     except Exception as e:
         logger.error(f"Failed to create Tools instance: {e}")
