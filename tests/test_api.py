@@ -54,6 +54,8 @@ EXPECTED_API_ROUTES = {
     ("POST", "/api/instances/{instance_id}/unlock"),
     ("GET", "/api/instances/{instance_id}/export"),
     ("POST", "/api/instances/{instance_id}/call"),
+    ("GET", "/api/backup"),
+    ("POST", "/api/backup/restore"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("GET", "/api/settings/mcp-token"),
@@ -519,6 +521,9 @@ class ReadTokenTests(unittest.TestCase):
     }
     # Hand out a credential verbatim — password only, even though they are GETs.
     ADMIN_ONLY = {
+        # Carries every credential this server holds when asked for secrets —
+        # the read token must not be able to fetch itself.
+        "/api/backup",
         "/api/settings/mcp-token",
         "/api/settings/read-token",
         "/api/settings/agent-token",
@@ -702,6 +707,12 @@ class AgentTokenTests(unittest.TestCase):
         # is the point: a read-only or agent token must not be able to make the
         # server call a tool on its behalf.
         ("POST", "/api/instances/{instance_id}/call"),
+        ("GET", "/api/backup"),
+        # The dangerous one. It takes no id, so nothing upstream turns it into
+        # a harmless 404 — the same shape as DELETE /api/content, which once
+        # emptied the live file storage. Admin-only means the sweep stops at
+        # the door; the payload check behind it is the second lock.
+        ("POST", "/api/backup/restore"),
     }
 
     PASSWORD = "admin-password"

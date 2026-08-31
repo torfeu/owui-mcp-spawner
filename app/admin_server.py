@@ -21,8 +21,8 @@ from .settings_store import atomic_write_text
 from .tool_editor import validate_tool_code
 from .update_check import update_check_loop
 from .venv_manager import python_path
-from .routes import (agent_identities, auth, content, instances, logs, permissions,
-                     settings, system, tools, usage, venvs)
+from .routes import (agent_identities, auth, backup, content, instances, logs,
+                     permissions, settings, system, tools, usage, venvs)
 
 logger = get_manager_logger()
 WATCHDOG_INTERVAL = 10
@@ -276,7 +276,7 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
 for router in (auth.router, instances.router, tools.router, logs.router, venvs.router,
                settings.router, usage.router, permissions.router, content.router,
-               system.router, agent_identities.router):
+               system.router, agent_identities.router, backup.router):
     app.include_router(router)
 
 @app.middleware("http")

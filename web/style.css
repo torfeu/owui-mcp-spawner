@@ -931,6 +931,46 @@ button.update-badge { font-family: inherit; cursor: pointer; }
 
 .fn-param-desc { color: var(--text-muted); flex: 1 1 100%; }
 
+/* ── Backup & Restore ── */
+.backup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.backup-row input[type="file"] {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.backup-result { display: flex; flex-direction: column; gap: 4px; }
+
+.backup-line {
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.backup-line:last-child { border-bottom: none; }
+
+/* Fixed width so the report reads as a table without being one — the labels
+   are the part the eye scans down. */
+.backup-label {
+  flex: 0 0 150px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 700px) {
+  .backup-label { flex-basis: 100%; }
+}
+
 /* ── Test call (info dialog) ── */
 .test-bar {
   display: flex;

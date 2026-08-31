@@ -1,4 +1,4 @@
-import { apiFetch, applyEditMode, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
+import { apiFetch, applyEditMode, downloadBlob, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
 
 // All three token fields get the same controls — one wiring for all of them,
 // so they cannot drift apart.
@@ -52,6 +52,11 @@ document.getElementById("settings-agent-create").addEventListener("click", creat
 document.getElementById("settings-agent-token-copy").addEventListener("click", copyIssuedToken);
 document.getElementById("settings-update-now").addEventListener("click", runUpdateCheck);
 document.getElementById("settings-content-clear").addEventListener("click", clearAllContent);
+document.getElementById("backup-download").addEventListener("click", downloadBackup);
+document.getElementById("backup-check").addEventListener("click", () => runRestore(true));
+document.getElementById("backup-restore").addEventListener("click", () => runRestore(false));
+document.getElementById("backup-secrets").addEventListener("change", markBackupKind);
+markBackupKind();
 
 // Tabs are presentation only: every panel stays in the DOM and keeps its
 // fields, so loading and saving reach all of them regardless of what is shown.
@@ -816,4 +821,99 @@ async function restartManager() {
   } catch (e) {
     showAlert("error", "Restart failed: " + e.message);
   }
+}
+
+
+// ── Backup & Restore ─────────────────────────────────────────────────────────
+
+/** Say what kind of file the next download would be, before it is downloaded.
+ *
+ * A backup with credentials in it is a different object from one without —
+ * one belongs in a password vault, the other may sit in a cloud folder — and
+ * a file whose contents nobody can tell by looking is one that ends up in the
+ * wrong place.
+ */
+function markBackupKind() {
+  const withSecrets = document.getElementById("backup-secrets").checked;
+  const note = document.getElementById("backup-secrets-note");
+  note.className = `settings-status settings-status-${withSecrets ? "warn" : "ok"}`;
+  note.textContent = withSecrets
+    ? "The file will contain the MCP token, the read and agent tokens, the user-JWT secret, the file key and every API key in the instance valves. Treat it like a password vault — it restores a working server, and it opens this one."
+    : "No credentials in the file — safe to keep anywhere. After restoring, every instance that needs an API key has to be given it again, and old download links stay broken.";
+}
+
+async function downloadBackup() {
+  const withSecrets = document.getElementById("backup-secrets").checked;
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").replace(/(\d{8})(\d{6})/, "$1-$2");
+  const name = `mcp-spawner-backup-${stamp}${withSecrets ? "-with-secrets" : ""}.json`;
+  try {
+    await downloadBlob(`/api/backup?secrets=${withSecrets}`, name);
+    showAlert("info", withSecrets ? `${name} — keep it like a password.` : `${name} downloaded.`);
+  } catch (e) {
+    showAlert("error", "Backup failed: " + e.message);
+  }
+}
+
+async function runRestore(dryRun) {
+  const input = document.getElementById("backup-file");
+  const output = document.getElementById("backup-result");
+  const file = input.files?.[0];
+  if (!file) {
+    output.innerHTML = '<div class="settings-status settings-status-warn">Pick a backup file first.</div>';
+    return;
+  }
+  // Confirmed for the real run only: a check writes nothing, so asking there
+  // would train the habit of clicking the dialog away.
+  if (!dryRun && !confirm("Restore from this backup?\n\nNothing existing is overwritten — instances, settings and keys that are already here stay as they are.")) return;
+
+  output.innerHTML = '<div class="settings-status">Reading…</div>';
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (e) {
+    output.innerHTML = `<div class="settings-status settings-status-warn">Not readable as JSON: ${esc(e.message)}</div>`;
+    return;
+  }
+  try {
+    const report = await apiFetch("/api/backup/restore", {
+      method: "POST",
+      body: JSON.stringify({ ...payload, dry_run: dryRun }),
+    });
+    output.innerHTML = renderRestoreReport(report);
+    if (!dryRun) loadSettingsData();
+  } catch (e) {
+    output.innerHTML = `<div class="settings-status settings-status-warn">${esc(e.message)}</div>`;
+  }
+}
+
+function renderRestoreReport(report) {
+  const lines = [];
+  const list = (label, items, render = String) =>
+    items.length ? lines.push(`<div class="backup-line"><span class="backup-label">${label}</span>${esc(items.map(render).join(", "))}</div>`) : null;
+
+  list("Instances added", report.instances_restored, r =>
+    r.credentials_missing ? `${r.id} (no ${r.credentials_missing.join(", ")})` : r.id);
+  list("Already here, untouched", report.instances_skipped, r => r.id);
+  list("Refused", report.instances_failed, r => `${r.id}: ${r.reason}`);
+  list("Port taken, moved", report.ports_reassigned, r => `${r.id}: ${r.was} → ${r.now}`);
+  list("Settings added", report.settings_restored);
+  list("Settings kept", report.settings_skipped);
+  list("Agents added", report.agents_restored);
+  list("Agents kept", report.agents_skipped);
+  list("Rules added for", report.policy_users_restored);
+  list("Rules kept for", report.policy_users_skipped);
+  if (report.content_key) lines.push(`<div class="backup-line"><span class="backup-label">File key</span>${esc(report.content_key)}</div>`);
+
+  if (!lines.length) lines.push('<div class="backup-line">Nothing to do — everything in this backup is already here.</div>');
+
+  const head = report.dry_run
+    ? '<div class="settings-status">Nothing was written. This is what a restore would do:</div>'
+    : '<div class="settings-status settings-status-ok">Restored.</div>';
+  const tail = (!report.dry_run && report.instances_restored.length)
+    ? '<p class="modal-hint">Restored instances are not installed or started yet — their venv is built the normal way from the dashboard.</p>'
+    : "";
+  const warn = (!report.contains_secrets && report.instances_restored.length)
+    ? '<p class="modal-hint">This backup carried no credentials, so any instance that needs an API key has to be given it in <em>Edit → Config</em> before it will run.</p>'
+    : "";
+  return head + lines.join("") + tail + warn;
 }

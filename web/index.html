@@ -658,6 +658,25 @@
         </div>
         <div class="update-check-result" id="settings-update-result"></div>
       </div>
+      <div class="settings-section">
+        <h3 class="settings-section-title">Backup &amp; Restore</h3>
+        <p class="modal-hint">Everything worth restoring in one file: the instance configurations, <strong>their tool code</strong>, the server settings, the access rules and the agent roster. Not included — the venvs (rebuilt through the normal install path), the stored files under <code>content/</code>, the identity roster and the usage numbers.</p>
+        <div class="backup-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="backup-secrets" />
+            Include credentials
+          </label>
+          <button type="button" class="btn btn-secondary btn-sm" id="backup-download">Download backup</button>
+        </div>
+        <div class="settings-status" id="backup-secrets-note"></div>
+        <p class="modal-hint">Restoring <strong>never overwrites</strong>: an instance whose id already exists is skipped and named, a setting already set stays, and the file key is only written where there is none. Check first shows what would happen without changing anything.</p>
+        <div class="backup-row">
+          <input type="file" id="backup-file" accept="application/json,.json" />
+          <button type="button" class="btn btn-secondary btn-sm" id="backup-check">Check</button>
+          <button type="button" class="btn btn-danger btn-sm" id="backup-restore">Restore</button>
+        </div>
+        <div class="backup-result" id="backup-result"></div>
+      </div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-primary" id="settings-save">Save Settings</button>
