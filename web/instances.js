@@ -83,6 +83,12 @@ function markSortedHeader() {
 
 function sortKey(inst, key) {
   if (key === "port") return inst.port ?? -1;
+  // Not a field of the row: memory is measured by the system monitor and only
+  // joined in at render time. Unmeasured sorts as -1 — a stopped instance and
+  // a manager without psutil both show a dash, and a dash is not a zero — so
+  // the dashes end up at the opposite end from the heaviest instance rather
+  // than mixed in among the small ones.
+  if (key === "rss") return instanceStat(inst.id)?.rss ?? -1;
   if (key === "status") {
     const rank = STATUS_ORDER.indexOf(inst.status);
     return rank === -1 ? STATUS_ORDER.length : rank;   // unknown status last
@@ -93,9 +99,14 @@ function sortKey(inst, key) {
 function sortInstances(rows) {
   markSortedHeader();
   if (!sort.key) return rows;
-  // A guest never sees port, venv or URL — a sort remembered from an admin
-  // session must not silently reorder by a field that is not there.
-  if (!rows.some(inst => inst[sort.key] !== undefined)) return rows;
+  // A guest never sees port, venv, URL or RAM — a sort remembered from an
+  // admin session must not silently reorder by a column that is not there.
+  // RAM has to be asked about differently: it is never a field of the row, so
+  // the plain check would refuse to sort by it for everyone.
+  const present = sort.key === "rss"
+    ? rows.some(inst => instanceStat(inst.id))
+    : rows.some(inst => inst[sort.key] !== undefined);
+  if (!present) return rows;
   return [...rows].sort((a, b) => {
     const x = sortKey(a, sort.key), y = sortKey(b, sort.key);
     let cmp;
