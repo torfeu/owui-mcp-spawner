@@ -904,11 +904,20 @@ function renderRestoreReport(report) {
   list("Rules kept for", report.policy_users_skipped);
   if (report.content_key) lines.push(`<div class="backup-line"><span class="backup-label">File key</span>${esc(report.content_key)}</div>`);
 
-  if (!lines.length) lines.push('<div class="backup-line">Nothing to do — everything in this backup is already here.</div>');
+  if (!lines.length) lines.push('<div class="backup-line">Nothing in this backup, and nothing to do.</div>');
 
+  // "Restored." over a report whose every line says *kept* and *untouched* is
+  // the dialog contradicting itself. A run that wrote nothing has to say so —
+  // that outcome is the normal one when a backup is replayed onto the server
+  // it came from, and it is the proof that a mistaken click costs nothing.
+  const wrote = report.instances_restored.length || report.settings_restored.length
+    || report.agents_restored.length || report.policy_users_restored.length
+    || report.content_key === "restored";
   const head = report.dry_run
     ? '<div class="settings-status">Nothing was written. This is what a restore would do:</div>'
-    : '<div class="settings-status settings-status-ok">Restored.</div>';
+    : wrote
+      ? '<div class="settings-status settings-status-ok">Restored.</div>'
+      : '<div class="settings-status settings-status-ok">Nothing to restore — everything in this backup is already on this server, and nothing was changed.</div>';
   const tail = (!report.dry_run && report.instances_restored.length)
     ? '<p class="modal-hint">Restored instances are not installed or started yet — their venv is built the normal way from the dashboard.</p>'
     : "";
