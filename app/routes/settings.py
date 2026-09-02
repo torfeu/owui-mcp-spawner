@@ -3,6 +3,7 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException
 from .. import category_endpoint, health, shared_proxy
 from ..api_helpers import _rebind_running_instances, _restart_after_delay, require_token_edit, str_field
+from ..config_store import config_exists
 from ..auth import (agent_token, auth_enabled, edit_mode, edit_mode_locked, mcp_bearer_token,
                     read_token, require_admin_auth, require_auth, token_edit_enabled,
                     user_jwt_secret, user_trust_headers)
@@ -43,6 +44,9 @@ async def get_settings() -> dict:
         # Off by default: it makes localhost-bound instances reachable from
         # outside, which is a door a person opens, not an upgrade.
         "instance_endpoints_enabled": shared_proxy.manager_port_enabled(),
+        # The word between /mcp/ and the category name. Configurable because it
+        # ends up in every category URL anybody registers.
+        "category_url_segment": category_endpoint.segment(),
         "usage_retention_days": retention_days(),
         # The health check. Auto-restart is off by default: restarting a tool
         # nobody asked to restart is a decision, not a convenience.
@@ -259,6 +263,32 @@ async def update_settings(body: dict) -> dict:
         if url != content_base_url():
             store_changes["content_base_url"] = url or None
 
+    segment_changed = False
+    # The category URL segment. Checked here rather than in the endpoint: a
+    # segment an instance already answers to would hide that instance behind
+    # the category endpoints, and the endpoint reads this on every request, so
+    # a bad value would take effect immediately and everywhere.
+    if "category_url_segment" in body:
+        raw = body["category_url_segment"]
+        if not isinstance(raw, str):
+            raise HTTPException(400, "category_url_segment must be text")
+        wanted = raw.strip() or category_endpoint.DEFAULT_SEGMENT
+        if not category_endpoint.SEGMENT_PATTERN.fullmatch(wanted):
+            raise HTTPException(
+                400,
+                "category_url_segment must be one path element of letters, digits, "
+                "'-' or '_' (at most 32) — it sits in a URL",
+            )
+        if wanted != category_endpoint.segment():
+            if config_exists(wanted):
+                raise HTTPException(
+                    409,
+                    f"'{wanted}' is the ID of an existing instance — that instance would "
+                    f"disappear behind /mcp/{wanted}/. Choose a different word.",
+                )
+            store_changes["category_url_segment"] = wanted
+            segment_changed = True
+
     for key, current in (("health_check_enabled", health.enabled()),
                          ("health_autorestart", health.autorestart()),
                          ("category_endpoints_enabled", category_endpoint.enabled()),
@@ -349,6 +379,11 @@ async def update_settings(body: dict) -> dict:
         # switch. The shared-port listener has its own client and is untouched.
         if store_changes.get("instance_endpoints_enabled") is False:
             await shared_proxy.stop_dispatch_client()
+        # A moved segment leaves every open session on an address that is no
+        # longer routed. Taking them down is the honest answer — the client
+        # reconnects on the new URL, instead of holding one that answers 404.
+        if segment_changed:
+            await category_endpoint.stop_all()
         # Read fresh on every call, in both the manager and the runners — no
         # restart, unlike the identity settings above.
 

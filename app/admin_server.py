@@ -311,20 +311,21 @@ async def asgi(scope, receive, send):
     means MCP traffic never enters that chain at all.
 
     Two paths are taken here, each only while its own switch is on: a whole
-    category under `/mcp/category/<name>`, and a single instance under
+    category under `/mcp/<segment>/<name>` (`category` unless configured
+    otherwise), and a single instance under
     `/mcp/<id>` — the latter the same forwarding the shared-port listener does,
     on the port that is already open. Switched off, a path is not intercepted
     at all, so it ends in the ordinary 404 of a URL this manager does not serve
     rather than in a 403 that announces a feature is there and closed.
 
     Order matters: the category prefix is longer and is checked first, so a
-    category endpoint can never be shadowed by an instance. `category` is a
-    reserved instance ID, so the collision cannot be created from the other
-    side either.
+    category endpoint can never be shadowed by an instance. Whatever the
+    segment is set to is a reserved instance ID, so the collision cannot be
+    created from the other side either.
     """
     if scope["type"] == "http":
         path = scope.get("path", "")
-        if path.startswith(category_endpoint.PREFIX) and category_endpoint.enabled():
+        if path.startswith(category_endpoint.prefix()) and category_endpoint.enabled():
             await category_endpoint.handle(scope, receive, send)
             return
         if path.startswith(shared_proxy.PREFIX) and shared_proxy.manager_port_enabled():

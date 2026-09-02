@@ -564,6 +564,8 @@
             <input type="checkbox" id="settings-category-endpoints" />
             Serve categories as MCP endpoints
           </label>
+          <label title="The word between /mcp/ and the category name. Changing it changes every category URL, so anything already registered elsewhere has to be updated.">URL segment</label>
+          <input type="text" id="settings-category-segment" maxlength="32" placeholder="category" />
         </div>
         <div class="cat-list hidden" id="settings-category-list"></div>
       </div>

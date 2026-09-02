@@ -224,6 +224,7 @@ async function loadSettingsData() {
 
     document.getElementById("settings-category-endpoints").checked = data.category_endpoints_enabled === true;
     document.getElementById("settings-instance-endpoints").checked = data.instance_endpoints_enabled === true;
+    document.getElementById("settings-category-segment").value = data.category_url_segment || "category";
     document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
     document.getElementById("settings-health-autorestart").checked = !!data.health_autorestart;
     document.getElementById("settings-health-failures").value = data.health_failures_before_restart ?? 3;
@@ -755,6 +756,7 @@ async function saveSettings() {
   }
   body.category_endpoints_enabled = document.getElementById("settings-category-endpoints").checked;
   body.instance_endpoints_enabled = document.getElementById("settings-instance-endpoints").checked;
+  body.category_url_segment = document.getElementById("settings-category-segment").value.trim() || "category";
   body.health_check_enabled = document.getElementById("settings-health-enabled").checked;
   body.health_autorestart = document.getElementById("settings-health-autorestart").checked;
 

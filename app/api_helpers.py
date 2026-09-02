@@ -36,9 +36,7 @@ LOG_TAIL_LINES = 500
 LOG_TAIL_MAX_BYTES = 256 * 1024
 # configs/example.json is shipped documentation and skipped by load_all_configs;
 # an instance with this ID would overwrite it and never show up in the list.
-# "category" would sit under /mcp/category on the manager port, where the
-# category endpoints live — an instance called that could never be reached.
-RESERVED_IDS = {"example", "category"}
+RESERVED_IDS = {"example"}
 _version_cache: dict[str, tuple[float, str]] = {}
 _specs_cache: dict[str, tuple[float, dict]] = {}
 _valves_cache: dict[str, tuple[float, set | None]] = {}
@@ -61,9 +59,22 @@ def str_field(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def reserved_ids() -> set[str]:
+    """The ids no instance may take — the fixed one plus the category segment.
+
+    An instance named like the segment would sit under `/mcp/<segment>/…`,
+    where the category endpoints live, and could never be reached. The segment
+    is configurable, so the reservation has to follow it rather than being
+    spelled out once; the route that changes it refuses a word an instance
+    already holds.
+    """
+    from .category_endpoint import segment
+    return RESERVED_IDS | {segment()}
+
+
 def require_available_id(tool_id: str) -> None:
     """Raises 400/409 when *tool_id* is reserved or already taken."""
-    if tool_id in RESERVED_IDS:
+    if tool_id in reserved_ids():
         raise HTTPException(400, f"ID '{tool_id}' is reserved — choose a different ID")
     if config_exists(tool_id):
         raise HTTPException(

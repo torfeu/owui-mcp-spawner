@@ -149,7 +149,7 @@ class CategoryListingTests(unittest.TestCase):
         fake_states(self, [instance("x", "Umwelt & Recht")])
         path = ce.endpoint_path("Umwelt & Recht")
         self.assertEqual("/mcp/category/Umwelt%20%26%20Recht", path)
-        self.assertEqual("Umwelt & Recht", ce.resolve(path[len(ce.PREFIX):]))
+        self.assertEqual("Umwelt & Recht", ce.resolve(path[len(ce.prefix()):]))
 
 
 class ForwardedHeaderTests(unittest.TestCase):
@@ -655,6 +655,162 @@ class SwitchedOffTests(unittest.TestCase):
 
 
 
+class UrlSegmentTests(unittest.TestCase):
+    """The word between `/mcp/` and the category name, and what it drags along.
+
+    It is configurable because it ends up in every category URL anybody
+    registers — and precisely for that reason it cannot be set freely: an
+    instance whose id is that word would vanish behind the category endpoints,
+    so the reservation of instance ids has to follow the setting rather than
+    naming `category` once and for all.
+    """
+
+    def test_a_manager_that_was_never_told_uses_category(self):
+        with patch.object(ce, "load_settings", dict):
+            self.assertEqual("category", ce.segment())
+            self.assertEqual("/mcp/category/", ce.prefix())
+
+    def test_the_setting_moves_every_url(self):
+        with patch.object(ce, "load_settings", lambda: {"category_url_segment": "gruppe"}):
+            self.assertEqual("/mcp/gruppe/", ce.prefix())
+            self.assertEqual("/mcp/gruppe/Recht", ce.endpoint_path("Recht"))
+
+    def test_a_stored_value_that_could_not_have_been_set_is_ignored(self):
+        # The route refuses these, but a hand-edited settings file must not be
+        # able to break every URL at once — a slash would swallow the category
+        # name, an empty string would make the prefix `/mcp//`.
+        for broken in ("has/slash", "", "   ", "a" * 33, "mit umlaut ä", 7, None, True):
+            with self.subTest(value=broken):
+                with patch.object(ce, "load_settings", lambda: {"category_url_segment": broken}):
+                    self.assertEqual("/mcp/category/", ce.prefix())
+
+    def test_the_reserved_instance_id_follows_the_setting(self):
+        from fastapi import HTTPException
+        from app.api_helpers import require_available_id, reserved_ids
+
+        with patch.object(ce, "load_settings", lambda: {"category_url_segment": "gruppe"}):
+            self.assertIn("gruppe", reserved_ids())
+            with self.assertRaises(HTTPException) as raised:
+                require_available_id("gruppe")
+            self.assertEqual(400, raised.exception.status_code)
+            # And the old word is free again — nothing sits under it any more.
+            self.assertNotIn("category", reserved_ids())
+
+    def test_the_dispatcher_follows_the_setting(self):
+        import app.admin_server as admin_server
+
+        went = []
+
+        async def to_category(scope, receive, send):
+            went.append(("category", scope["path"]))
+
+        async def to_app(scope, receive, send):
+            went.append(("app", scope["path"]))
+
+        with patch.object(ce, "load_settings",
+                          lambda: {"category_endpoints_enabled": True,
+                                   "category_url_segment": "gruppe"}), \
+             patch.object(admin_server.shared_proxy, "manager_port_enabled", lambda: False), \
+             patch.object(admin_server.category_endpoint, "handle", to_category), \
+             patch.object(admin_server, "app", to_app):
+            run(admin_server.asgi({"type": "http", "path": "/mcp/gruppe/Recht"}, None, None))
+            # The old address is nobody's now: not a redirect, not a 403 — the
+            # ordinary 404 of a URL this manager does not serve.
+            run(admin_server.asgi({"type": "http", "path": "/mcp/category/Recht"}, None, None))
+        self.assertEqual([("category", "/mcp/gruppe/Recht"), ("app", "/mcp/category/Recht")], went)
+
+    def test_the_bare_prefix_names_the_configured_segment(self):
+        fake_states(self, [instance("gesetze", "Recht")])
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        with patch.object(ce, "load_settings", lambda: {"category_url_segment": "gruppe"}):
+            run(ce.handle({"type": "http", "path": "/mcp/gruppe/", "method": "POST",
+                           "headers": []}, None, send))
+        body = b"".join(m.get("body", b"") for m in sent[1:]).decode()
+        self.assertEqual(404, sent[0]["status"])
+        self.assertIn("/mcp/gruppe/<category-name>", body)
+
+
+class UrlSegmentRouteTests(unittest.TestCase):
+    """Setting it: what is refused, and what happens to open sessions."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        import app.auth as auth
+
+        fake_states(self, [instance("gesetze", "Recht")])
+        self.client = TestClient(app_under_test())
+        original = auth._password_hash
+        auth._password_hash = None
+        self.addCleanup(lambda: setattr(auth, "_password_hash", original))
+        self.written = {}
+        patcher = patch("app.settings_store.save_settings",
+                        lambda changes: self.written.update(changes))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_route_reports_the_segment(self):
+        switch(self, False)
+        self.assertEqual("category", self.client.get("/api/settings").json()["category_url_segment"])
+
+    def test_a_good_word_is_stored(self):
+        response = self.client.put("/api/settings", json={"category_url_segment": "gruppe"})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("gruppe", self.written.get("category_url_segment"))
+
+    def test_what_cannot_be_a_path_element_is_refused(self):
+        for bad in ("has/slash", "with space", "ä", "a" * 33, "?query"):
+            with self.subTest(value=bad):
+                response = self.client.put("/api/settings", json={"category_url_segment": bad})
+                self.assertEqual(400, response.status_code, bad)
+
+    def test_a_word_an_instance_already_answers_to_is_refused(self):
+        # The whole reason this is validated at all: `gesetze` would still be
+        # in the instance list and still be running, and be reachable nowhere.
+        with patch("app.routes.settings.config_exists", lambda name: name == "gesetze"):
+            response = self.client.put("/api/settings", json={"category_url_segment": "gesetze"})
+        self.assertEqual(409, response.status_code)
+        self.assertIn("gesetze", response.json()["detail"])
+        self.assertEqual({}, self.written)
+
+    def test_an_empty_value_means_back_to_the_default(self):
+        with patch.object(ce, "load_settings", lambda: {"category_url_segment": "gruppe"}):
+            response = self.client.put("/api/settings", json={"category_url_segment": "  "})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("category", self.written.get("category_url_segment"))
+
+    def test_a_non_string_is_refused(self):
+        self.assertEqual(400, self.client.put("/api/settings",
+                                              json={"category_url_segment": 7}).status_code)
+
+    def test_moving_the_segment_takes_the_open_sessions_down(self):
+        # They hang on an address that is no longer routed; leaving them would
+        # mean a client holding a session its URL no longer reaches.
+        stopped = []
+
+        async def stop_all():
+            stopped.append(True)
+
+        with patch.object(ce, "stop_all", stop_all):
+            self.client.put("/api/settings", json={"category_url_segment": "gruppe"})
+        self.assertEqual([True], stopped)
+
+    def test_setting_it_to_what_it_already_is_changes_nothing(self):
+        stopped = []
+
+        async def stop_all():
+            stopped.append(True)
+
+        with patch.object(ce, "stop_all", stop_all):
+            response = self.client.put("/api/settings", json={"category_url_segment": "category"})
+        self.assertEqual(200, response.status_code)
+        self.assertNotIn("category_url_segment", self.written)
+        self.assertEqual([], stopped)
+
+
 def app_under_test():
     from app.admin_server import app
     return app
@@ -781,12 +937,12 @@ class CategoryTransportTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: asyncio.get_event_loop().create_task(ce.stop_all()))
 
     @asynccontextmanager
-    async def _client(self, token=None):
+    async def _client(self, token=None, url=None):
         import httpx2
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        url = f"http://127.0.0.1:{self.port}{ce.endpoint_path(self.CATEGORY)}"
+        url = url or f"http://127.0.0.1:{self.port}{ce.endpoint_path(self.CATEGORY)}"
         headers = {"Authorization": f"Bearer {token or self.TOKEN}"}
         async with httpx2.AsyncClient(headers=headers, timeout=20) as http_client:
             async with streamable_http_client(url, http_client=http_client) as (read, write):
@@ -824,6 +980,20 @@ class CategoryTransportTests(unittest.IsolatedAsyncioTestCase):
             answer = (await session.call_tool("beta.hello", {})).content[0].text
         self.assertEqual(["alpha.hello"], listed)
         self.assertIn("did not answer", answer)
+
+    async def test_a_moved_segment_carries_a_whole_real_session(self):
+        # The segment is read on every request, in two places that have to
+        # agree: the URL the client is handed, and the path the handler cuts
+        # the category name out of. Faked settings prove they read the same
+        # value; only a real session proves they agree about where it ends.
+        with patch.object(ce, "load_settings", lambda: {"category_url_segment": "gruppe"}):
+            url = f"http://127.0.0.1:{self.port}{ce.endpoint_path(self.CATEGORY)}"
+            self.assertIn("/mcp/gruppe/", url)
+            async with self._client(url=url) as session:
+                listed = sorted(t.name for t in (await session.list_tools()).tools)
+                answer = (await session.call_tool("alpha.hello", {"who": "Torsten"})).content[0].text
+        self.assertEqual(["alpha.hello", "beta.hello"], listed)
+        self.assertEqual("Alpha greets Torsten", answer)
 
     async def test_a_wrong_token_never_reaches_an_instance(self):
         import httpx2

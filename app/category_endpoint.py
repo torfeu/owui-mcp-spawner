@@ -31,6 +31,7 @@ because the runner shares one `tools_instance` across all sessions anyway: an
 MCP session upstream carries no state worth keeping.
 """
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import quote, unquote
@@ -46,11 +47,35 @@ from .settings_store import load_settings
 logger = get_manager_logger()
 
 # The path segment that separates a category endpoint from an instance
-# endpoint. `/mcp/<instance-id>` is what the shared-port proxy serves today and
-# what will move onto this port; `category` is reserved in front of it, so an
-# instance whose id is literally "category" would be shadowed. Instance ids are
-# free-form apart from that one word.
-PREFIX = "/mcp/category/"
+# endpoint. `/mcp/<instance-id>` is what the shared-port proxy and the manager
+# port serve; the segment sits in front of it, so an instance whose id is
+# literally that word would be shadowed — which is why `require_available_id`
+# reserves whatever this is set to. Instance ids are free-form apart from it.
+DEFAULT_SEGMENT = "category"
+
+# What a segment may look like: one path element, no slash, nothing that needs
+# escaping in a URL. Deliberately narrower than an instance id — this word ends
+# up in every category URL anybody registers.
+SEGMENT_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
+def segment() -> str:
+    """The configured segment, or `category`.
+
+    Read on every request like the on/off switch next to it: changing it takes
+    effect at once. A stored value that does not match `SEGMENT_PATTERN` is
+    ignored rather than obeyed — the route below refuses to write one, but a
+    hand-edited settings file must not be able to break every URL at once.
+    """
+    raw = load_settings().get("category_url_segment")
+    if isinstance(raw, str) and SEGMENT_PATTERN.fullmatch(raw.strip()):
+        return raw.strip()
+    return DEFAULT_SEGMENT
+
+
+def prefix() -> str:
+    """`/mcp/<segment>/` — what the dispatcher matches and every URL starts with."""
+    return "/mcp/" + segment() + "/"
 
 # `instance-id` + this + `tool-name`. A dot, decided on 2026-08-31 and measured
 # on all three layers it has to survive: the MCP protocol lists and calls such
@@ -142,7 +167,7 @@ def members(category: str, running_only: bool = True) -> list:
 
 
 def endpoint_path(category: str) -> str:
-    return PREFIX + quote(category, safe="")
+    return prefix() + quote(category, safe="")
 
 
 # ── talking to the instances ─────────────────────────────────────────────────
@@ -414,7 +439,7 @@ def _authorised(scope) -> bool:
 
 
 async def handle(scope, receive, send) -> None:
-    """Serve `/mcp/category/<name>` — the ASGI side of this module.
+    """Serve `/mcp/<segment>/<name>` — the ASGI side of this module.
 
     The on/off switch is checked by the dispatcher in `admin_server.asgi`, not
     here: switched off, the path is not intercepted at all and falls through to
@@ -423,20 +448,21 @@ async def handle(scope, receive, send) -> None:
     merely closed, which is a different sentence than "there is nothing here".
     """
     path = scope.get("path", "")
-    segment = path[len(PREFIX):].split("/", 1)[0]
-    if not segment:
-        await _send_error(send, 404, "Not Found — use /mcp/category/<category-name>")
+    here = prefix()
+    wanted = path[len(here):].split("/", 1)[0]
+    if not wanted:
+        await _send_error(send, 404, f"Not Found — use {here}<category-name>")
         return
 
     if not _authorised(scope):
         await _send_error(send, 401, "Unauthorized")
         return
 
-    category = resolve(segment)
+    category = resolve(wanted)
     if category is None:
         known = ", ".join(categories()) or "none"
         await _send_error(send, 404,
-                          f"Unknown category '{unquote(segment)}'. Categories: {known}")
+                          f"Unknown category '{unquote(wanted)}'. Categories: {known}")
         return
 
     session_manager = await _session_manager(category)
