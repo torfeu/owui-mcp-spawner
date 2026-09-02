@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the OWUI MCP Spawner test suite once a week
+
+[Timer]
+# Sunday, 04:00, plus up to an hour of jitter so it never lands on the same
+# minute as anything else on this machine.
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=1h
+# A machine that was off on Sunday runs it on the next boot instead of
+# skipping the week.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

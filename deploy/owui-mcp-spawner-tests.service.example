@@ -1,0 +1,23 @@
+[Unit]
+Description=OWUI MCP Spawner — weekly test suite
+# Nothing depends on this and nothing depends on it having run: it reports,
+# it does not gate. It must never be able to take the manager down with it.
+After=network.target
+
+[Service]
+Type=oneshot
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/owui-mcp-spawner
+ExecStart=/home/YOUR_USER/owui-mcp-spawner/deploy/run-suite.sh
+
+# The suite takes about ten seconds. A run that is still going after five
+# minutes is hung, and a hung run every week is worse than a missing one.
+TimeoutStartSec=300
+
+# No EnvironmentFile: the suite must pass without the server's secrets, and a
+# run with them would hide a test that quietly depends on the live install.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
