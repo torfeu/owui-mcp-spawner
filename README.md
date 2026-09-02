@@ -226,7 +226,7 @@ Same behaviour, same headers, same streaming — one open port fewer. **Off by d
 
 **Two ways in, two decisions.** Under **Settings → System → Instance Endpoints** each is a checkbox of its own: on the manager port, on a port of its own, on both, or on neither. The category endpoints below have exactly the same pair — and if both sections name the *same* port number, one listener serves both paths on it. A port is refused when it is the manager's own or the internal port of an instance, and the instance whose port it is gets named in the refusal.
 
-Listeners bind what the manager binds. (Before v0.2.3 they fell back to `MCP_RUNNER_HOST`, which is about where *instances* bind — with it unset, a configured port came up on loopback and refused every connection from outside while the UI reported it active.)
+Listeners bind what the manager binds — `MCP_MANAGER_HOST`, which `app/manager.py` sets from `--host`, with `MCP_RUNNER_HOST` as a fallback. A manager started by hand with `uvicorn` sets neither, and its listeners bind loopback.
 
 `category` cannot be used as an instance ID, because `/mcp/category/<name>` belongs to the category endpoints below.
 

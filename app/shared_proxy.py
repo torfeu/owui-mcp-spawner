@@ -99,11 +99,12 @@ def proxy_running() -> bool:
 def bind_host() -> str:
     """Where a listener of ours binds.
 
-    The manager's own host first: a listener that is meant to be the public way
-    in must not end up on loopback while the manager itself answers the LAN —
-    which is exactly what happened while this read `MCP_RUNNER_HOST` alone, a
-    variable that is about where *instances* bind. It stays as a fallback for
-    installations that set it deliberately.
+    The manager's own host first. `manager.py` sets both variables to `--host`,
+    so on a normally started manager they agree; the separate name exists
+    because a listener meant to be the public way in should not hang on
+    `MCP_RUNNER_HOST`, which is about where *instances* bind. Loopback is the
+    last resort — and what a manager started by hand with uvicorn gets, since
+    that sets neither.
     """
     return (os.environ.get("MCP_MANAGER_HOST")
             or os.environ.get("MCP_RUNNER_HOST")

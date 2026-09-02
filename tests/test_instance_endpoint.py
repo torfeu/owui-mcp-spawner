@@ -563,7 +563,7 @@ class PortAppTests(unittest.TestCase):
 
 
 class BindHostTests(unittest.TestCase):
-    """Where a listener binds — the trap that made a configured port dead."""
+    """Where a listener binds, and in which order the two variables count."""
 
     def setUp(self):
         self.original = {k: os.environ.get(k) for k in ("MCP_MANAGER_HOST", "MCP_RUNNER_HOST")}
@@ -578,9 +578,10 @@ class BindHostTests(unittest.TestCase):
                 os.environ[key] = value
 
     def test_the_manager_host_wins(self):
-        # The listener is meant to be the public way in. Binding it to
-        # loopback while the manager answers the network is the bug this
-        # exists to prevent: the UI said "active" and nothing could connect.
+        # `manager.py` sets both to `--host`, so they normally agree. The
+        # order matters for the case where they do not: the listener is the
+        # public way in, and must not follow a variable about where instances
+        # bind.
         os.environ["MCP_MANAGER_HOST"] = "0.0.0.0"
         os.environ["MCP_RUNNER_HOST"] = "127.0.0.1"
         self.assertEqual("0.0.0.0", sp.bind_host())

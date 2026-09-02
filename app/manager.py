@@ -108,10 +108,12 @@ def main() -> None:
           f"  [auth: {auth_label}, edit: {edit_label}, mcp-auth: {mcp_label},"
           f" user-identity: {identity_label}]\n")
 
-    # What the MCP port listeners bind to. Without this they fell back to a
-    # variable about *instance* binding and ended up on loopback while the
-    # manager itself answered the network — a port that looked active in the
-    # UI and refused every connection from outside.
+    # What the MCP port listeners bind to. Spelled separately from
+    # MCP_RUNNER_HOST above, which they read as a fallback: that one is about
+    # where *instances* bind, and a listener meant to be the public way in
+    # should not depend on a variable that reads as somebody else's business.
+    # Same value here — the difference only shows for a manager started by
+    # hand with uvicorn, which sets neither and lands on loopback.
     os.environ["MCP_MANAGER_HOST"] = args.host
 
     uvicorn.run(
