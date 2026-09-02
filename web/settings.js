@@ -1,3 +1,20 @@
+function fillPortRow({ checkbox, input, status, port, running, path, off }) {
+  const on = port != null;
+  document.getElementById(checkbox).checked = on;
+  const field = document.getElementById(input);
+  field.value = on ? port : "";
+  field.disabled = !on;
+  const line = document.getElementById(status);
+  if (!line) return;
+  line.textContent = on
+    ? (running
+        ? `Port ${port} active — reachable on :${port}${path}`
+        : `Port ${port} configured but not listening — check the port and the log`)
+    : off;
+  line.className = "settings-status " +
+    (on ? (running ? "settings-status-ok" : "settings-status-warn") : "settings-status-warn");
+}
+
 import { renderCategorySettingsList } from "./categories.js";
 import { apiFetch, applyEditMode, copyText, downloadBlob, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
 
@@ -32,6 +49,10 @@ for (const kind of TOKEN_FIELDS) {
 
 document.getElementById("settings-shared-enable").addEventListener("change", e => {
   document.getElementById("settings-shared-port").disabled = !e.target.checked;
+});
+
+document.getElementById("settings-category-enable").addEventListener("change", e => {
+  document.getElementById("settings-category-port").disabled = !e.target.checked;
 });
 
 // The user-JWT secret has no reveal and no generator, unlike the three tokens
@@ -196,19 +217,20 @@ async function loadSettingsData() {
     document.getElementById("settings-identity-locked").classList.toggle("hidden", !identityLocked);
 
     // Shared MCP port
-    const sharedOn = data.shared_port != null;
-    document.getElementById("settings-shared-enable").checked = sharedOn;
-    const sharedPortInp = document.getElementById("settings-shared-port");
-    sharedPortInp.value = sharedOn ? data.shared_port : "";
-    sharedPortInp.disabled = !sharedOn;
-    const sharedStatus = document.getElementById("settings-shared-status");
-    sharedStatus.textContent = sharedOn
-      ? (data.shared_proxy_running
-          ? `Shared port active — all MCPs reachable on :${data.shared_port}/mcp/<id>`
-          : `Shared port ${data.shared_port} configured but not running — check the port and restart`)
-      : "Disabled — each MCP is exposed on its own port";
-    sharedStatus.className = "settings-status " +
-      (sharedOn ? (data.shared_proxy_running ? "settings-status-ok" : "settings-status-warn") : "settings-status-warn");
+    // Both port rows behave the same, so they are filled by the same code.
+    fillPortRow({
+      checkbox: "settings-shared-enable", input: "settings-shared-port",
+      status: "settings-shared-status", port: data.shared_port,
+      running: data.shared_proxy_running, path: "/mcp/<id>",
+      off: "No port of its own — each instance is exposed on its own port",
+    });
+    fillPortRow({
+      checkbox: "settings-category-enable", input: "settings-category-port",
+      status: "settings-category-status", port: data.category_port,
+      running: data.category_proxy_running,
+      path: `/mcp/${data.category_url_segment || "category"}/<name>`,
+      off: "No port of its own",
+    });
 
     const retention = document.getElementById("settings-retention");
     const stored = String(data.usage_retention_days ?? 30);
@@ -770,12 +792,24 @@ async function saveSettings() {
   const sharedPort = document.getElementById("settings-shared-port").value.trim();
   if (sharedOn) {
     if (!sharedPort) {
-      showAlert("error", "Enter a port for the shared MCP port");
+      showAlert("error", "Enter a port for the instance endpoints");
       return;
     }
     body.shared_port = Number(sharedPort);
   } else {
     body.shared_port = null;
+  }
+
+  const categoryOn = document.getElementById("settings-category-enable").checked;
+  const categoryPort = document.getElementById("settings-category-port").value.trim();
+  if (categoryOn) {
+    if (!categoryPort) {
+      showAlert("error", "Enter a port for the category endpoints");
+      return;
+    }
+    body.category_port = Number(categoryPort);
+  } else {
+    body.category_port = null;
   }
 
   try {

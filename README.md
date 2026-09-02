@@ -160,8 +160,8 @@ The web UI includes a **⚙ Settings** page (top-right button) for managing comm
 - **MCP Bearer Token** — set, reveal (👁), generate (⟳), or remove the token that protects all MCP endpoints; stored in `runtime/settings.json`
 - **API Read Token** / **Agent Token** — same controls for the two optional API tokens that tools can carry instead of the password: read-only (`GET` only) and read/write (see *API tokens*)
 - **User Identity** — the secret OpenWebUI signs its forwarded user token with, plus the switch that accepts its plain, unsigned user headers instead (see *Per-user identity*). The secret field is write-only: no reveal button and no generator, because the value is a copy of what another system already has, not one this server invents
-- **Shared MCP Port** — expose all MCPs through one port as `/mcp/<id>` (see below)
-- **Instance Endpoints** — the same `/mcp/<id>` on the manager port, without a second port (off by default)
+- **Instance Endpoints** — `/mcp/<id>` on the manager port, on a port of its own, on both or on neither (all off by default)
+- **Category Endpoints** — the same pair of choices for `/mcp/category/<name>`, plus the URL segment
 - **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
 - **File Storage** — the download base URL, the per-instance quota with its warning threshold, whether a full folder only warns or refuses calls, and how long stored files are kept (see *File storage*). The same tab lists what is stored, per instance, with a download link and a delete button per file
 - **Agent Identities** — issue, rename or revoke a named token per calling agent; the token is shown once, at creation (see *Agent identities*)
@@ -214,9 +214,9 @@ Notes:
 - Already-running instances pick up the localhost-only binding on their next restart.
 - The proxy answers `503` for stopped instances and `404` for unknown IDs.
 
-### The same thing on the manager port
+### Where they answer
 
-The shared port needs a port of its own and a listener of its own. **Instance Endpoints** serves the identical forwarding on the port the manager already listens on:
+The same forwarding is also served on the port the manager already listens on:
 
 ```
 http://<manager-host>:<manager-port>/mcp/<instance-id>
@@ -224,7 +224,11 @@ http://<manager-host>:<manager-port>/mcp/<instance-id>
 
 Same behaviour, same headers, same streaming — one open port fewer. **Off by default:** an instance that binds to localhost becomes reachable from outside the moment this is on, so it is switched on by a person rather than by an upgrade. Turn it on under **Settings → System → Instance Endpoints**. Switched off, the path is not intercepted at all and answers like any other URL this manager does not serve.
 
-The two are independent: the shared port keeps its own switch and its own port, and every URL already registered against it keeps working. `category` cannot be used as an instance ID, because `/mcp/category/<name>` belongs to the category endpoints below.
+**Two ways in, two decisions.** Under **Settings → System → Instance Endpoints** each is a checkbox of its own: on the manager port, on a port of its own, on both, or on neither. The category endpoints below have exactly the same pair — and if both sections name the *same* port number, one listener serves both paths on it. A port is refused when it is the manager's own or the internal port of an instance, and the instance whose port it is gets named in the refusal.
+
+Listeners bind what the manager binds. (Before v0.2.3 they fell back to `MCP_RUNNER_HOST`, which is about where *instances* bind — with it unset, a configured port came up on loopback and refused every connection from outside while the UI reported it active.)
+
+`category` cannot be used as an instance ID, because `/mcp/category/<name>` belongs to the category endpoints below.
 
 ---
 
@@ -238,7 +242,7 @@ http://<manager-host>:<manager-port>/mcp/category/<category-name>
 
 The word `category` in that path is a setting, not a fixture: **Settings → System → Category Endpoints → URL segment** changes it, and every category URL and export follows at once. Two things move with it — an instance may never be called like the segment (it would sit behind the category endpoints and be reachable nowhere), so the reserved instance ID follows the setting, and a word an instance already holds is refused with a 409 that names it. Changing it breaks every category URL already registered elsewhere, and open sessions are closed so no client keeps one its address no longer reaches.
 
-It runs on the **manager port** — no shared port needed. **Off by default:** one endpoint reaches the tools of a whole category at once, so it is switched on by a person rather than by an upgrade, the same rule the shared port follows. Turn it on under **Settings → System → Category Endpoints**. The list right under the switch shows every category with its instance and tool counts and an **Export** button that writes the same OpenWebUI entry the per-instance export writes, one level up; hovering a row swaps the counts for the URL, and clicking the category name copies that URL. The list follows the checkbox immediately — before the save, so you can see what you are about to switch on — and its exports stay disabled until it is saved. On the dashboard, picking a category in the filter shows the same for that one category in a bar under the filter row.
+It runs where you say: on the **manager port**, on a **port of its own**, on both, or on neither — two checkboxes and a port field under **Settings → System → Category Endpoints**, the same shape the instance endpoints have. With a port of its own set, that is also the address the list and the exports hand out, because it is the one that keeps answering when the manager port stops serving categories. **Off by default:** one endpoint reaches the tools of a whole category at once, so it is switched on by a person rather than by an upgrade, the same rule the shared port follows. Turn it on under **Settings → System → Category Endpoints**. The list right under the switch shows every category with its instance and tool counts and an **Export** button that writes the same OpenWebUI entry the per-instance export writes, one level up; hovering a row swaps the counts for the URL, and clicking the category name copies that URL. The list follows the checkbox immediately — before the save, so you can see what you are about to switch on — and its exports stay disabled until it is saved. On the dashboard, picking a category in the filter shows the same for that one category in a bar under the filter row.
 
 Tools are named `<instance-id>.<tool>` — always, not only on a collision. Clients read the tool list when they connect (an OpenWebUI reload, a restart of an agent CLI), so a rename costs one reconnect, and in exchange the names are stable forever.
 

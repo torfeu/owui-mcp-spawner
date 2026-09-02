@@ -37,6 +37,14 @@ def _base(request: Request) -> str:
         if ":" in bind:
             bind = f"[{bind}]"
         host = f"{bind}:{os.environ.get('MCP_MANAGER_PORT', '7860')}"
+    own = category_endpoint.port()
+    if own is not None:
+        # A port of their own is the address to hand out: it is the one that
+        # keeps answering even when the manager port stops serving categories,
+        # and the one the person just configured for exactly this purpose. The
+        # hostname still comes from the request — only the port is replaced.
+        name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+        host = f"{name}:{own}"
     return f"{request.url.scheme}://{host}"
 
 

@@ -106,8 +106,8 @@ _SKIP_UPSTREAM_HEADERS = {
 
 # ── on or off ────────────────────────────────────────────────────────────────
 
-def enabled() -> bool:
-    """Whether this manager serves category endpoints at all. **Off by default.**
+def on_manager_port() -> bool:
+    """Whether category endpoints answer on the manager's own port. **Off by default.**
 
     Off, deliberately: one endpoint reaches the tools of a whole category at
     once, and an upgrade must not quietly open a door that nobody asked for.
@@ -119,6 +119,29 @@ def enabled() -> bool:
     not after a restart, and the settings file is small.
     """
     return bool(load_settings().get("category_endpoints_enabled", False))
+
+
+def port() -> Optional[int]:
+    """The port of their own, or None. Independent of the manager-port switch.
+
+    Two ways in, two decisions — exactly like the instance endpoints next door,
+    where `instance_endpoints_enabled` and `shared_port` are also separate. A
+    port set here adds a listener; it does not take the manager port away.
+    """
+    configured = load_settings().get("category_port")
+    if isinstance(configured, int) and not isinstance(configured, bool) and 1024 <= configured <= 65535:
+        return configured
+    return None
+
+
+def enabled() -> bool:
+    """Whether category endpoints are served **anywhere** — either way in.
+
+    What the API, the export gate and the dashboard mean when they ask: is
+    there a URL that answers? A category port alone is enough, and so is the
+    manager-port switch alone.
+    """
+    return on_manager_port() or port() is not None
 
 
 # ── which categories exist ───────────────────────────────────────────────────

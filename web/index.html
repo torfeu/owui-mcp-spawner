@@ -531,39 +531,41 @@
 
       <div class="settings-panel hidden" data-settings-panel="system">
       <div class="settings-section">
-        <h3 class="settings-section-title">Shared MCP Port</h3>
+        <h3 class="settings-section-title">Instance Endpoints</h3>
         <div class="settings-status" id="settings-shared-status"></div>
-        <p class="modal-hint">Expose all MCPs through one port as <code>/mcp/&lt;id&gt;</code> instead of one port per instance. Instances then bind to localhost only; already running instances pick this up on their next restart.</p>
+        <p class="modal-hint">Reach every running instance as <code>/mcp/&lt;id&gt;</code> — on this manager's port, on a port of its own, on both, or on neither. Both are off by default: an instance that binds to localhost becomes reachable from outside the moment one of them is on. Rights are decided by the instance, as on a direct connection. With a port of its own set, instances bind to localhost only and pick that up on their next restart.</p>
         <div class="form-grid">
           <label></label>
           <label class="checkbox-label">
+            <input type="checkbox" id="settings-instance-endpoints" />
+            On the manager port
+          </label>
+          <label></label>
+          <label class="checkbox-label">
             <input type="checkbox" id="settings-shared-enable" />
-            Enable shared port
+            On a port of its own
           </label>
           <label>Port</label>
           <input type="number" id="settings-shared-port" min="1024" max="65535" placeholder="e.g. 8100" />
         </div>
       </div>
       <div class="settings-section">
-        <h3 class="settings-section-title">Instance Endpoints</h3>
-        <p class="modal-hint">Serve every running instance as <code>/mcp/&lt;id&gt;</code> on this manager's port too — the same forwarding the shared port does, without a second port. Off by default: an instance that binds to localhost becomes reachable from outside the moment this is on. Rights are decided by the instance, as on a direct connection. Existing URLs keep working; the shared port above is unaffected either way.</p>
-        <div class="form-grid">
-          <label></label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="settings-instance-endpoints" />
-            Serve instances on the manager port
-          </label>
-        </div>
-      </div>
-      <div class="settings-section">
         <h3 class="settings-section-title">Category Endpoints</h3>
-        <p class="modal-hint">Serve every running instance of one category as a single MCP server on this manager's port, under <code>/mcp/category/&lt;name&gt;</code>, with tools named <code>&lt;instance&gt;.&lt;tool&gt;</code>. Off by default — one endpoint reaches a whole category at once, so it is switched on by a person rather than by an upgrade. The MCP Bearer token applies; rights are decided by the instance, as on a direct connection. While they are on, every category is listed below with its URL and an OpenWebUI export; the dashboard shows the same for whichever category its filter is set to.</p>
+        <div class="settings-status" id="settings-category-status"></div>
+        <p class="modal-hint">Serve every running instance of one category as a single MCP server under <code>/mcp/category/&lt;name&gt;</code>, with tools named <code>&lt;instance&gt;.&lt;tool&gt;</code> — on this manager's port, on a port of its own, on both, or on neither. The same port number in both sections means one listener serving both. Off by default — one endpoint reaches a whole category at once, so it is switched on by a person rather than by an upgrade. The MCP Bearer token applies; rights are decided by the instance, as on a direct connection. While they are on, every category is listed below with its URL and an OpenWebUI export; the dashboard shows the same for whichever category its filter is set to.</p>
         <div class="form-grid">
           <label></label>
           <label class="checkbox-label">
             <input type="checkbox" id="settings-category-endpoints" />
-            Serve categories as MCP endpoints
+            On the manager port
           </label>
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-category-enable" />
+            On a port of its own
+          </label>
+          <label>Port</label>
+          <input type="number" id="settings-category-port" min="1024" max="65535" placeholder="e.g. 8110" />
           <label title="The word between /mcp/ and the category name. Changing it changes every category URL, so anything already registered elsewhere has to be updated.">URL segment</label>
           <input type="text" id="settings-category-segment" maxlength="32" placeholder="category" />
         </div>

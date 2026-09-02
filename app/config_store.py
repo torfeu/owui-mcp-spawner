@@ -121,14 +121,16 @@ def _os_port_free(port: int) -> bool:
 
 def find_free_port(start: int = 8101) -> int:
     used = {cfg.server.port for cfg in load_all_configs().values()}
-    # The shared proxy owns its configured port even though it is not an MCP
-    # instance. Reserve it during allocation so a new instance can never be
-    # assigned the proxy's external listener port.
+    # The MCP port listeners own their configured ports even though they are
+    # not instances. Reserve them during allocation so a new instance can never
+    # be assigned one of them.
     try:
         from .settings_store import load_settings
-        shared_port = load_settings().get("shared_port")
-        if isinstance(shared_port, int):
-            used.add(shared_port)
+        settings = load_settings()
+        for key in ("shared_port", "category_port"):
+            value = settings.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                used.add(value)
     except Exception:
         pass
     for port in range(start, start + 200):
@@ -142,7 +144,8 @@ def find_free_port(start: int = 8101) -> int:
 def is_port_free(port: int, exclude_id: Optional[str] = None) -> bool:
     try:
         from .settings_store import load_settings
-        if load_settings().get("shared_port") == port:
+        settings = load_settings()
+        if port in (settings.get("shared_port"), settings.get("category_port")):
             return False
     except Exception:
         pass

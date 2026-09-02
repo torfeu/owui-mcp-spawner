@@ -13,8 +13,14 @@ to the instance's internal server at
 The same forwarding is also served on the manager's own port by the
 dispatcher in `admin_server.asgi` (`handle()` below), where it sits next to
 `/mcp/category/<name>` — no second listener, no second port. That path is off
-by default and has its own switch; the listener here is unaffected by it and
-keeps being configured through `shared_port`.
+by default and has its own switch; the listeners here are unaffected by it.
+
+Listeners are kept **by port**, not one per feature: `shared_port` says where
+instances get a port of their own, `category_port` says the same for the
+category endpoints, and the two may be the same number — then one listener
+serves both. What a listener serves is decided per request from the settings,
+so moving a role between ports never needs a restart; only adding or removing
+a *port* starts or stops a listener (`sync_listeners`).
 
 Instances keep running as separate venv subprocesses on their own internal
 ports — the proxy only makes those ports invisible from the outside.
@@ -28,6 +34,7 @@ from typing import Optional
 import httpx
 import uvicorn
 
+from . import category_endpoint
 from .config_store import get_instance_state, load_all_configs
 from .schema import MCPStatus
 from .settings_store import load_settings
@@ -35,8 +42,8 @@ from .logger import get_manager_logger
 
 logger = get_manager_logger()
 
-_server: Optional[uvicorn.Server] = None
-_task: Optional[asyncio.Task] = None
+# port -> {"server": uvicorn.Server, "task": asyncio.Task}
+_listeners: dict[int, dict] = {}
 _client: Optional[httpx.AsyncClient] = None
 # The client for the manager-port path. Separate on purpose: that path outlives
 # every start_proxy()/stop_proxy() cycle, and must not go 503 because somebody
@@ -53,16 +60,54 @@ _SKIP_REQUEST_HEADERS = {b"host", b"content-length", b"transfer-encoding", b"con
 _SKIP_RESPONSE_HEADERS = {"content-length", "transfer-encoding", "connection", "date", "server"}
 
 
-def configured_port() -> Optional[int]:
-    """The shared port from the settings file, or None when disabled."""
-    port = load_settings().get("shared_port")
-    if isinstance(port, int) and 1024 <= port <= 65535:
+def _port_setting(key: str) -> Optional[int]:
+    port = load_settings().get(key)
+    if isinstance(port, int) and not isinstance(port, bool) and 1024 <= port <= 65535:
         return port
     return None
 
 
+def configured_port() -> Optional[int]:
+    """The shared port from the settings file, or None when disabled."""
+    return _port_setting("shared_port")
+
+
+def category_port() -> Optional[int]:
+    """The port the category endpoints get for themselves, or None.
+
+    Read here as well as in `category_endpoint` because this module decides
+    which listeners exist, and that is a question about ports, not features.
+    """
+    return _port_setting("category_port")
+
+
+def wanted_ports() -> set[int]:
+    """Every port that should have a listener right now."""
+    return {p for p in (configured_port(), category_port()) if p}
+
+
+def listener_running(port: Optional[int]) -> bool:
+    entry = _listeners.get(port) if port else None
+    return bool(entry) and not entry["task"].done()
+
+
 def proxy_running() -> bool:
-    return _task is not None and not _task.done()
+    """Whether the shared instance port is up. Kept for the settings route."""
+    return listener_running(configured_port())
+
+
+def bind_host() -> str:
+    """Where a listener of ours binds.
+
+    The manager's own host first: a listener that is meant to be the public way
+    in must not end up on loopback while the manager itself answers the LAN —
+    which is exactly what happened while this read `MCP_RUNNER_HOST` alone, a
+    variable that is about where *instances* bind. It stays as a fallback for
+    installations that set it deliberately.
+    """
+    return (os.environ.get("MCP_MANAGER_HOST")
+            or os.environ.get("MCP_RUNNER_HOST")
+            or "127.0.0.1")
 
 
 def manager_port_enabled() -> bool:
@@ -207,26 +252,56 @@ async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
         await resp.aclose()
 
 
-async def _proxy_app(scope, receive, send) -> None:
-    """The ASGI app of the shared-port listener."""
-    if scope["type"] == "lifespan":
-        while True:
-            event = await receive()
-            if event["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif event["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
-    if scope["type"] != "http":
-        return
+def _listener_app(port: int):
+    """The ASGI app of the listener on *port*.
 
-    # Snapshot the client: stop_proxy() sets the global to None while
-    # in-flight requests may still be running.
-    client = _client
-    if client is None:
-        await _send_error(send, 503, "Shared MCP proxy is shutting down")
-        return
-    await _forward(scope, receive, send, client)
+    What it serves is read from the settings on every request, not captured
+    when the listener starts: switching a role between the manager port and
+    this one, or between two ports that both already have a listener, then
+    takes effect at once — the same rule the switches themselves follow.
+
+    Both roles can land on the same port; the category prefix is longer and is
+    checked first, exactly as in the dispatcher on the manager port.
+    """
+    async def app(scope, receive, send) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                event = await receive()
+                if event["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif event["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        if scope["type"] != "http":
+            return
+
+        path = scope.get("path", "")
+        serves_categories = category_port() == port
+        serves_instances = configured_port() == port
+
+        if serves_categories and path.startswith(category_endpoint.prefix()):
+            await category_endpoint.handle(scope, receive, send)
+            return
+        if serves_instances:
+            # Snapshot the client: a listener going down sets the global to
+            # None while in-flight requests may still be running.
+            client = _client
+            if client is None:
+                await _send_error(send, 503, "MCP proxy is shutting down")
+                return
+            await _forward(scope, receive, send, client)
+            return
+
+        # A port that only serves categories, asked for something else. Naming
+        # the one thing this port does is more use than a bare 404 — at the
+        # other end may be a model that has to decide what to try next.
+        if serves_categories:
+            await _send_error(send, 404,
+                              f"Not Found — this port serves {category_endpoint.prefix()}<category-name>")
+        else:
+            await _send_error(send, 404, "Not Found")
+
+    return app
 
 
 async def handle(scope, receive, send) -> None:
@@ -281,21 +356,23 @@ async def _serve_guarded(server: uvicorn.Server, sock: socket.socket) -> None:
             pass
 
 
-async def start_proxy(port: int, host: str) -> tuple[bool, str]:
-    """Start (or restart) the shared-port listener. Returns (ok, error)."""
-    global _server, _task, _client
+async def start_listener(port: int, host: str) -> tuple[bool, str]:
+    """Bring up the listener on *port*. Returns (ok, error).
+
+    Idempotent: a port that already has a live listener is left alone, because
+    what it serves is a settings question and not a property of the socket.
+    """
+    if listener_running(port):
+        return True, ""
+    await stop_listener(port)
 
     conflicts = port_conflicts(port)
     if conflicts:
         instances = ", ".join(conflicts)
-        err = (
-            f"Shared MCP port {port} conflicts with the internal port of: "
-            f"{instances}. Choose a different shared port."
-        )
+        err = (f"MCP port {port} conflicts with the internal port of: {instances}. "
+               "Choose a different port.")
         logger.error(err)
         return False, err
-
-    await stop_proxy()
 
     # Bind the socket ourselves so a taken port is a clean, synchronous error
     # instead of a sys.exit(1) inside the serve task.
@@ -307,43 +384,91 @@ async def start_proxy(port: int, host: str) -> tuple[bool, str]:
         sock.listen(128)
     except OSError as e:
         sock.close()
-        err = f"Could not bind shared MCP port {port}: {e.strerror or e}"
+        err = f"Could not bind MCP port {port}: {e.strerror or e}"
         logger.error(err)
         return False, err
 
-    _client = _new_client()
-    config = uvicorn.Config(_proxy_app, host=host, port=port, log_level="warning")
-    _server = uvicorn.Server(config)
-    _task = asyncio.create_task(_serve_guarded(_server, sock))
+    global _client
+    if _client is None:
+        _client = _new_client()
+
+    config = uvicorn.Config(_listener_app(port), host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(_serve_guarded(server, sock))
+    _listeners[port] = {"server": server, "task": task}
 
     for _ in range(40):
-        if _server.started:
-            logger.info(f"Shared MCP port active on {host}:{port} (/mcp/<id>)")
+        if server.started:
+            logger.info(f"MCP port active on {host}:{port}")
             return True, ""
-        if _task.done():
+        if task.done():
             break
         await asyncio.sleep(0.05)
 
-    err = f"Shared MCP port listener on {port} failed to start"
+    err = f"MCP port listener on {port} failed to start"
     logger.error(err)
-    await stop_proxy()
+    await stop_listener(port)
     return False, err
 
 
-async def stop_proxy() -> None:
-    global _server, _task, _client
-    if _server is not None:
-        _server.should_exit = True
-    if _task is not None:
+async def stop_listener(port: int) -> None:
+    """Take the listener on *port* down, and the shared client with the last one."""
+    entry = _listeners.pop(port, None)
+    if entry is not None:
+        entry["server"].should_exit = True
         try:
-            await asyncio.wait_for(_task, timeout=5)
-        except (asyncio.TimeoutError, Exception):
-            _task.cancel()
-    if _client is not None:
-        try:
-            await _client.aclose()
+            await asyncio.wait_for(entry["task"], timeout=5)
+        except asyncio.CancelledError:
+            # Not an `Exception`, so it would walk straight out of here — and
+            # out through whatever route asked for the shutdown.
+            if not entry["task"].cancelled():
+                raise
+        except (asyncio.TimeoutError, TimeoutError):
+            entry["task"].cancel()
         except Exception:
             pass
-    _server = None
-    _task = None
-    _client = None
+    await _close_client_if_idle()
+
+
+async def _close_client_if_idle() -> None:
+    global _client
+    if _listeners or _client is None:
+        return
+    client, _client = _client, None
+    try:
+        await client.aclose()
+    except Exception:
+        pass
+
+
+async def sync_listeners(host: Optional[str] = None) -> list[str]:
+    """Make the running listeners match the settings. Returns what failed.
+
+    The single entry point: startup, the watchdog and the settings route all
+    say "make it so" rather than each working out which listener to start or
+    stop. A port that keeps its listener is never touched, so changing *what*
+    a port serves does not interrupt anything running on it.
+    """
+    host = host or bind_host()
+    wanted = wanted_ports()
+    errors = []
+    for port in [p for p in _listeners if p not in wanted]:
+        await stop_listener(port)
+    for port in sorted(wanted):
+        if not listener_running(port):
+            ok, err = await start_listener(port, host)
+            if not ok:
+                errors.append(err)
+    return errors
+
+
+async def start_proxy(port: int, host: str) -> tuple[bool, str]:
+    """The shared instance port, by its old name — the settings route's entry."""
+    return await start_listener(port, host)
+
+
+async def stop_proxy() -> None:
+    """Every listener this module owns. Called from the manager's shutdown."""
+    for port in list(_listeners):
+        await stop_listener(port)
+    await _close_client_if_idle()

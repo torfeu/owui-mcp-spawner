@@ -108,6 +108,12 @@ def main() -> None:
           f"  [auth: {auth_label}, edit: {edit_label}, mcp-auth: {mcp_label},"
           f" user-identity: {identity_label}]\n")
 
+    # What the MCP port listeners bind to. Without this they fell back to a
+    # variable about *instance* binding and ended up on loopback while the
+    # manager itself answered the network — a port that looked active in the
+    # UI and refused every connection from outside.
+    os.environ["MCP_MANAGER_HOST"] = args.host
+
     uvicorn.run(
         "app.admin_server:asgi",
         host=args.host,

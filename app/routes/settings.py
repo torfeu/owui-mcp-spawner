@@ -36,6 +36,10 @@ async def get_settings() -> dict:
         "token_edit_enabled": token_edit_enabled(),
         "shared_port": shared_proxy.configured_port(),
         "shared_proxy_running": shared_proxy.proxy_running(),
+        # The categories' own port, the same shape as the shared port above.
+        # The two may hold the same number — then one listener serves both.
+        "category_port": shared_proxy.category_port(),
+        "category_proxy_running": shared_proxy.listener_running(shared_proxy.category_port()),
         # One category served as one MCP server on the manager port. Off by
         # default: one endpoint reaches a whole category at once, and an
         # upgrade must not open that door on its own.
@@ -302,48 +306,58 @@ async def update_settings(body: dict) -> dict:
 
     _bounded_int("health_failures_before_restart", 1, 20, health.failures_before_restart())
 
-    shared_change = None  # ("disable", None) or ("enable", port)
-    current_shared = shared_proxy.configured_port()
-    if "shared_port" in body:
-        raw = body["shared_port"]
+    # ── The two MCP ports. Same rules for both, so they are spelled once.
+    def _wanted_port(key: str, current):
+        """None (off), the current value (unchanged), or a validated new port."""
+        if key not in body:
+            return current
+        raw = body[key]
         if raw in (None, "", 0):
-            if current_shared is not None:
-                shared_change = ("disable", None)
-        else:
-            try:
-                port = int(raw)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "shared_port must be an integer")
-            if not 1024 <= port <= 65535:
-                raise HTTPException(400, "shared_port must be between 1024 and 65535")
-            if port == int(os.environ.get("MCP_MANAGER_PORT", "7860")):
-                raise HTTPException(409, "shared_port must differ from the manager port")
-            if port != current_shared:
-                shared_change = ("enable", port)
-
-    # ── Apply. The proxy swap goes first: it is the only step that can still
-    # fail (bind error) and must abort before any other setting is persisted.
-    if shared_change:
-        from ..settings_store import save_settings
-        action, port = shared_change
-        if action == "disable":
-            await shared_proxy.stop_proxy()
-            save_settings({"shared_port": None})
-            changed.append("shared_port_disabled")
-        else:
-            ok, err = await shared_proxy.start_proxy(
-                port, os.environ.get("MCP_RUNNER_HOST", "127.0.0.1")
+            return None
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key} must be an integer")
+        if not 1024 <= port <= 65535:
+            raise HTTPException(400, f"{key} must be between 1024 and 65535")
+        if port == int(os.environ.get("MCP_MANAGER_PORT", "7860")):
+            raise HTTPException(409, f"{key} must differ from the manager port")
+        taken = shared_proxy.port_conflicts(port)
+        if taken:
+            raise HTTPException(
+                409,
+                f"{key} {port} is the internal port of: {', '.join(taken)}. "
+                "Choose a different port.",
             )
-            if not ok:
-                # Roll back to the previous listener if there was one
-                if current_shared is not None:
-                    await shared_proxy.start_proxy(
-                        current_shared, os.environ.get("MCP_RUNNER_HOST", "127.0.0.1")
-                    )
-                raise HTTPException(409, err)
-            save_settings({"shared_port": port})
-            changed.append("shared_port")
-        if action == "disable" or current_shared is None:
+        return port
+
+    current_shared = shared_proxy.configured_port()
+    current_category = shared_proxy.category_port()
+    wanted_shared = _wanted_port("shared_port", current_shared)
+    wanted_category = _wanted_port("category_port", current_category)
+
+    port_changes = {}
+    if wanted_shared != current_shared:
+        port_changes["shared_port"] = wanted_shared
+    if wanted_category != current_category:
+        port_changes["category_port"] = wanted_category
+
+    # ── Apply. The ports go first: binding is the only step that can still
+    # fail, and it must abort before any other setting is persisted.
+    if port_changes:
+        from ..settings_store import save_settings
+        save_settings(port_changes)
+        errors = await shared_proxy.sync_listeners()
+        if errors:
+            # Put the settings back and undo the half-done listener set, so a
+            # port that cannot be bound leaves nothing behind but the message.
+            save_settings({"shared_port": current_shared, "category_port": current_category})
+            await shared_proxy.sync_listeners()
+            raise HTTPException(409, "; ".join(errors))
+        for key, value in sorted(port_changes.items()):
+            changed.append(key if value is not None else key + "_disabled")
+        if ("shared_port" in port_changes
+                and (current_shared is None) != (wanted_shared is None)):
             # Mode switched (shared ↔ per-port): move instances between
             # localhost-only and the configured host.
             _rebind_running_instances()

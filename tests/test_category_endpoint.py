@@ -25,6 +25,9 @@ from app.schema import MCPInstance, MCPStatus
 from tests.test_runner_identity import isolate_agent_store, make_context
 
 
+_ports_handed_out: set[int] = set()
+
+
 def instance(instance_id, category="Recht", status=MCPStatus.running, port=8101):
     return MCPInstance(id=instance_id, name=instance_id.title(), category=category,
                        status=status, port=port, host="127.0.0.1", endpoint="/mcp")
@@ -811,6 +814,143 @@ class UrlSegmentRouteTests(unittest.TestCase):
         self.assertEqual([], stopped)
 
 
+class CategoryPortRouteTests(unittest.TestCase):
+    """Giving the category endpoints a port of their own, through the route."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        import app.auth as auth
+
+        fake_states(self, [instance("gesetze", "Recht")])
+        self.client = TestClient(app_under_test())
+        original = auth._password_hash
+        auth._password_hash = None
+        self.addCleanup(lambda: setattr(auth, "_password_hash", original))
+        self.written = {}
+        saver = patch("app.settings_store.save_settings",
+                      lambda changes: self.written.update(changes))
+        saver.start()
+        self.addCleanup(saver.stop)
+        # No listener is actually bound in these tests: what is under test is
+        # the route's arithmetic, and a real bind belongs in the port tests.
+        self.synced = []
+
+        async def sync(host=None):
+            self.synced.append(host)
+            return []
+
+        syncer = patch("app.shared_proxy.sync_listeners", sync)
+        syncer.start()
+        self.addCleanup(syncer.stop)
+        # `port_conflicts` reads the real configs/ of whichever machine the
+        # suite runs on — sixteen instances on the server, two here. A test
+        # about the route's arithmetic must not depend on which ports those
+        # happen to hold; the one test that is about the conflict says so.
+        conflicts = patch("app.shared_proxy.port_conflicts", lambda port: [])
+        conflicts.start()
+        self.addCleanup(conflicts.stop)
+
+    def test_the_route_reports_it(self):
+        body = self.client.get("/api/settings").json()
+        self.assertIn("category_port", body)
+        self.assertIn("category_proxy_running", body)
+
+    def test_a_port_is_stored_and_the_listeners_are_synced(self):
+        response = self.client.put("/api/settings", json={"category_port": 8110})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(8110, self.written.get("category_port"))
+        self.assertIn("category_port", response.json()["changed"])
+        self.assertEqual(1, len(self.synced))
+
+    def test_both_roles_may_share_one_port(self):
+        # Deliberately allowed: one listener then answers both paths.
+        response = self.client.put("/api/settings",
+                                   json={"category_port": 8110, "shared_port": 8110})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(8110, self.written.get("category_port"))
+        self.assertEqual(8110, self.written.get("shared_port"))
+
+    def test_the_manager_port_is_refused(self):
+        import os
+
+        with patch.dict(os.environ, {"MCP_MANAGER_PORT": "7860"}):
+            response = self.client.put("/api/settings", json={"category_port": 7860})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual({}, self.written)
+
+    def test_a_port_an_instance_listens_on_is_refused_by_name(self):
+        with patch("app.shared_proxy.port_conflicts", lambda port: ["gesetze"]):
+            response = self.client.put("/api/settings", json={"category_port": 8106})
+        self.assertEqual(409, response.status_code)
+        self.assertIn("gesetze", response.json()["detail"])
+        self.assertEqual({}, self.written)
+
+    def test_a_port_outside_the_range_is_refused(self):
+        for bad in (80, 70000, "keine zahl"):
+            with self.subTest(port=bad):
+                self.assertEqual(400, self.client.put(
+                    "/api/settings", json={"category_port": bad}).status_code)
+
+    def test_switching_it_off_stores_none(self):
+        # Patched in shared_proxy, not in the endpoint: the route asks the
+        # module that owns the listeners what is configured right now.
+        with patch("app.shared_proxy.load_settings", lambda: {"category_port": 8110}):
+            response = self.client.put("/api/settings", json={"category_port": None})
+        self.assertEqual(200, response.status_code)
+        self.assertIsNone(self.written.get("category_port", "unset"))
+        self.assertIn("category_port_disabled", response.json()["changed"])
+
+    def test_a_port_that_cannot_be_bound_leaves_nothing_behind(self):
+        # The setting is written before the bind is attempted — so a failed
+        # bind has to put it back, or the manager would come up next time with
+        # a port it already knows it cannot have.
+        written = []
+
+        async def failing_sync(host=None):
+            return ["Could not bind MCP port 8110: Address already in use"]
+
+        with patch("app.settings_store.save_settings", lambda changes: written.append(dict(changes))), \
+             patch("app.shared_proxy.sync_listeners", failing_sync):
+            response = self.client.put("/api/settings", json={"category_port": 8110})
+        self.assertEqual(409, response.status_code)
+        self.assertIn("8110", response.json()["detail"])
+        self.assertEqual([{"category_port": 8110},
+                          {"shared_port": None, "category_port": None}], written)
+
+
+class CategoryUrlPortTests(unittest.TestCase):
+    """Which port the URLs handed out carry."""
+
+    class Request:
+        headers = {"host": "192.168.1.100:7860"}
+
+        class url:
+            scheme = "http"
+
+    def test_without_a_port_of_its_own_it_is_the_manager_port(self):
+        from app.routes import categories as route
+
+        with patch.object(ce, "load_settings", dict):
+            self.assertEqual("http://192.168.1.100:7860", route._base(self.Request()))
+
+    def test_a_port_of_its_own_is_what_gets_handed_out(self):
+        # That is the address the person just configured for this, and the one
+        # that keeps answering when the manager port stops serving categories.
+        from app.routes import categories as route
+
+        with patch.object(ce, "load_settings", lambda: {"category_port": 8110}):
+            self.assertEqual("http://192.168.1.100:8110", route._base(self.Request()))
+
+    def test_an_ipv6_host_keeps_its_brackets(self):
+        from app.routes import categories as route
+
+        class Request(self.Request):
+            headers = {"host": "[fd00::5]:7860"}
+
+        with patch.object(ce, "load_settings", lambda: {"category_port": 8110}):
+            self.assertEqual("http://[fd00::5]:8110", route._base(Request()))
+
+
 def app_under_test():
     from app.admin_server import app
     return app
@@ -837,11 +977,24 @@ class CategoryTransportTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _free_port() -> int:
+        """A port nothing is listening on — and that this process has not used.
+
+        The kernel hands out the same free port again happily once the probe
+        socket is closed, and a listener that has just gone down can still be
+        connectable for a moment. A test that then draws the same number waits
+        for a port that is up, talks to a server that is going away, and fails
+        once in fifty runs. Remembering what was handed out costs nothing.
+        """
         import socket
 
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            return probe.getsockname()[1]
+        for _ in range(50):
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            if port not in _ports_handed_out:
+                _ports_handed_out.add(port)
+                return port
+        raise AssertionError("no unused free port found")
 
     async def _start_runner(self, instance_id: str, answer: str, port: int):
         import json

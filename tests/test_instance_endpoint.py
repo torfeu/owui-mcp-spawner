@@ -415,6 +415,184 @@ class SettingsRouteTests(unittest.TestCase):
         self.assertEqual(400, response.status_code)
 
 
+class PortRegistryTests(unittest.IsolatedAsyncioTestCase):
+    """Listeners are kept by port, not one per feature.
+
+    Two roles — instances and categories — and each may have a port of its own,
+    the same port as the other, or none. What a listener serves is read from
+    the settings per request, so only adding or removing a *port* is allowed to
+    start or stop anything.
+    """
+
+    async def asyncTearDown(self):
+        await sp.stop_proxy()
+
+    def _started(self):
+        return sorted(sp._listeners)
+
+    async def test_nothing_is_bound_when_no_port_is_configured(self):
+        settings(self)
+        self.assertEqual([], await sp.sync_listeners("127.0.0.1"))
+        self.assertEqual([], self._started())
+
+    async def test_each_role_can_have_a_port_of_its_own(self):
+        a, b = free_port(), free_port()
+        settings(self, shared_port=a, category_port=b)
+        self.assertEqual([], await sp.sync_listeners("127.0.0.1"))
+        self.assertEqual(sorted([a, b]), self._started())
+
+    async def test_the_same_port_for_both_is_one_listener(self):
+        # Not two binds on one port, and not a refusal either: the app on that
+        # port simply answers both paths.
+        port = free_port()
+        settings(self, shared_port=port, category_port=port)
+        self.assertEqual([], await sp.sync_listeners("127.0.0.1"))
+        self.assertEqual([port], self._started())
+
+    async def test_a_port_that_keeps_its_listener_is_not_touched(self):
+        # Moving a role between ports must not interrupt a listener that stays.
+        a, b = free_port(), free_port()
+        settings(self, shared_port=a)
+        await sp.sync_listeners("127.0.0.1")
+        server = sp._listeners[a]["server"]
+
+        settings(self, shared_port=a, category_port=b)
+        await sp.sync_listeners("127.0.0.1")
+        self.assertIs(server, sp._listeners[a]["server"])
+        self.assertEqual(sorted([a, b]), self._started())
+
+    async def test_removing_a_port_takes_its_listener_down(self):
+        a, b = free_port(), free_port()
+        settings(self, shared_port=a, category_port=b)
+        await sp.sync_listeners("127.0.0.1")
+        settings(self, shared_port=a)
+        await sp.sync_listeners("127.0.0.1")
+        self.assertEqual([a], self._started())
+
+    async def test_a_port_that_cannot_be_bound_is_reported_not_swallowed(self):
+        import socket as socketlib
+
+        blocker = socketlib.socket()
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        self.addCleanup(blocker.close)
+        taken = blocker.getsockname()[1]
+
+        settings(self, shared_port=taken)
+        errors = await sp.sync_listeners("127.0.0.1")
+        self.assertEqual(1, len(errors))
+        self.assertIn(str(taken), errors[0])
+        self.assertEqual([], self._started())
+
+    async def test_the_client_lives_as_long_as_the_listeners(self):
+        port = free_port()
+        settings(self, shared_port=port)
+        await sp.sync_listeners("127.0.0.1")
+        self.assertIsNotNone(sp._client)
+        client = sp._client
+        settings(self)
+        await sp.sync_listeners("127.0.0.1")
+        self.assertIsNone(sp._client)
+        self.assertTrue(client.is_closed)
+
+
+class PortAppTests(unittest.TestCase):
+    """What the app on one port answers, decided per request."""
+
+    def _ask(self, port, path, **payload):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        seen = []
+
+        async def to_category(scope, receive_, send_):
+            seen.append(("category", scope["path"]))
+
+        async def to_forward(scope, receive_, send_, client):
+            seen.append(("instance", scope["path"]))
+
+        with patch.object(sp, "load_settings", lambda: dict(payload)), \
+             patch.object(sp.category_endpoint, "load_settings", lambda: dict(payload)), \
+             patch.object(sp.category_endpoint, "handle", to_category), \
+             patch.object(sp, "_forward", to_forward), \
+             patch.object(sp, "_client", object()):
+            run(sp._listener_app(port)({"type": "http", "path": path, "method": "POST",
+                                        "headers": [], "query_string": b""}, receive, send))
+        status = sent[0]["status"] if sent else None
+        body = b"".join(m.get("body", b"") for m in sent[1:]).decode()
+        return seen, status, body
+
+    def test_one_port_can_serve_both(self):
+        seen, _, _ = self._ask(8110, "/mcp/category/Recht",
+                               shared_port=8110, category_port=8110,
+                               category_endpoints_enabled=False)
+        self.assertEqual([("category", "/mcp/category/Recht")], seen)
+        seen, _, _ = self._ask(8110, "/mcp/gesetze", shared_port=8110, category_port=8110)
+        self.assertEqual([("instance", "/mcp/gesetze")], seen)
+
+    def test_a_category_port_does_not_serve_instances(self):
+        # And says which URL it does serve — at the other end may be a model
+        # that has to decide what to try next.
+        seen, status, body = self._ask(8110, "/mcp/gesetze", category_port=8110)
+        self.assertEqual([], seen)
+        self.assertEqual(404, status)
+        self.assertIn("/mcp/category/<category-name>", body)
+
+    def test_an_instance_port_does_not_serve_categories(self):
+        # It falls through to the forwarder, which looks for an instance named
+        # "category" and says so — the same answer as any unknown id.
+        seen, _, _ = self._ask(8110, "/mcp/category/Recht", shared_port=8110)
+        self.assertEqual([("instance", "/mcp/category/Recht")], seen)
+
+    def test_the_manager_port_switch_does_not_gate_the_own_port(self):
+        # Two ways in, two decisions: a port of its own answers even while the
+        # manager port serves nothing.
+        seen, _, _ = self._ask(8110, "/mcp/category/Recht",
+                               category_port=8110, category_endpoints_enabled=False)
+        self.assertEqual([("category", "/mcp/category/Recht")], seen)
+
+    def test_a_port_nobody_claims_answers_nothing(self):
+        seen, status, _ = self._ask(8110, "/mcp/gesetze", shared_port=9999)
+        self.assertEqual([], seen)
+        self.assertEqual(404, status)
+
+
+class BindHostTests(unittest.TestCase):
+    """Where a listener binds — the trap that made a configured port dead."""
+
+    def setUp(self):
+        self.original = {k: os.environ.get(k) for k in ("MCP_MANAGER_HOST", "MCP_RUNNER_HOST")}
+        for key in self.original:
+            os.environ.pop(key, None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for key, value in self.original.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+
+    def test_the_manager_host_wins(self):
+        # The listener is meant to be the public way in. Binding it to
+        # loopback while the manager answers the network is the bug this
+        # exists to prevent: the UI said "active" and nothing could connect.
+        os.environ["MCP_MANAGER_HOST"] = "0.0.0.0"
+        os.environ["MCP_RUNNER_HOST"] = "127.0.0.1"
+        self.assertEqual("0.0.0.0", sp.bind_host())
+
+    def test_the_runner_host_is_the_fallback(self):
+        os.environ["MCP_RUNNER_HOST"] = "::1"
+        self.assertEqual("::1", sp.bind_host())
+
+    def test_loopback_when_nothing_says_otherwise(self):
+        self.assertEqual("127.0.0.1", sp.bind_host())
+
+
 class InstanceTransportTests(unittest.IsolatedAsyncioTestCase):
     """The whole path over real sockets: MCP client → manager port → a real runner.
 
@@ -524,6 +702,29 @@ class InstanceTransportTests(unittest.IsolatedAsyncioTestCase):
                     answer = (await session.call_tool("hello", {"who": "Torsten"})).content[0].text
         # Undotted: this path forwards, it does not rebuild the catalogue.
         self.assertEqual(["hello"], listed)
+        self.assertEqual("Gesetze greets Torsten", answer)
+
+    async def test_a_port_of_its_own_carries_a_whole_real_session(self):
+        # The listener the registry starts, not the hand-rolled one above: bind,
+        # per-port app and forwarding in one go, over a real socket. Everything
+        # else about the ports is decided from settings, and settings can be
+        # faked into agreeing with themselves — this cannot.
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        own = free_port()
+        settings(self, shared_port=own)
+        self.assertEqual([], await sp.sync_listeners("127.0.0.1"))
+        self.addAsyncCleanup(sp.stop_proxy)
+
+        url = f"http://127.0.0.1:{own}/mcp/gesetze"
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {self.TOKEN}"},
+                                      timeout=20) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    answer = (await session.call_tool("hello", {"who": "Torsten"})).content[0].text
         self.assertEqual("Gesetze greets Torsten", answer)
 
     async def test_the_instance_is_the_gate_not_the_proxy(self):

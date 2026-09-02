@@ -34,15 +34,14 @@ async def _watchdog_loop() -> None:
             await asyncio.to_thread(check_running_instances)
         except Exception as e:
             logger.error(f"Watchdog error: {e}")
-        # Self-heal the shared-port proxy: a failed bind at boot (e.g. TIME_WAIT
-        # after a self-restart) or a crashed listener gets retried here.
+        # Self-heal the MCP port listeners: a failed bind at boot (e.g.
+        # TIME_WAIT after a self-restart) or a crashed listener gets retried
+        # here. `sync_listeners` leaves a healthy one alone.
         try:
-            sp = shared_proxy.configured_port()
-            if sp and not shared_proxy.proxy_running():
-                logger.warning(f"Shared MCP port {sp} is configured but down — retrying bind")
-                await shared_proxy.start_proxy(sp, os.environ.get("MCP_RUNNER_HOST", "127.0.0.1"))
+            for err in await shared_proxy.sync_listeners():
+                logger.warning(f"MCP port still down: {err}")
         except Exception as e:
-            logger.error(f"Shared-port watchdog error: {e}")
+            logger.error(f"MCP port watchdog error: {e}")
 
 PRUNE_INTERVAL = 24 * 60 * 60
 
@@ -213,12 +212,10 @@ async def _lifespan(app: FastAPI):
 
     await _migrate_existing_venv_deps()
 
-    # Shared MCP port: start the reverse proxy before auto-starting instances
-    sp = shared_proxy.configured_port()
-    if sp:
-        ok, err = await shared_proxy.start_proxy(sp, os.environ.get("MCP_RUNNER_HOST", "127.0.0.1"))
-        if not ok:
-            logger.error(f"Shared MCP port disabled for this run: {err}")
+    # MCP ports of their own — instances, categories, or both on one port.
+    # Before auto-starting instances: they bind differently in shared mode.
+    for err in await shared_proxy.sync_listeners():
+        logger.error(f"MCP port not available for this run: {err}")
 
     # Auto-start instances with lifecycle.auto_start = True that aren't already
     # running. Port checks stay sequential (they read and rewrite configs), the
@@ -325,7 +322,7 @@ async def asgi(scope, receive, send):
     """
     if scope["type"] == "http":
         path = scope.get("path", "")
-        if path.startswith(category_endpoint.prefix()) and category_endpoint.enabled():
+        if path.startswith(category_endpoint.prefix()) and category_endpoint.on_manager_port():
             await category_endpoint.handle(scope, receive, send)
             return
         if path.startswith(shared_proxy.PREFIX) and shared_proxy.manager_port_enabled():
