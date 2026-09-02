@@ -94,16 +94,26 @@ function renderBar() {
 
 // ── the list in the settings, under the switch ───────────────────────────────
 
-function settingsSwitch() {
-  return document.getElementById("settings-category-endpoints");
+/** The two ways in, as the dialog currently has them ticked. */
+function settingsSwitches() {
+  return [document.getElementById("settings-category-endpoints"),
+          document.getElementById("settings-category-enable")];
 }
 
-/** Show or hide the list to match the checkbox — no fetch, no save, no wait. */
+function servedSomewhere() {
+  return settingsSwitches().some(box => box && box.checked);
+}
+
+/** Show or hide the list to match the checkboxes — no fetch, no save, no wait.
+ *
+ * Either way in is enough. Hanging this on the manager-port box alone hid the
+ * list for a manager that serves its categories on a port of its own — which
+ * is exactly the setup somebody who just typed a port number is looking at.
+ */
 export function toggleCategorySettingsList() {
   const box = document.getElementById("settings-category-list");
-  const box_switch = settingsSwitch();
-  if (!box || !box_switch) return;
-  box.classList.toggle("hidden", !(box_switch.checked && categories.length));
+  if (!box || !settingsSwitches().some(Boolean)) return;
+  box.classList.toggle("hidden", !(servedSomewhere() && categories.length));
 }
 
 export async function renderCategorySettingsList() {
@@ -165,8 +175,9 @@ async function act(action, name) {
 
 export function bindCategories() {
   document.getElementById("filter-category").addEventListener("change", renderBar);
-  // The list follows the checkbox immediately, not the save: ticking it is the
-  // moment somebody wants to see what they are about to switch on.
-  const box_switch = settingsSwitch();
-  if (box_switch) box_switch.addEventListener("change", toggleCategorySettingsList);
+  // The list follows the checkboxes immediately, not the save: ticking one is
+  // the moment somebody wants to see what they are about to switch on.
+  for (const box of settingsSwitches()) {
+    if (box) box.addEventListener("change", toggleCategorySettingsList);
+  }
 }
