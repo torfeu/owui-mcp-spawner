@@ -1,3 +1,33 @@
+/** Show or hide one element by id. */
+function show(id, visible) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle("hidden", !visible);
+}
+
+/** A port field is there when its checkbox is ticked, and gone otherwise.
+ *
+ * Not merely disabled: a greyed-out field still asks to be read, and a manager
+ * that serves nothing on a port of its own has nothing to say about one. The
+ * category URL segment goes the same way — it only describes a path that
+ * something answers on.
+ */
+function syncEndpointRows() {
+  const ticked = id => {
+    const box = document.getElementById(id);
+    return !!box && box.checked;
+  };
+  show("settings-shared-port-label", ticked("settings-shared-enable"));
+  show("settings-shared-port", ticked("settings-shared-enable"));
+
+  const categoryOwnPort = ticked("settings-category-enable");
+  show("settings-category-port-label", categoryOwnPort);
+  show("settings-category-port", categoryOwnPort);
+
+  const categoriesServed = categoryOwnPort || ticked("settings-category-endpoints");
+  show("settings-category-segment-label", categoriesServed);
+  show("settings-category-segment", categoriesServed);
+}
+
 function fillPortRow({ checkbox, input, status, port, running, path, off }) {
   const on = port != null;
   document.getElementById(checkbox).checked = on;
@@ -47,13 +77,17 @@ for (const kind of TOKEN_FIELDS) {
   });
 }
 
-document.getElementById("settings-shared-enable").addEventListener("change", e => {
-  document.getElementById("settings-shared-port").disabled = !e.target.checked;
-});
-
-document.getElementById("settings-category-enable").addEventListener("change", e => {
-  document.getElementById("settings-category-port").disabled = !e.target.checked;
-});
+for (const [box, field] of [["settings-shared-enable", "settings-shared-port"],
+                            ["settings-category-enable", "settings-category-port"]]) {
+  document.getElementById(box).addEventListener("change", e => {
+    document.getElementById(field).disabled = !e.target.checked;
+    syncEndpointRows();
+  });
+}
+// The manager-port box owns no field of its own, but the URL segment follows
+// it: unticking both ways in leaves nothing for a segment to describe.
+document.getElementById("settings-category-endpoints")
+        .addEventListener("change", syncEndpointRows);
 
 // The user-JWT secret has no reveal and no generator, unlike the three tokens
 // above: there is no route that hands it back, and the value is not ours to
@@ -247,6 +281,7 @@ async function loadSettingsData() {
     document.getElementById("settings-category-endpoints").checked = data.category_endpoints_enabled === true;
     document.getElementById("settings-instance-endpoints").checked = data.instance_endpoints_enabled === true;
     document.getElementById("settings-category-segment").value = data.category_url_segment || "category";
+    syncEndpointRows();
     document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
     document.getElementById("settings-health-autorestart").checked = !!data.health_autorestart;
     document.getElementById("settings-health-failures").value = data.health_failures_before_restart ?? 3;
