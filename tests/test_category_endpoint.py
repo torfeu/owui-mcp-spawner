@@ -855,6 +855,25 @@ class CategoryPortRouteTests(unittest.TestCase):
         self.assertIn("category_port", body)
         self.assertIn("category_proxy_running", body)
 
+    def test_a_port_of_its_own_does_not_report_the_manager_port_as_on(self):
+        # Found live on 02.09.: the route answered with `enabled()`, which
+        # means "served anywhere", so a set port made the manager-port checkbox
+        # show as ticked while that path was off — and ticking it for real then
+        # counted as no change and was dropped.
+        with patch("app.shared_proxy.load_settings", lambda: {"category_port": 8110}), \
+             patch.object(ce, "load_settings", lambda: {"category_port": 8110}):
+            body = self.client.get("/api/settings").json()
+        self.assertIs(False, body["category_endpoints_enabled"])
+        self.assertEqual(8110, body["category_port"])
+
+    def test_the_manager_port_switch_can_still_be_turned_on_beside_a_port(self):
+        with patch("app.shared_proxy.load_settings", lambda: {"category_port": 8110}), \
+             patch.object(ce, "load_settings", lambda: {"category_port": 8110}):
+            response = self.client.put("/api/settings",
+                                       json={"category_endpoints_enabled": True})
+        self.assertEqual(200, response.status_code)
+        self.assertIs(True, self.written.get("category_endpoints_enabled"))
+
     def test_a_port_is_stored_and_the_listeners_are_synced(self):
         response = self.client.put("/api/settings", json={"category_port": 8110})
         self.assertEqual(200, response.status_code)

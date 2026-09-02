@@ -43,7 +43,11 @@ async def get_settings() -> dict:
         # One category served as one MCP server on the manager port. Off by
         # default: one endpoint reaches a whole category at once, and an
         # upgrade must not open that door on its own.
-        "category_endpoints_enabled": category_endpoint.enabled(),
+        # The switch itself, not `enabled()`: that one means "served anywhere"
+        # and would report the manager-port box as ticked whenever a category
+        # port is set — the checkbox would lie, and ticking it for real would
+        # then look like no change at all and be dropped.
+        "category_endpoints_enabled": category_endpoint.on_manager_port(),
         # The same forwarding the shared port does, on the manager's own port.
         # Off by default: it makes localhost-bound instances reachable from
         # outside, which is a door a person opens, not an upgrade.
@@ -295,7 +299,7 @@ async def update_settings(body: dict) -> dict:
 
     for key, current in (("health_check_enabled", health.enabled()),
                          ("health_autorestart", health.autorestart()),
-                         ("category_endpoints_enabled", category_endpoint.enabled()),
+                         ("category_endpoints_enabled", category_endpoint.on_manager_port()),
                          ("instance_endpoints_enabled", shared_proxy.manager_port_enabled())):
         if key in body:
             raw = body[key]
