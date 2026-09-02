@@ -24,6 +24,16 @@ if [ ! -x "$PYTHON" ]; then
     exit 2
 fi
 
+# What the *running* manager writes on its own while nobody is testing: the
+# watchdog rewrites runtime/pids.json every ten seconds, and any real tool call
+# moves usage.db and its WAL. Measured rather than assumed from a list — this
+# way a file that only starts moving next year is not mistaken for a leak
+# either. It costs twenty seconds a week.
+baseline_stamp="$(mktemp)"
+sleep 20
+noise="$(find "$INSTALL_DIR/runtime" -newer "$baseline_stamp" -type f 2>/dev/null | sort)"
+rm -f "$baseline_stamp"
+
 # -a keeps modes and symlinks; the excludes are the live state and the caches.
 rsync -a \
     --exclude '.venv/' \
@@ -65,11 +75,15 @@ status=$?
 # every week is the only way this stays true.
 # logs/ is written by design. venvs/ is linked in above, and the end-to-end
 # test may legitimately touch the default venv while installing its echo tool.
-leaked="$(find "$INSTALL_DIR/runtime" -newer "$stamp" -type f 2>/dev/null \
-          | grep -v '/logs/' | grep -v '/venvs/' || true)"
+# Everything the manager moved during the quiet window above is its own doing.
+touched="$(find "$INSTALL_DIR/runtime" -newer "$stamp" -type f 2>/dev/null \
+           | grep -v '/logs/' | grep -v '/venvs/' | sort)"
+leaked="$(comm -23 <(echo "$touched") <(echo "$noise"))"
 if [ -n "$leaked" ]; then
-    echo "WARNING: the suite wrote into the live runtime/:" >&2
+    echo "WARNING: files under the live runtime/ moved during the suite that the" >&2
+    echo "running manager did not move on its own in the quiet window before it:" >&2
     echo "$leaked" >&2
+    echo "Either a test stopped isolating itself, or something else wrote just then." >&2
     status=1
 fi
 
