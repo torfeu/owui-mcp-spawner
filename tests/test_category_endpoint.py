@@ -934,7 +934,12 @@ class CategoryTransportTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(serving.cancel)
         self.addCleanup(lambda: setattr(server, "should_exit", True))
         await self._await_port(self.port)
-        self.addCleanup(lambda: asyncio.get_event_loop().create_task(ce.stop_all()))
+        # Awaited, not fired and forgotten: this class runs on a loop of its
+        # own, and a serve task left behind belongs to a loop that is gone by
+        # the time the next class touches the module — which then looks like a
+        # bug in the endpoint. Found on the server on 02.09., where unittest
+        # runs the classes alphabetically and pytest does not.
+        self.addAsyncCleanup(ce.stop_all)
 
     @asynccontextmanager
     async def _client(self, token=None, url=None):

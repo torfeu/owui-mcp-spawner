@@ -14,6 +14,7 @@ date as work lands, so it is never reconstructed from memory at release time.
 - **The `category` in the URL is a setting now** — `/mcp/<segment>/<name>`, changed under **Settings → System → Category Endpoints → URL segment**; every URL and every export follows immediately, no restart. It is validated rather than accepted: one path element of letters, digits, `-` or `_`, and never a word an instance already answers to — that instance would sit behind the category endpoints and be reachable nowhere. The reserved instance ID follows the setting instead of naming `category` once and for all, and moving the segment closes the open category sessions, because their address no longer routes.
 
 **Fixed**
+- **Switching category endpoints off could answer 500 for a switch it had flipped correctly.** `stop_all()` caught `Exception`, and `CancelledError` has not been one since Python 3.8 — a serve task that was already cancelled sent the error straight out through the settings route. Found by the weekly run on the server, on Python 3.14, while the same suite was green on the development machine.
 - **Copy buttons did nothing over plain HTTP.** `navigator.clipboard` exists only in a secure context, so on `http://<lan-ip>:<port>` every copy button in the UI ran into its error branch — including the one for the agent token that is shown exactly once. They now fall back to a `document.execCommand("copy")` path that works without TLS.
 
 ## v0.2.2

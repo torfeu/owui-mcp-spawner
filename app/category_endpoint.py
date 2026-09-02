@@ -393,6 +393,14 @@ async def stop_all() -> None:
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except (asyncio.TimeoutError, TimeoutError):
             task.cancel()
+        except asyncio.CancelledError:
+            # `CancelledError` is not an `Exception` and would otherwise walk
+            # straight out of here — through the settings route that asked for
+            # the shutdown, which then answers 500 for a switch it did flip
+            # correctly. A task that is already cancelled is what this function
+            # wanted anyway; only *our own* cancellation may not be swallowed.
+            if not task.cancelled():
+                raise
         except Exception:
             pass
     _managers.clear()
