@@ -36,7 +36,9 @@ LOG_TAIL_LINES = 500
 LOG_TAIL_MAX_BYTES = 256 * 1024
 # configs/example.json is shipped documentation and skipped by load_all_configs;
 # an instance with this ID would overwrite it and never show up in the list.
-RESERVED_IDS = {"example"}
+# "category" would sit under /mcp/category on the manager port, where the
+# category endpoints live — an instance called that could never be reached.
+RESERVED_IDS = {"example", "category"}
 _version_cache: dict[str, tuple[float, str]] = {}
 _specs_cache: dict[str, tuple[float, dict]] = {}
 _valves_cache: dict[str, tuple[float, set | None]] = {}

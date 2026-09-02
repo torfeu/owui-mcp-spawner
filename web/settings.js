@@ -223,7 +223,8 @@ async function loadSettingsData() {
     retention.value = stored;
 
     document.getElementById("settings-category-endpoints").checked = data.category_endpoints_enabled === true;
-  document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
+    document.getElementById("settings-instance-endpoints").checked = data.instance_endpoints_enabled === true;
+    document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
     document.getElementById("settings-health-autorestart").checked = !!data.health_autorestart;
     document.getElementById("settings-health-failures").value = data.health_failures_before_restart ?? 3;
 
@@ -753,6 +754,7 @@ async function saveSettings() {
     body[key] = value;
   }
   body.category_endpoints_enabled = document.getElementById("settings-category-endpoints").checked;
+  body.instance_endpoints_enabled = document.getElementById("settings-instance-endpoints").checked;
   body.health_check_enabled = document.getElementById("settings-health-enabled").checked;
   body.health_autorestart = document.getElementById("settings-health-autorestart").checked;
 

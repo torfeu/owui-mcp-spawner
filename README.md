@@ -161,6 +161,7 @@ The web UI includes a **⚙ Settings** page (top-right button) for managing comm
 - **API Read Token** / **Agent Token** — same controls for the two optional API tokens that tools can carry instead of the password: read-only (`GET` only) and read/write (see *API tokens*)
 - **User Identity** — the secret OpenWebUI signs its forwarded user token with, plus the switch that accepts its plain, unsigned user headers instead (see *Per-user identity*). The secret field is write-only: no reveal button and no generator, because the value is a copy of what another system already has, not one this server invents
 - **Shared MCP Port** — expose all MCPs through one port as `/mcp/<id>` (see below)
+- **Instance Endpoints** — the same `/mcp/<id>` on the manager port, without a second port (off by default)
 - **Virtual Environments** — list venvs with their instance counts, create a new venv, or delete an unused one (in-use venvs are protected; the `default` venv cannot be deleted)
 - **File Storage** — the download base URL, the per-instance quota with its warning threshold, whether a full folder only warns or refuses calls, and how long stored files are kept (see *File storage*). The same tab lists what is stored, per instance, with a download link and a delete button per file
 - **Agent Identities** — issue, rename or revoke a named token per calling agent; the token is shown once, at creation (see *Agent identities*)
@@ -212,6 +213,18 @@ Notes:
 - The MCP Bearer token keeps working unchanged (headers are passed through to the instance).
 - Already-running instances pick up the localhost-only binding on their next restart.
 - The proxy answers `503` for stopped instances and `404` for unknown IDs.
+
+### The same thing on the manager port
+
+The shared port needs a port of its own and a listener of its own. **Instance Endpoints** serves the identical forwarding on the port the manager already listens on:
+
+```
+http://<manager-host>:<manager-port>/mcp/<instance-id>
+```
+
+Same behaviour, same headers, same streaming — one open port fewer. **Off by default:** an instance that binds to localhost becomes reachable from outside the moment this is on, so it is switched on by a person rather than by an upgrade. Turn it on under **Settings → System → Instance Endpoints**. Switched off, the path is not intercepted at all and answers like any other URL this manager does not serve.
+
+The two are independent: the shared port keeps its own switch and its own port, and every URL already registered against it keeps working. `category` cannot be used as an instance ID, because `/mcp/category/<name>` belongs to the category endpoints below.
 
 ---
 
@@ -987,7 +1000,7 @@ app/
   system_stats.py       CPU, memory, disks, network and per-instance memory (psutil, optional import)
   tool_call.py          Call one tool of one instance from the dashboard (the manager as MCP client)
   update_check.py       Optional GitHub release check (off by default, server-side, cached)
-  shared_proxy.py       Streaming reverse proxy for the shared MCP port (/mcp/<id>)
+  shared_proxy.py       Streaming reverse proxy for /mcp/<id> — shared port and manager port
   category_endpoint.py  One category as one MCP server (/mcp/category/<name>) — client and server at once
   mcp_runner.py         Single MCP subprocess (Streamable HTTP + optional Bearer token auth)
   identity.py           Verified end user of one tool call (forwarded HS256 token → ContextVar)

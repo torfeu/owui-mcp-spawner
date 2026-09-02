@@ -272,6 +272,7 @@ async def _lifespan(app: FastAPI):
     pruner.cancel()
     health.cancel()
     await category_endpoint.stop_all()
+    await shared_proxy.stop_dispatch_client()
     await shared_proxy.stop_proxy()
 
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
@@ -309,18 +310,26 @@ async def asgi(scope, receive, send):
     session that is meant to stay open. Sitting *in front of* the app instead
     means MCP traffic never enters that chain at all.
 
-    Only `/mcp/category/...` is taken here so far, and only while category
-    endpoints are switched on — switched off the path is not intercepted, so it
-    ends in the ordinary 404 of a URL this manager does not serve rather than
-    in a 403 that announces a feature is there and closed. The instance
-    endpoints (`/mcp/<id>`), which the shared-port listener serves on a second
-    port today, are the second branch this dispatcher exists for.
+    Two paths are taken here, each only while its own switch is on: a whole
+    category under `/mcp/category/<name>`, and a single instance under
+    `/mcp/<id>` — the latter the same forwarding the shared-port listener does,
+    on the port that is already open. Switched off, a path is not intercepted
+    at all, so it ends in the ordinary 404 of a URL this manager does not serve
+    rather than in a 403 that announces a feature is there and closed.
+
+    Order matters: the category prefix is longer and is checked first, so a
+    category endpoint can never be shadowed by an instance. `category` is a
+    reserved instance ID, so the collision cannot be created from the other
+    side either.
     """
-    if (scope["type"] == "http"
-            and scope.get("path", "").startswith(category_endpoint.PREFIX)
-            and category_endpoint.enabled()):
-        await category_endpoint.handle(scope, receive, send)
-        return
+    if scope["type"] == "http":
+        path = scope.get("path", "")
+        if path.startswith(category_endpoint.PREFIX) and category_endpoint.enabled():
+            await category_endpoint.handle(scope, receive, send)
+            return
+        if path.startswith(shared_proxy.PREFIX) and shared_proxy.manager_port_enabled():
+            await shared_proxy.handle(scope, receive, send)
+            return
     # Everything else, lifespan included: the manager's own startup and
     # shutdown run in the FastAPI app and must keep doing so.
     await app(scope, receive, send)

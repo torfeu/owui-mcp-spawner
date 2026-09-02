@@ -39,6 +39,10 @@ async def get_settings() -> dict:
         # default: one endpoint reaches a whole category at once, and an
         # upgrade must not open that door on its own.
         "category_endpoints_enabled": category_endpoint.enabled(),
+        # The same forwarding the shared port does, on the manager's own port.
+        # Off by default: it makes localhost-bound instances reachable from
+        # outside, which is a door a person opens, not an upgrade.
+        "instance_endpoints_enabled": shared_proxy.manager_port_enabled(),
         "usage_retention_days": retention_days(),
         # The health check. Auto-restart is off by default: restarting a tool
         # nobody asked to restart is a decision, not a convenience.
@@ -257,7 +261,8 @@ async def update_settings(body: dict) -> dict:
 
     for key, current in (("health_check_enabled", health.enabled()),
                          ("health_autorestart", health.autorestart()),
-                         ("category_endpoints_enabled", category_endpoint.enabled())):
+                         ("category_endpoints_enabled", category_endpoint.enabled()),
+                         ("instance_endpoints_enabled", shared_proxy.manager_port_enabled())):
         if key in body:
             raw = body[key]
             if not isinstance(raw, bool):
@@ -339,6 +344,11 @@ async def update_settings(body: dict) -> dict:
         # not be used, but it would sit there until the manager restarts.
         if store_changes.get("category_endpoints_enabled") is False:
             await category_endpoint.stop_all()
+        # Same for the instance endpoints: switching them off closes the client
+        # that carries them, so a stream already running does not outlive the
+        # switch. The shared-port listener has its own client and is untouched.
+        if store_changes.get("instance_endpoints_enabled") is False:
+            await shared_proxy.stop_dispatch_client()
         # Read fresh on every call, in both the manager and the runners — no
         # restart, unlike the identity settings above.
 

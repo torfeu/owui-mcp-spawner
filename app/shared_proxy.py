@@ -10,11 +10,18 @@ to the instance's internal server at
 
     http://127.0.0.1:<instance_port><endpoint>[/<tail>]
 
+The same forwarding is also served on the manager's own port by the
+dispatcher in `admin_server.asgi` (`handle()` below), where it sits next to
+`/mcp/category/<name>` — no second listener, no second port. That path is off
+by default and has its own switch; the listener here is unaffected by it and
+keeps being configured through `shared_port`.
+
 Instances keep running as separate venv subprocesses on their own internal
 ports — the proxy only makes those ports invisible from the outside.
 Responses are streamed through (streamable HTTP / SSE safe).
 """
 import asyncio
+import os
 import socket
 from typing import Optional
 
@@ -31,6 +38,15 @@ logger = get_manager_logger()
 _server: Optional[uvicorn.Server] = None
 _task: Optional[asyncio.Task] = None
 _client: Optional[httpx.AsyncClient] = None
+# The client for the manager-port path. Separate on purpose: that path outlives
+# every start_proxy()/stop_proxy() cycle, and must not go 503 because somebody
+# switched the shared port off.
+_dispatch_client: Optional[httpx.AsyncClient] = None
+
+# What the dispatcher in admin_server hands to `handle()`. `/mcp/category/` is
+# checked before it, so a category endpoint is never shadowed by an instance —
+# and "category" is a reserved instance ID (api_helpers.RESERVED_IDS).
+PREFIX = "/mcp/"
 
 # Headers that must not be forwarded verbatim in either direction
 _SKIP_REQUEST_HEADERS = {b"host", b"content-length", b"transfer-encoding", b"connection"}
@@ -47,6 +63,28 @@ def configured_port() -> Optional[int]:
 
 def proxy_running() -> bool:
     return _task is not None and not _task.done()
+
+
+def manager_port_enabled() -> bool:
+    """Whether `/mcp/<id>` is served on the manager's own port. **Off by default.**
+
+    Off for the reason the category endpoints are off: an instance that binds
+    to localhost is reachable from outside the moment this is on, and a new way
+    in is opened by a person, not by a version number. It opens no port and
+    needs no credential of its own — the instance authenticates the caller
+    exactly as it does on a direct connection.
+
+    Read on every request rather than cached: switching takes effect now.
+    """
+    return bool(load_settings().get("instance_endpoints_enabled", False))
+
+
+def _new_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        # read=None: SSE streams stay open indefinitely
+        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
+        limits=httpx.Limits(max_connections=100),
+    )
 
 
 def port_conflicts(port: int) -> list[str]:
@@ -73,18 +111,31 @@ async def _send_error(send, status: int, message: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-async def _proxy_app(scope, receive, send) -> None:
-    if scope["type"] == "lifespan":
-        while True:
-            event = await receive()
-            if event["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif event["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
-    if scope["type"] != "http":
-        return
+def _target_host(inst) -> str:
+    """Where this manager reaches the instance's own listener.
 
+    In shared-port mode `process_manager` force-binds every runner to
+    127.0.0.1 regardless of the host in its config — `inst.host` still holds
+    the config value (e.g. "::1") and must not be trusted then. Without a
+    shared port the runner bound what `MCP_RUNNER_HOST` said at start time, or
+    else its own config host, and that is the address to dial. A wildcard is
+    not an address: 0.0.0.0 and :: are reached on their loopback.
+    """
+    if configured_port():
+        return "127.0.0.1"
+    host = os.environ.get("MCP_RUNNER_HOST") or inst.host or "127.0.0.1"
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1", "::0": "::1"}.get(host, host)
+    return f"[{host}]" if ":" in host else host
+
+
+async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
+    """`/mcp/<instance_id>[/<tail>]` → the instance, streamed through.
+
+    Both ways in share this: the shared-port listener below and the
+    manager-port dispatcher in `handle()`. Neither checks any rights — the
+    caller's headers travel unchanged and the instance decides, as it would on
+    a direct connection.
+    """
     # Expected path: /mcp/<instance_id>[/<tail>]
     parts = scope["path"].split("/", 3)
     if len(parts) < 3 or parts[1] != "mcp" or not parts[2]:
@@ -101,12 +152,9 @@ async def _proxy_app(scope, receive, send) -> None:
         await _send_error(send, 503, f"MCP instance '{instance_id}' is not running")
         return
 
-    # Instances started in shared mode are force-bound to 127.0.0.1 by
-    # process_manager regardless of their configured host — inst.host still
-    # holds the config value (e.g. "::1") and must not be trusted here.
-    # Instances not yet restarted after the mode switch are mid-rebind and
+    # Instances not yet restarted after a mode switch are mid-rebind and
     # briefly unreachable either way.
-    target = f"http://127.0.0.1:{inst.port}{inst.endpoint.rstrip('/')}{tail}"
+    target = f"http://{_target_host(inst)}:{inst.port}{inst.endpoint.rstrip('/')}{tail}"
     query = scope.get("query_string", b"")
     if query:
         target += "?" + query.decode("latin-1")
@@ -124,13 +172,6 @@ async def _proxy_app(scope, receive, send) -> None:
             elif msg["type"] == "http.disconnect":
                 return
 
-    # Snapshot the client: stop_proxy() sets the global to None while
-    # in-flight requests may still be running.
-    client = _client
-    if client is None:
-        await _send_error(send, 503, "Shared MCP proxy is shutting down")
-        return
-
     try:
         req = client.build_request(
             scope["method"], target,
@@ -140,6 +181,11 @@ async def _proxy_app(scope, receive, send) -> None:
         resp = await client.send(req, stream=True)
     except httpx.HTTPError as e:
         await _send_error(send, 502, f"Upstream MCP instance unreachable: {e}")
+        return
+    except RuntimeError:
+        # The client was closed under us — the shared port was switched off, or
+        # the manager-port path was, while this request was being built.
+        await _send_error(send, 503, "MCP proxy is shutting down")
         return
 
     try:
@@ -159,6 +205,66 @@ async def _proxy_app(scope, receive, send) -> None:
         pass  # client disconnected mid-stream — nothing to salvage
     finally:
         await resp.aclose()
+
+
+async def _proxy_app(scope, receive, send) -> None:
+    """The ASGI app of the shared-port listener."""
+    if scope["type"] == "lifespan":
+        while True:
+            event = await receive()
+            if event["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif event["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+    if scope["type"] != "http":
+        return
+
+    # Snapshot the client: stop_proxy() sets the global to None while
+    # in-flight requests may still be running.
+    client = _client
+    if client is None:
+        await _send_error(send, 503, "Shared MCP proxy is shutting down")
+        return
+    await _forward(scope, receive, send, client)
+
+
+async def handle(scope, receive, send) -> None:
+    """Serve `/mcp/<id>` on the manager port — the dispatcher's second branch.
+
+    The switch is checked by the dispatcher in `admin_server.asgi`, not here:
+    switched off the path is not intercepted at all and ends in the ordinary
+    404 of a URL this manager does not serve, rather than in a 403 that tells
+    an unauthenticated caller the feature is there and merely closed. Same
+    reasoning as the category endpoints next to it.
+
+    The client is built on first use and lives as long as the manager: this
+    path has no listener to hang its lifetime on, and building one per request
+    would throw away every kept-alive connection to the instances.
+    """
+    if scope["type"] != "http":
+        return
+    global _dispatch_client
+    if _dispatch_client is None:
+        # No await between the check and the assignment — two concurrent
+        # requests cannot both get past it.
+        _dispatch_client = _new_client()
+    await _forward(scope, receive, send, _dispatch_client)
+
+
+async def stop_dispatch_client() -> None:
+    """Drop the manager-port client: manager shutdown, or the switch going off.
+
+    In-flight streams die with it, which is what "off" has to mean — the
+    category endpoints take their sessions down the same way.
+    """
+    global _dispatch_client
+    client, _dispatch_client = _dispatch_client, None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 
 async def _serve_guarded(server: uvicorn.Server, sock: socket.socket) -> None:
@@ -205,11 +311,7 @@ async def start_proxy(port: int, host: str) -> tuple[bool, str]:
         logger.error(err)
         return False, err
 
-    _client = httpx.AsyncClient(
-        # read=None: SSE streams stay open indefinitely
-        timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
-        limits=httpx.Limits(max_connections=100),
-    )
+    _client = _new_client()
     config = uvicorn.Config(_proxy_app, host=host, port=port, log_level="warning")
     _server = uvicorn.Server(config)
     _task = asyncio.create_task(_serve_guarded(_server, sock))
