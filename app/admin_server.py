@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import shared_proxy
+from . import category_endpoint, shared_proxy
 from .activity import prune as prune_usage
 from .content_store import ensure_secret, prune as prune_content
 from .api_helpers import APP_VERSION
@@ -21,8 +21,8 @@ from .settings_store import atomic_write_text
 from .tool_editor import validate_tool_code
 from .update_check import update_check_loop
 from .venv_manager import python_path
-from .routes import (agent_identities, auth, backup, content, instances, logs,
-                     permissions, settings, system, tools, usage, venvs)
+from .routes import (agent_identities, auth, backup, categories, content, instances,
+                     logs, permissions, settings, system, tools, usage, venvs)
 
 logger = get_manager_logger()
 WATCHDOG_INTERVAL = 10
@@ -271,12 +271,14 @@ async def _lifespan(app: FastAPI):
     specs.cancel()
     pruner.cancel()
     health.cancel()
+    await category_endpoint.stop_all()
     await shared_proxy.stop_proxy()
 
 app = FastAPI(title="OWUI MCP Spawner", version=APP_VERSION, lifespan=_lifespan)
 for router in (auth.router, instances.router, tools.router, logs.router, venvs.router,
                settings.router, usage.router, permissions.router, content.router,
-               system.router, agent_identities.router, backup.router):
+               system.router, agent_identities.router, backup.router,
+               categories.router):
     app.include_router(router)
 
 @app.middleware("http")
@@ -296,3 +298,29 @@ async def root() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 app.mount("/", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+async def asgi(scope, receive, send):
+    """What uvicorn serves: the MCP endpoints, and the manager behind them.
+
+    A dispatcher rather than a mount. `_revalidate_static` above is an
+    `@app.middleware("http")`, and Starlette middleware wraps the response of
+    every request that reaches the FastAPI app — including a streamable-HTTP
+    session that is meant to stay open. Sitting *in front of* the app instead
+    means MCP traffic never enters that chain at all.
+
+    Only `/mcp/category/...` is taken here so far, and only while category
+    endpoints are switched on — switched off the path is not intercepted, so it
+    ends in the ordinary 404 of a URL this manager does not serve rather than
+    in a 403 that announces a feature is there and closed. The instance
+    endpoints (`/mcp/<id>`), which the shared-port listener serves on a second
+    port today, are the second branch this dispatcher exists for.
+    """
+    if (scope["type"] == "http"
+            and scope.get("path", "").startswith(category_endpoint.PREFIX)
+            and category_endpoint.enabled()):
+        await category_endpoint.handle(scope, receive, send)
+        return
+    # Everything else, lifespan included: the manager's own startup and
+    # shutdown run in the FastAPI app and must keep doing so.
+    await app(scope, receive, send)

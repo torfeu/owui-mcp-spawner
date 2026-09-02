@@ -2,6 +2,7 @@ import { applyEditMode, clearToken, getToken, hideLoginModal, setToken, showLogi
 import { bindEdit, openEdit } from "./config.js";
 import { openEditorForInstance } from "./editor.js";
 import { bindFilter, bindPagination, bindSorting, configureInstanceActions, loadInstances } from "./instances.js";
+import { bindCategories, loadCategories } from "./categories.js";
 import { loadSystemStats } from "./system.js";
 import { bindInfo, openInfo } from "./info.js";
 import { bindLogs, openLogs } from "./logs.js";
@@ -93,6 +94,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindFilter();
   bindSorting();
   bindPagination();
+  bindCategories();
 
   const statusResponse = await fetch("/api/auth-status");
   const status = await statusResponse.json();
@@ -116,6 +118,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 async function poll() {
   await loadSystemStats();
   await loadInstances();
+  // After the instances: the bar is only shown for a category the filter
+  // offers, and the filter's options are rebuilt in loadInstances().
+  await loadCategories();
 }
 
 function startPolling() {

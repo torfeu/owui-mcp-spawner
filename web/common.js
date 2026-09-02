@@ -186,6 +186,48 @@ export function venvChoice(selectId, inputId) {
   return name;
 }
 
+/** Put *text* on the clipboard. Returns false when even the fallback failed.
+ *
+ * `navigator.clipboard` exists only in a secure context, and this manager is
+ * normally reached over plain HTTP on a LAN address — measured on the live
+ * installation: `http://192.168.1.100:7860` reports `isSecureContext: false`
+ * and `navigator.clipboard` as `undefined`. So the modern API is tried where it
+ * exists and the legacy path is used where it does not, rather than telling
+ * somebody to select a URL that is only visible while the mouse hovers it.
+ *
+ * The legacy path needs a real, focusable element: `display: none` or
+ * `visibility: hidden` leave the selection empty and make the copy a silent
+ * no-op. It also needs the user gesture that is still in flight, which is why
+ * nothing is awaited before it on the path that will use it.
+ */
+export async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Refused by a permissions policy or a sandbox — the fallback may still
+      // work, so fall through instead of giving up here.
+    }
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, text.length);   // iOS ignores select() alone
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function showAlert(type, message) {
   const area = document.getElementById("alert-area");
   const element = document.createElement("div");

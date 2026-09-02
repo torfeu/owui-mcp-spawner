@@ -56,6 +56,8 @@ EXPECTED_API_ROUTES = {
     ("POST", "/api/instances/{instance_id}/call"),
     ("GET", "/api/backup"),
     ("POST", "/api/backup/restore"),
+    ("GET", "/api/categories"),
+    ("GET", "/api/categories/{name}/export"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
     ("GET", "/api/settings/mcp-token"),
@@ -518,6 +520,9 @@ class ReadTokenTests(unittest.TestCase):
         # Load figures, not secrets — and monitoring is precisely what a
         # read-only token is for.
         "/api/system/stats",
+        # Which categories exist and what is in them. The URL it names is
+        # public knowledge; the token that opens it is not in the payload.
+        "/api/categories",
     }
     # Hand out a credential verbatim — password only, even though they are GETs.
     ADMIN_ONLY = {
@@ -528,6 +533,9 @@ class ReadTokenTests(unittest.TestCase):
         "/api/settings/read-token",
         "/api/settings/agent-token",
         "/api/instances/{instance_id}/export",
+        # Same payload shape as the per-instance export, same reason: it
+        # carries the MCP Bearer token so the import works on arrival.
+        "/api/categories/{name}/export",
     }
 
     PASSWORD = "admin-password"
@@ -690,6 +698,7 @@ class AgentTokenTests(unittest.TestCase):
         ("GET", "/api/settings/read-token"),
         ("GET", "/api/settings/agent-token"),
         ("GET", "/api/instances/{instance_id}/export"),
+        ("GET", "/api/categories/{name}/export"),
         ("PUT", "/api/settings"),
         # Assigning an account to a person hands them that account's data.
         ("PUT", "/api/policy"),

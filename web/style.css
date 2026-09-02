@@ -1475,6 +1475,123 @@ body.guest .admin-col { display: none; }
 /* Auto-fit rather than four fixed columns: the number of tiles depends on how
    many drives the machine has, and a second row is better than four squeezed
    columns. */
+/* The category endpoint bar — shown only while a category is filtered for. */
+.category-endpoint {
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.cat-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+}
+
+.cat-url {
+  flex: 1;
+  min-width: 220px;
+  /* The URL is the one thing here somebody has to read character by character
+     before pasting it into OpenWebUI, so it gets to overflow rather than wrap
+     into an unreadable block. */
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.cat-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* The list in the settings, under the switch that turns the endpoints on:
+   one row per category, name on the left, its export on the right — the same
+   gesture the instance rows offer, one level up. */
+.cat-list {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.cat-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.cat-row:last-child { border-bottom: none; }
+
+/* The name is the copy button: a real <button> so it is reachable by keyboard
+   and announced as an action, styled as the text it looks like. */
+.cat-row-name {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.cat-row-name:hover { color: var(--primary); }
+
+.cat-row-meta,
+.cat-row-url {
+  /* One slot, two contents. Both take the slack so the Export buttons line up
+     in a column however long the names are. */
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cat-row-url {
+  /* Scrolls rather than wraps: this is the string somebody reads character by
+     character before pasting it into OpenWebUI. */
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* Hovering the row swaps the counts for the URL in that slot — the address is
+   checkable without a column of its own, and nothing shifts. */
+.cat-row-url { display: none; }
+.cat-row:hover .cat-row-meta { display: none; }
+.cat-row:hover .cat-row-url { display: block; }
+
+@media (max-width: 700px) {
+  .cat-row {
+    flex-wrap: wrap;
+  }
+
+  .cat-row-meta,
+  .cat-row-url {
+    /* Own line rather than a squeezed middle column: on a phone the name and
+       the button are what the row is for. Hover does not exist there, so the
+       URL is shown outright instead of behind a pointer that never arrives. */
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .cat-row-url { display: block; }
+  .cat-row-meta { display: none; }
+}
+
+.cat-note code { font-size: 11px; }
+
 .system-bar {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));

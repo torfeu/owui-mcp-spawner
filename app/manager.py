@@ -109,7 +109,7 @@ def main() -> None:
           f" user-identity: {identity_label}]\n")
 
     uvicorn.run(
-        "app.admin_server:app",
+        "app.admin_server:asgi",
         host=args.host,
         port=args.port,
         reload=args.reload,

@@ -42,6 +42,8 @@
       </select>
     </div>
 
+    <div class="category-endpoint admin-col hidden" id="category-endpoint"></div>
+
     <div class="table-wrapper">
       <table id="instances-table">
         <thead>
@@ -541,6 +543,18 @@
           <label>Port</label>
           <input type="number" id="settings-shared-port" min="1024" max="65535" placeholder="e.g. 8100" />
         </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-section-title">Category Endpoints</h3>
+        <p class="modal-hint">Serve every running instance of one category as a single MCP server on this manager's port, under <code>/mcp/category/&lt;name&gt;</code>, with tools named <code>&lt;instance&gt;.&lt;tool&gt;</code>. Off by default — one endpoint reaches a whole category at once, so it is switched on by a person rather than by an upgrade. The MCP Bearer token applies; rights are decided by the instance, as on a direct connection. While they are on, every category is listed below with its URL and an OpenWebUI export; the dashboard shows the same for whichever category its filter is set to.</p>
+        <div class="form-grid">
+          <label></label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-category-endpoints" />
+            Serve categories as MCP endpoints
+          </label>
+        </div>
+        <div class="cat-list hidden" id="settings-category-list"></div>
       </div>
       <div class="settings-section">
         <h3 class="settings-section-title">Virtual Environments</h3>

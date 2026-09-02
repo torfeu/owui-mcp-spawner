@@ -1,7 +1,7 @@
 import os
 import threading
 from fastapi import APIRouter, Depends, HTTPException
-from .. import health, shared_proxy
+from .. import category_endpoint, health, shared_proxy
 from ..api_helpers import _rebind_running_instances, _restart_after_delay, require_token_edit, str_field
 from ..auth import (agent_token, auth_enabled, edit_mode, edit_mode_locked, mcp_bearer_token,
                     read_token, require_admin_auth, require_auth, token_edit_enabled,
@@ -35,6 +35,10 @@ async def get_settings() -> dict:
         "token_edit_enabled": token_edit_enabled(),
         "shared_port": shared_proxy.configured_port(),
         "shared_proxy_running": shared_proxy.proxy_running(),
+        # One category served as one MCP server on the manager port. Off by
+        # default: one endpoint reaches a whole category at once, and an
+        # upgrade must not open that door on its own.
+        "category_endpoints_enabled": category_endpoint.enabled(),
         "usage_retention_days": retention_days(),
         # The health check. Auto-restart is off by default: restarting a tool
         # nobody asked to restart is a decision, not a convenience.
@@ -252,7 +256,8 @@ async def update_settings(body: dict) -> dict:
             store_changes["content_base_url"] = url or None
 
     for key, current in (("health_check_enabled", health.enabled()),
-                         ("health_autorestart", health.autorestart())):
+                         ("health_autorestart", health.autorestart()),
+                         ("category_endpoints_enabled", category_endpoint.enabled())):
         if key in body:
             raw = body[key]
             if not isinstance(raw, bool):
@@ -328,6 +333,12 @@ async def update_settings(body: dict) -> dict:
         from ..settings_store import save_settings
         save_settings(store_changes)
         changed.extend(sorted(store_changes))
+        # Switching the category endpoints off takes their session managers
+        # down with it. Without this a client that is already connected keeps
+        # its session — the dispatcher would stop routing to it, so it could
+        # not be used, but it would sit there until the manager restarts.
+        if store_changes.get("category_endpoints_enabled") is False:
+            await category_endpoint.stop_all()
         # Read fresh on every call, in both the manager and the runners — no
         # restart, unlike the identity settings above.
 

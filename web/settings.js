@@ -1,4 +1,5 @@
-import { apiFetch, applyEditMode, downloadBlob, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
+import { renderCategorySettingsList } from "./categories.js";
+import { apiFetch, applyEditMode, copyText, downloadBlob, esc, fetchVenvs, formatBytes, setToken, showAlert, state } from "./common.js";
 
 // All three token fields get the same controls — one wiring for all of them,
 // so they cannot drift apart.
@@ -221,7 +222,8 @@ async function loadSettingsData() {
     }
     retention.value = stored;
 
-    document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
+    document.getElementById("settings-category-endpoints").checked = data.category_endpoints_enabled === true;
+  document.getElementById("settings-health-enabled").checked = data.health_check_enabled !== false;
     document.getElementById("settings-health-autorestart").checked = !!data.health_autorestart;
     document.getElementById("settings-health-failures").value = data.health_failures_before_restart ?? 3;
 
@@ -243,6 +245,8 @@ async function loadSettingsData() {
 
     await renderVenvSettings();
     await renderAgentIdentities();
+    // Under the switch that turns them on, and only while they are on.
+    await renderCategorySettingsList();
     settingsLoaded = true;
   } catch (e) {
     showAlert("error", "Could not load settings: " + e.message);
@@ -582,12 +586,12 @@ function showIssuedToken(token) {
 
 async function copyIssuedToken() {
   const input = document.getElementById("settings-agent-token-value");
-  try {
-    await navigator.clipboard.writeText(input.value);
+  // Same secure-context problem as everywhere else, and it bit hardest here:
+  // this token is shown exactly once. copyText() takes the legacy path over
+  // plain HTTP instead of leaving it to be copied by hand.
+  if (await copyText(input.value)) {
     showAlert("success", "Token copied to the clipboard.");
-  } catch {
-    // Clipboard access needs a secure context; over plain HTTP in a LAN it is
-    // simply not there. Select the text instead of claiming a copy happened.
+  } else {
     input.select();
     showAlert("error", "Could not reach the clipboard — the token is selected, copy it by hand.");
   }
@@ -748,6 +752,7 @@ async function saveSettings() {
     }
     body[key] = value;
   }
+  body.category_endpoints_enabled = document.getElementById("settings-category-endpoints").checked;
   body.health_check_enabled = document.getElementById("settings-health-enabled").checked;
   body.health_autorestart = document.getElementById("settings-health-autorestart").checked;
 
