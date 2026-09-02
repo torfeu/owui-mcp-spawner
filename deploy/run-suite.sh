@@ -51,7 +51,14 @@ stamp="$WORK/.suite-started"
 touch "$stamp"
 
 # The unit caps the runtime; pytest-timeout is not a dependency of this project.
-"$PYTHON" -m pytest tests/ -q 2>&1
+# And pytest itself is not one either: the manager's venv on the server carries
+# only what the manager needs, so the suite runs as plain unittest there. Same
+# tests, and the reason they are written as unittest cases in the first place.
+if "$PYTHON" -c 'import pytest' 2>/dev/null; then
+    "$PYTHON" -m pytest tests/ -q 2>&1
+else
+    "$PYTHON" -m unittest discover -s tests -t . 2>&1
+fi
 status=$?
 
 # The suite is not allowed to have touched the live install. Saying so out loud
