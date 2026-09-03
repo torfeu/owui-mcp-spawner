@@ -251,17 +251,21 @@ function renderTable(rows) {
     return;
   }
 
-/** The port column: an address, or an internal number that only looks like one.
+/** The port column, but only while the port is an address.
  *
- * While instances are served through the manager port or one of their own,
- * they bind localhost and this number answers nobody from outside. It still
- * belongs in the table — it is what the process holds, and what a port
- * conflict is about — but it must not read as a second way in.
+ * Served through the manager port or one of their own, the instances bind
+ * localhost and their own ports answer nobody from outside. A column of
+ * numbers that cannot be dialled is read as a second way in — by a person as
+ * readily as by a model — so the column goes away entirely and comes back the
+ * moment the instances are exposed on their own ports again. The number is not
+ * lost: Edit shows and changes it, which is where a port conflict is settled.
  */
-function portCell(inst) {
-  if (inst.port == null) return "";
-  if (!inst.local_port) return String(inst.port);
-  return `<span class="cell-muted" title="Internal port, bound to localhost — reach this instance at ${esc(inst.url || "")}">${inst.port} · local</span>`;
+function togglePortColumn(rows) {
+  const dialable = rows.some(inst => inst.port != null && !inst.local_port);
+  const header = document.getElementById("col-port");
+  if (header) header.classList.toggle("hidden", !dialable);
+  document.querySelectorAll("#instances-body .port-cell")
+          .forEach(cell => cell.classList.toggle("hidden", !dialable));
 }
 
   tbody.innerHTML = pageRows.map(inst => `
@@ -271,12 +275,14 @@ function portCell(inst) {
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
-      <td class="admin-col">${portCell(inst)}</td>
+      <td class="admin-col port-cell">${inst.port ?? ""}</td>
       <td class="admin-col"><span class="venv-badge">${esc(inst.venv || 'default')}</span></td>
       <td class="url-cell admin-col">${inst.url ? `<a href="${esc(inst.url)}" target="_blank">${esc(inst.url)}</a>` : ""}</td>
       <td class="admin-col"><div class="actions">${state.guestMode ? "" : actionButtons(inst)}</div></td>
     </tr>
   `).join("");
+
+  togglePortColumn(pageRows);
 
   // Bind action buttons
   tbody.querySelectorAll("[data-action]").forEach(btn => {
