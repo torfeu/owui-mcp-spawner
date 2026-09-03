@@ -96,6 +96,23 @@ def proxy_running() -> bool:
     return listener_running(configured_port())
 
 
+def advertised_port() -> Optional[int]:
+    """The port to hand out for `/mcp/<id>`, or None for the instance's own.
+
+    What the dashboard shows and the OpenWebUI export writes. A port of its own
+    wins over the manager port: it is the more deliberate of the two and keeps
+    answering if the manager port is later switched off. None means neither way
+    in is on, so the instance's own address is all there is — and handing out an
+    address that does not answer would be worse than handing out the direct one.
+    """
+    own = configured_port()
+    if own:
+        return own
+    if manager_port_enabled():
+        return int(os.environ.get("MCP_MANAGER_PORT", "7860"))
+    return None
+
+
 def bind_host() -> str:
     """Where a listener of ours binds.
 

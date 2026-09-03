@@ -415,6 +415,51 @@ class SettingsRouteTests(unittest.TestCase):
         self.assertEqual(400, response.status_code)
 
 
+class AdvertisedUrlTests(unittest.TestCase):
+    """Which address the dashboard shows and the export writes.
+
+    Reported by the user on 03.09.: the manager port was on, the row and the
+    export still named the instance's own port. Both now ask one question in
+    one place — a port of its own, else the manager port, else direct.
+    """
+
+    def setUp(self):
+        self.original = os.environ.get("MCP_MANAGER_PORT")
+        os.environ["MCP_MANAGER_PORT"] = "7860"
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        os.environ.pop("MCP_MANAGER_PORT", None)
+        if self.original is not None:
+            os.environ["MCP_MANAGER_PORT"] = self.original
+
+    def test_neither_way_in_means_the_instances_own_address(self):
+        settings(self)
+        self.assertIsNone(sp.advertised_port())
+
+    def test_the_manager_port_is_advertised_when_it_serves(self):
+        settings(self, instance_endpoints_enabled=True)
+        self.assertEqual(7860, sp.advertised_port())
+
+    def test_a_port_of_its_own_wins(self):
+        # More deliberate of the two, and it keeps answering if the manager
+        # port is switched off later.
+        settings(self, instance_endpoints_enabled=True, shared_port=8100)
+        self.assertEqual(8100, sp.advertised_port())
+
+    def test_the_row_url_follows(self):
+        from app.api_helpers import _instance_to_dict
+
+        inst = instance("gesetze", port=8106)
+        settings(self, instance_endpoints_enabled=True)
+        d = _instance_to_dict(inst, "192.168.1.100", sp.advertised_port())
+        self.assertEqual("http://192.168.1.100:7860/mcp/gesetze", d["url"])
+
+        settings(self)
+        d = _instance_to_dict(inst, "192.168.1.100", sp.advertised_port())
+        self.assertEqual("http://192.168.1.100:8106/mcp", d["url"])
+
+
 class PortRegistryTests(unittest.IsolatedAsyncioTestCase):
     """Listeners are kept by port, not one per feature.
 

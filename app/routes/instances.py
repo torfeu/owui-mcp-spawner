@@ -50,7 +50,7 @@ async def list_instances(request: Request, include: str = "") -> list[dict]:
         # whole disk walk stays off the event loop — the UI polls this endpoint
         # every few seconds per open tab.
         configs = load_all_configs()
-        shared = shared_proxy.configured_port()  # one settings read for the whole list
+        shared = shared_proxy.advertised_port()  # one settings read for the whole list
         result = []
         for s in get_all_states(configs):
             cfg = configs.get(s.id)
@@ -72,7 +72,7 @@ async def get_instance(instance_id: str, request: Request) -> dict:
     if not inst:
         raise HTTPException(404, f"Instance '{instance_id}' not found")
     cfg = load_config(instance_id)
-    d = _instance_to_dict(inst, _request_host(request), shared_proxy.configured_port())
+    d = _instance_to_dict(inst, _request_host(request), shared_proxy.advertised_port())
     d.update(_config_fields(cfg))
     d["health"] = health.for_instance(instance_id)
     if not await is_request_authenticated(request):
@@ -367,9 +367,12 @@ async def export_instance(instance_id: str, request: Request) -> JSONResponse:
 
     display_host = _request_host(request) or cfg.server.host
     host_in_url = f"[{display_host}]" if ":" in display_host else display_host
-    shared = shared_proxy.configured_port()
-    if shared:
-        url = f"http://{host_in_url}:{shared}/mcp/{instance_id}"
+    # The same choice the dashboard makes: a port of its own, else the manager
+    # port, else the instance's own address. An export is pasted into OpenWebUI
+    # and has to name the address that answers there.
+    via_port = shared_proxy.advertised_port()
+    if via_port:
+        url = f"http://{host_in_url}:{via_port}/mcp/{instance_id}"
     else:
         url = f"http://{host_in_url}:{inst.port}{inst.endpoint}"
 

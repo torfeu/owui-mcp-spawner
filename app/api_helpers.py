@@ -608,15 +608,17 @@ def _request_host(request: Request) -> str | None:
 def _instance_to_dict(
     inst: MCPInstance,
     display_host: str | None = None,
-    shared: int | None = None,
+    via_port: int | None = None,
 ) -> dict:
+    """*via_port*: the port `/mcp/<id>` is served on — a port of its own or the
+    manager's. None means neither, and the instance's own address is the URL."""
     host = inst.host
     # If binding on all interfaces and caller knows the real IP, show that
     if display_host and host in ("0.0.0.0", "127.0.0.1", "::1", "localhost"):
         host = display_host
     host_in_url = f"[{host}]" if ":" in host else host  # bracket IPv6 addresses
-    if shared:
-        url = f"http://{host_in_url}:{shared}/mcp/{inst.id}"
+    if via_port:
+        url = f"http://{host_in_url}:{via_port}/mcp/{inst.id}"
     else:
         url = f"http://{host_in_url}:{inst.port}{inst.endpoint}"
     return {
