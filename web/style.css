@@ -1935,3 +1935,11 @@ button.app-version:focus-visible {
     padding-right: 10px;
   }
 }
+
+/* The "running since" line under a status badge. Small and quiet: it is
+   context for the badge above it, not a column of its own. */
+.started-cell {
+  font-size: 11px;
+  margin-top: 3px;
+  white-space: nowrap;
+}

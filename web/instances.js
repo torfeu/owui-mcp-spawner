@@ -290,7 +290,7 @@ function togglePortColumn(rows) {
       <td class="id-cell">${esc(inst.id)}</td>
       <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
-      <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}</td>
+      <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}${startedCell(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
       <td class="admin-col port-cell">${esc(String(addressPort(inst)))}</td>
       <td class="admin-col"><span class="venv-badge">${esc(inst.venv || 'default')}</span></td>
@@ -371,6 +371,21 @@ function memoryCell(inst) {
 function statusBadge(status, error = "") {
   const title = error ? ` title="${esc(error)}"` : "";
   return `<span class="badge badge-${status}"${title}>${status}</span>`;
+}
+
+/** Since when this instance has been running — nothing at all when it is not.
+ *
+ * The time comes from the process, so it survives a manager restart and cannot
+ * claim a start for something that has been replaced since. A stopped instance
+ * shows no time rather than its last one: "stopped since" is a different fact,
+ * and one nobody here knows.
+ */
+function startedCell(inst) {
+  if (!inst.started_at) return "";
+  const started = new Date(inst.started_at * 1000);
+  if (isNaN(started)) return "";
+  const shown = started.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+  return `<div class="cell-muted started-cell" title="Running since ${esc(started.toLocaleString())}">${esc(shown)}</div>`;
 }
 
 function actionButtons(inst) {

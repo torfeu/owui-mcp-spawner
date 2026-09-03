@@ -20,6 +20,7 @@ from .config_store import (
 from .dependency_manager import install_dependencies
 from .logger import get_manager_logger
 from .process_manager import restart_instance
+from . import system_stats
 from .schema import MCPConfig, MCPInstance, MCPStatus, ServerConfig, InstallConfig, ToolSourceConfig
 from .tool_editor import generate_openwebui_json, parse_requirements, valve_names, validate_tool_code
 from .update_check import is_newer
@@ -636,6 +637,11 @@ def _instance_to_dict(
         "endpoint": inst.endpoint,
         "url": url,
         "local_port": bool(via_port),
+        # When this process started, or None. Only for something that is
+        # actually running: a stopped instance has no "since", and a leftover
+        # timestamp would read as one.
+        "started_at": (system_stats.started_at(inst.pid)
+                       if inst.status == MCPStatus.running else None),
         "pid": inst.pid,
         "error": inst.error,
     }

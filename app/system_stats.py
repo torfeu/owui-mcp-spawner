@@ -17,7 +17,9 @@ sound here because the manager is a single process; each is guarded so that the
 very first reading reports *nothing* rather than a fabricated zero.
 """
 import threading
+import os
 import time
+from typing import Optional
 from pathlib import Path
 
 try:
@@ -194,6 +196,35 @@ def _machine() -> dict:
         "network": _net_rates(),
     }
 
+
+def started_at(pid: Optional[int]) -> Optional[float]:
+    """When that process began, as epoch seconds — or None if it cannot be told.
+
+    Read from the process itself rather than noted when the manager starts it:
+    that way it survives a manager restart, and it cannot drift from reality by
+    claiming a start for something that has since been replaced.
+
+    None is a real answer here. psutil is optional (see the module docstring),
+    the process may be gone by the time anybody asks, and on a system without
+    `/proc` there is nothing to fall back to. A caller that gets None shows
+    nothing, which is better than a made-up time.
+    """
+    if not pid:
+        return None
+    if psutil is not None:
+        try:
+            proc = _procs.get(pid)
+            if proc is None or not proc.is_running():
+                proc = psutil.Process(pid)
+                _procs[pid] = proc
+            return proc.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            return None
+    try:
+        # Linux without psutil: the directory is created when the process is.
+        return os.stat(f"/proc/{pid}").st_ctime
+    except (OSError, ValueError):
+        return None
 
 def _process_tree(pid: int) -> dict | None:
     """RSS and CPU of one runner plus its children, or None if it is gone.

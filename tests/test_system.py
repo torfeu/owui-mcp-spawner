@@ -10,6 +10,7 @@ has to say what is wrong instead of returning a 500 that looks like a bug.
 import contextlib
 import os
 import pathlib
+import time
 import unittest
 from unittest.mock import patch
 
@@ -291,3 +292,42 @@ class SystemRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartedAtTests(unittest.TestCase):
+    """When an instance started — read from the process, never remembered."""
+
+    def test_the_running_process_answers_with_its_start(self):
+        import os
+        from app.system_stats import started_at
+
+        value = started_at(os.getpid())
+        self.assertIsInstance(value, float)
+        self.assertLess(value, time.time() + 1)
+
+    def test_nothing_to_ask_means_nothing_to_answer(self):
+        from app.system_stats import started_at
+
+        self.assertIsNone(started_at(None))
+        self.assertIsNone(started_at(0))
+        # A pid nothing is behind: not an error, just no answer.
+        self.assertIsNone(started_at(2 ** 22 - 1))
+
+    def test_a_stopped_instance_carries_no_time(self):
+        # "stopped since" is a different fact, and one the manager does not
+        # know — showing the last start for it would be a small lie.
+        from app.api_helpers import _instance_to_dict
+        from app.schema import MCPInstance, MCPStatus
+
+        inst = MCPInstance(id="x", name="X", category="", status=MCPStatus.stopped,
+                           port=8101, host="127.0.0.1", endpoint="/mcp", pid=None)
+        self.assertIsNone(_instance_to_dict(inst)["started_at"])
+
+    def test_a_running_instance_carries_the_process_start(self):
+        import os
+        from app.api_helpers import _instance_to_dict
+        from app.schema import MCPInstance, MCPStatus
+
+        inst = MCPInstance(id="x", name="X", category="", status=MCPStatus.running,
+                           port=8101, host="127.0.0.1", endpoint="/mcp", pid=os.getpid())
+        self.assertIsInstance(_instance_to_dict(inst)["started_at"], float)
