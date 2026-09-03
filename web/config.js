@@ -33,6 +33,7 @@ export async function openEdit(id) {
   document.getElementById("edit-autostart").checked = cfg.lifecycle?.auto_start ?? false;
   document.getElementById("edit-deps").value = (cfg.install?.dependencies || []).join("\n");
   document.getElementById("edit-identity-mode").value = cfg.identity_mode || "off";
+  document.getElementById("edit-forward-agent-token").checked = cfg.forward_agent_token === true;
   document.getElementById("edit-content-enabled").checked = cfg.content?.enabled ?? false;
   document.getElementById("edit-content-prefix").value = cfg.content?.url_prefix ?? "/cache/files/";
   fillVenvSelect(document.getElementById("edit-venv"), await fetchVenvs(), cfg.venv || "default", { allowNew: true });
@@ -117,6 +118,7 @@ async function saveEdit(restart) {
     install: { dependencies: deps },
     venv: venv || "default",
     identity_mode: document.getElementById("edit-identity-mode").value,
+    forward_agent_token: document.getElementById("edit-forward-agent-token").checked,
     content: {
       enabled: document.getElementById("edit-content-enabled").checked,
       url_prefix: document.getElementById("edit-content-prefix").value.trim() || "/cache/files/",

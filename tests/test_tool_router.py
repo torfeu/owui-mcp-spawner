@@ -170,3 +170,60 @@ class RouterSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwardedCredentialTests(unittest.TestCase):
+    """What travels to the target, and — just as much — what must not.
+
+    Two callers, two credentials, and they do not mix. A person's identity is a
+    JWT and belongs in the user header; a named agent's is a bearer and belongs
+    in Authorization. Sending the agent token in the user header made the
+    target answer "malformed token (expected three dot-separated segments)" —
+    found live on 03.09., the day the forwarding was built, and the reason this
+    class exists.
+    """
+
+    def setUp(self):
+        from app.identity import Identity, SOURCE_AGENT, SOURCE_TOKEN, identity_scope
+
+        self.Identity, self.SOURCE_AGENT = Identity, SOURCE_AGENT
+        self.SOURCE_TOKEN, self.identity_scope = SOURCE_TOKEN, identity_scope
+        self.tools = load_router()
+        self.tools.valves.mcp_token = "the-shared-token"
+        self.tools.valves.forward_user_identity = True
+        from app.identity import header_name
+        self.user_header = header_name()
+
+    def _headers(self, identity):
+        with self.identity_scope(identity):
+            return self.tools._headers_for({"id": "target"})
+
+    def test_an_agent_travels_as_a_bearer_and_nowhere_else(self):
+        agent = self.Identity(sub="Claude", name="Claude", role="KI",
+                              source=self.SOURCE_AGENT, raw_token="mcpa_secret")
+        headers = self._headers(agent)
+        self.assertEqual("Bearer mcpa_secret", headers["Authorization"])
+        # The target would try to parse this as a JWT and refuse the call.
+        self.assertNotIn(self.user_header, headers)
+
+    def test_a_person_travels_as_a_user_token_and_the_router_keeps_its_own(self):
+        user = self.Identity(sub="u-1", name="Torsten", role="admin",
+                             source=self.SOURCE_TOKEN, raw_token="a.b.c")
+        headers = self._headers(user)
+        self.assertEqual("a.b.c", headers[self.user_header])
+        # The bearer says "this client may talk to that server" and stays ours.
+        self.assertEqual("Bearer the-shared-token", headers["Authorization"])
+
+    def test_an_agent_without_a_token_changes_nothing(self):
+        # The manager hands the token down only for an instance configured for
+        # it. Without it there is nothing to forward, and the router falls back
+        # to its own bearer rather than sending an empty one.
+        agent = self.Identity(sub="Claude", name="Claude", role="KI",
+                              source=self.SOURCE_AGENT, raw_token="")
+        headers = self._headers(agent)
+        self.assertEqual("Bearer the-shared-token", headers["Authorization"])
+        self.assertNotIn(self.user_header, headers)
+
+    def test_nobody_identified_means_the_routers_own_bearer_alone(self):
+        headers = self._headers(None)
+        self.assertEqual({"Authorization": "Bearer the-shared-token"}, headers)

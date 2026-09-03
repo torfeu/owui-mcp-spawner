@@ -153,6 +153,12 @@
             <option value="required">required — verified user + access rules</option>
           </select>
 
+          <label title="Only for an instance that has to pass a caller on — the tool router. It then sees the token of the agent calling it and forwards that instead of its own, so the target decides about that agent rather than about 'somebody with the shared token'. Off everywhere else: an agent token is long-lived and opens everything that agent may do.">Agent token</label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="edit-forward-agent-token" />
+            This instance's tools may see and forward it
+          </label>
+
           <label title="Give this instance a folder under content/&lt;id&gt;/ for the files its tools produce. Output valves are filled with that path, and download links the tool returns are rewritten to this server.">File storage</label>
           <label class="checkbox-label">
             <input type="checkbox" id="edit-content-enabled" />
