@@ -251,21 +251,38 @@ function renderTable(rows) {
     return;
   }
 
-/** The port column, but only while the port is an address.
+/** The port an instance is actually reached on — out of its URL, not its config.
  *
- * Served through the manager port or one of their own, the instances bind
- * localhost and their own ports answer nobody from outside. A column of
- * numbers that cannot be dialled is read as a second way in — by a person as
- * readily as by a model — so the column goes away entirely and comes back the
- * moment the instances are exposed on their own ports again. The number is not
- * lost: Edit shows and changes it, which is where a port conflict is settled.
+ * With a shared or category port set, that is the listener's port; with no way
+ * in but the instance itself, its own; and with the manager port serving, the
+ * manager's.
+ */
+function addressPort(inst) {
+  if (!inst.url) return inst.port ?? "";
+  try {
+    const parsed = new URL(inst.url);
+    return parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  } catch {
+    return inst.port ?? "";
+  }
+}
+
+/** The port column, shown only when it says something the page does not.
+ *
+ * Reached through the port this dashboard is served on, the number is in every
+ * row and in the URL beside it, and a column of ports that are all the one in
+ * the address bar reads as a second way in — a person tries them as readily as
+ * a model does. A *different* port is exactly the case worth showing: a shared
+ * port, or one instance per port. The configured number is never lost either
+ * way; Edit shows and changes it, which is where a port conflict is settled.
  */
 function togglePortColumn(rows) {
-  const dialable = rows.some(inst => inst.port != null && !inst.local_port);
+  const servedHere = location.port;
+  const informative = rows.some(inst => String(addressPort(inst)) !== String(servedHere));
   const header = document.getElementById("col-port");
-  if (header) header.classList.toggle("hidden", !dialable);
+  if (header) header.classList.toggle("hidden", !informative);
   document.querySelectorAll("#instances-body .port-cell")
-          .forEach(cell => cell.classList.toggle("hidden", !dialable));
+          .forEach(cell => cell.classList.toggle("hidden", !informative));
 }
 
   tbody.innerHTML = pageRows.map(inst => `
@@ -275,7 +292,7 @@ function togglePortColumn(rows) {
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
-      <td class="admin-col port-cell">${inst.port ?? ""}</td>
+      <td class="admin-col port-cell">${esc(String(addressPort(inst)))}</td>
       <td class="admin-col"><span class="venv-badge">${esc(inst.venv || 'default')}</span></td>
       <td class="url-cell admin-col">${inst.url ? `<a href="${esc(inst.url)}" target="_blank">${esc(inst.url)}</a>` : ""}</td>
       <td class="admin-col"><div class="actions">${state.guestMode ? "" : actionButtons(inst)}</div></td>
