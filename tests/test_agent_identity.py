@@ -247,3 +247,57 @@ class BearerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenForwardingTests(StoreTestCase):
+    """Whether an agent identity carries the credential it was proven with.
+
+    It does not, unless the caller asks — and the only caller that asks is the
+    runner, for an instance whose config says its tools may pass the caller on.
+    A user JWT is short-lived and bound to a session; an agent token is
+    long-lived and opens everything that agent may do, so it stays out of tool
+    code until somebody decides otherwise for one instance.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.record, self.token = agent_identity.create("claude-code", "Claude", "assistant")
+
+    def test_by_default_the_identity_carries_no_token(self):
+        who = agent_identity.identify(self.token)
+        self.assertIsNotNone(who)
+        self.assertEqual("claude-code", who.sub)
+        self.assertEqual("", who.raw_token)
+
+    def test_asked_for_it_the_identity_carries_the_token(self):
+        who = agent_identity.identify(self.token, with_token=True)
+        self.assertEqual(self.token, who.raw_token)
+
+    def test_the_same_goes_through_the_request_helper(self):
+        headers = {"Authorization": f"Bearer {self.token}"}
+        self.assertEqual("", agent_identity.identify_request(headers).raw_token)
+        self.assertEqual(self.token,
+                         agent_identity.identify_request(headers, with_token=True).raw_token)
+
+    def test_a_wrong_token_carries_nothing_either_way(self):
+        headers = {"Authorization": "Bearer not-a-real-token"}
+        self.assertIsNone(agent_identity.identify_request(headers))
+        self.assertIsNone(agent_identity.identify_request(headers, with_token=True))
+
+    def test_the_runner_only_asks_when_the_config_allows_it(self):
+        # The gate that makes this narrow: one instance, by its own config.
+        import inspect
+        import app.mcp_runner as runner
+
+        self.assertIn("with_token=forward_agent_token",
+                      inspect.getsource(runner._resolve_identity))
+        self.assertIn("forward_agent_token=cfg.forward_agent_token",
+                      inspect.getsource(runner))
+
+    def test_off_is_the_default_in_the_config(self):
+        from app.schema import MCPConfig, ServerConfig, ToolSourceConfig
+
+        cfg = MCPConfig(id="demo", name="Demo",
+                        server=ServerConfig(host="127.0.0.1", port=8199, endpoint="/mcp"),
+                        tool_source=ToolSourceConfig(path="tools/demo.json"))
+        self.assertIs(False, cfg.forward_agent_token)

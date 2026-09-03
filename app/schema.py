@@ -125,6 +125,13 @@ class MCPConfig(BaseModel):
     lifecycle: LifecycleConfig = LifecycleConfig()
     venv: str = "default"
     identity_mode: IdentityMode = IdentityMode.off
+    # Whether this instance's tool code may see the *agent* token a caller
+    # arrived with. Off everywhere by default, and deliberately not a global
+    # setting: an agent token is long-lived and opens everything that agent may
+    # do, while a user JWT — which tools always see — is short-lived and bound
+    # to one session. Only an instance that has to pass the caller on needs
+    # this, and today that is the tool router alone.
+    forward_agent_token: bool = False
     # Stands in when no user token arrives — for callers that have no login.
     machine_identity: Optional[MachineIdentity] = None
     content: ContentConfig = ContentConfig()

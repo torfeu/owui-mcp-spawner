@@ -261,7 +261,8 @@ class ApiContractTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp",
             "pid": 123, "error": "secret detail",
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off,
+                            "forward_agent_token": False, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -285,7 +286,8 @@ class ApiContractTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp",
             "pid": 123, "error": None,
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off,
+                            "forward_agent_token": False, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -615,7 +617,8 @@ class ReadTokenTests(unittest.TestCase):
             "category": "Tests", "status": type("Status", (), {"value": "running"})(),
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp", "pid": 123, "error": None,
         })()
-        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off, "content": ContentConfig()})()
+        fake_config = type("Config", (), {"locked": False, "venv": "default", "identity_mode": IdentityMode.off,
+                            "forward_agent_token": False, "content": ContentConfig()})()
         with (
             patch("app.routes.instances.get_all_states", return_value=[fake_state]),
             patch("app.routes.instances.load_all_configs", return_value={"demo": fake_config}),
@@ -942,7 +945,9 @@ class BundledVersionTests(unittest.TestCase):
             "port": 8123, "host": "127.0.0.1", "endpoint": "/mcp", "pid": 1, "error": None,
         })()
         fake_config = type("Config", (), {"id": "demo", "locked": False, "venv": "default",
-                                          "identity_mode": IdentityMode.off, "content": ContentConfig()})()
+                                          "identity_mode": IdentityMode.off,
+                                          "forward_agent_token": False,
+                                          "content": ContentConfig()})()
         try:
             with (
                 patch("app.routes.instances.get_all_states", return_value=[fake_state]),

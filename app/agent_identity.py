@@ -216,7 +216,7 @@ def public_list() -> list[dict]:
 
 # ── lookup (runner side) ──────────────────────────────────────────────────────
 
-def identify(token: str) -> Optional[Identity]:
+def identify(token: str, with_token: bool = False) -> Optional[Identity]:
     """The identity behind *token*, or None if it belongs to nobody.
 
     Compared against every record with `compare_digest` and without an early
@@ -235,7 +235,13 @@ def identify(token: str) -> Optional[Identity]:
     if found is None:
         return None
     return Identity(sub=found["sub"], name=found["name"], role=found["role"],
-                    source=SOURCE_AGENT)
+                    source=SOURCE_AGENT,
+                    # Only when the caller asks for it. The token is what opens
+                    # everything this agent may do, and it is long-lived — a
+                    # user JWT expires, this does not. The one caller that asks
+                    # is the runner, and only for an instance whose config says
+                    # its tools may pass the caller on.
+                    raw_token=token if with_token else "")
 
 
 def bearer_token(headers: dict) -> str:
@@ -249,9 +255,14 @@ def bearer_token(headers: dict) -> str:
     return ""
 
 
-def identify_request(headers: dict) -> Optional[Identity]:
-    """The agent identity a request carries, if any."""
-    return identify(bearer_token(headers))
+def identify_request(headers: dict, with_token: bool = False) -> Optional[Identity]:
+    """The agent identity a request carries, if any.
+
+    *with_token* decides whether the identity carries the credential it was
+    established with — see `identify`. The runner passes it for one kind of
+    instance only.
+    """
+    return identify(bearer_token(headers), with_token=with_token)
 
 
 # ── writing (manager side) ────────────────────────────────────────────────────

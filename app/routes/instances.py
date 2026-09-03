@@ -33,6 +33,7 @@ def _config_fields(cfg) -> dict:
         "venv": cfg.venv if cfg else DEFAULT_VENV,
         "bundled_update": bundled["version"] if bundled and bundled["update_available"] else "",
         "identity_mode": cfg.identity_mode.value if cfg else IdentityMode.off.value,
+        "forward_agent_token": bool(cfg.forward_agent_token) if cfg else False,
         "content_enabled": cfg.content.enabled if cfg else False,
     }
 
@@ -230,6 +231,14 @@ async def update_config(instance_id: str, body: dict) -> dict:
             raise HTTPException(422, f"Invalid identity_mode '{raw_mode}': off, optional or required")
         if new_identity_mode != cfg.identity_mode:
             cfg.identity_mode = new_identity_mode
+            identity_changed = True
+
+    if "forward_agent_token" in body:
+        raw_forward = body["forward_agent_token"]
+        if not isinstance(raw_forward, bool):
+            raise HTTPException(422, "forward_agent_token must be true or false")
+        if raw_forward != cfg.forward_agent_token:
+            cfg.forward_agent_token = raw_forward
             identity_changed = True
 
     venv_changed = False

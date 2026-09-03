@@ -90,7 +90,8 @@ def _claims_an_identity(headers: dict) -> bool:
 
 
 def _resolve_identity(ctx, mode: IdentityMode, instance_id: str = "",
-                      machine: Optional[Identity] = None) -> tuple[Optional[Identity], str]:
+                      machine: Optional[Identity] = None,
+                      forward_agent_token: bool = False) -> tuple[Optional[Identity], str]:
     """Establish who is calling. Returns (identity, rejection reason).
 
     An identity of None with an empty reason means "none was offered and none
@@ -127,7 +128,7 @@ def _resolve_identity(ctx, mode: IdentityMode, instance_id: str = "",
             # Nobody claimed to be a *user* — this is the agent-CLI case. The
             # named token goes first: it says who, where the machine identity
             # only says "somebody holding the instance's Bearer token".
-            agent = agent_identity.identify_request(headers)
+            agent = agent_identity.identify_request(headers, with_token=forward_agent_token)
             if agent is not None:
                 record_identity(agent, instance_id)
                 return agent, ""
@@ -281,7 +282,8 @@ def build_server(cfg: MCPConfig, mcp_tool_defs: list[dict], tools_instance):
     async def handle_list_tools(ctx, params) -> "types.ListToolsResult":
         defs = mcp_tool_defs
         if identity_mode != IdentityMode.off:
-            identity, refusal = _resolve_identity(ctx, identity_mode, cfg.id, machine_identity)
+            identity, refusal = _resolve_identity(ctx, identity_mode, cfg.id, machine_identity,
+                                                  forward_agent_token=cfg.forward_agent_token)
             if refusal:
                 # An empty catalog rather than an error: a client that cannot
                 # identify its user should see nothing to call, and the refusal
@@ -315,7 +317,8 @@ def build_server(cfg: MCPConfig, mcp_tool_defs: list[dict], tools_instance):
 
         identity = None
         if identity_mode != IdentityMode.off:
-            identity, refusal = _resolve_identity(ctx, identity_mode, cfg.id, machine_identity)
+            identity, refusal = _resolve_identity(ctx, identity_mode, cfg.id, machine_identity,
+                                                  forward_agent_token=cfg.forward_agent_token)
             if refusal:
                 logger.warning(f"Denied call to '{name}': {refusal}")
                 return answer(f"Access denied: {refusal}.")

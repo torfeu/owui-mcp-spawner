@@ -993,6 +993,14 @@ See `configs/example.json` for a full template. Configs live in `configs/` — o
 
 ---
 
+### An agent that calls through the router
+
+`forward_user_identity` passes a **person** on: the user JWT travels unchanged and the target verifies it itself. A named **agent** used to be lost on that path — the router replaced the incoming `Authorization` with its own, so every agent arrived as "somebody holding the shared token", and an instance deciding by agent identity could not tell one caller from another.
+
+It is passed on now, but narrowly. `forward_agent_token` in an instance's config (**off everywhere by default**) decides whether that instance's tool code may see the agent token a caller arrived with; only then does the router forward it instead of its own. The reason for the switch: a user JWT is short-lived and bound to one session, while an agent token is long-lived and opens everything that agent may do — it has no business in tool code that does not have to pass it on. Today that is the router alone.
+
+---
+
 ## Tests
 
 ```bash
