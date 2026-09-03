@@ -28,21 +28,34 @@ function syncEndpointRows() {
   show("settings-category-segment", categoriesServed);
 }
 
-function fillPortRow({ checkbox, input, status, port, running, path, off }) {
+function fillPortRow({ checkbox, input, port }) {
   const on = port != null;
   document.getElementById(checkbox).checked = on;
   const field = document.getElementById(input);
   field.value = on ? port : "";
   field.disabled = !on;
+}
+
+/** The one line above a section: where this kind of endpoint answers.
+ *
+ * Both ways in, in one sentence. It described the port alone until 03.09.,
+ * which read as "not served" to somebody who had just switched the manager
+ * port on — the line said nothing about the way that was actually working.
+ * It reports what is *saved*, not what is ticked: it is about reality.
+ */
+function fillSectionStatus({ status, path, managerPort, onManagerPort, port, running, nothing }) {
   const line = document.getElementById(status);
   if (!line) return;
-  line.textContent = on
-    ? (running
-        ? `Port ${port} active — reachable on :${port}${path}`
-        : `Port ${port} configured but not listening — check the port and the log`)
-    : off;
+  const where = [];
+  if (onManagerPort) where.push(`on the manager port :${managerPort}`);
+  if (port != null) where.push(running ? `on port ${port}` : `on port ${port} (configured, not listening)`);
+
+  line.textContent = where.length
+    ? `Served ${where.join(" and ")} — ${path}`
+    : nothing;
+  const bad = port != null && !running;
   line.className = "settings-status " +
-    (on ? (running ? "settings-status-ok" : "settings-status-warn") : "settings-status-warn");
+    (where.length && !bad ? "settings-status-ok" : "settings-status-warn");
 }
 
 import { renderCategorySettingsList } from "./categories.js";
@@ -252,18 +265,22 @@ async function loadSettingsData() {
 
     // Shared MCP port
     // Both port rows behave the same, so they are filled by the same code.
-    fillPortRow({
-      checkbox: "settings-shared-enable", input: "settings-shared-port",
-      status: "settings-shared-status", port: data.shared_port,
-      running: data.shared_proxy_running, path: "/mcp/<id>",
-      off: "No port of its own — each instance is exposed on its own port",
+    fillPortRow({ checkbox: "settings-shared-enable", input: "settings-shared-port",
+                  port: data.shared_port });
+    fillPortRow({ checkbox: "settings-category-enable", input: "settings-category-port",
+                  port: data.category_port });
+    fillSectionStatus({
+      status: "settings-shared-status", path: "/mcp/<id>",
+      managerPort: data.port, onManagerPort: data.instance_endpoints_enabled === true,
+      port: data.shared_port, running: data.shared_proxy_running,
+      nothing: "Not served — each instance is reachable on its own port only",
     });
-    fillPortRow({
-      checkbox: "settings-category-enable", input: "settings-category-port",
-      status: "settings-category-status", port: data.category_port,
-      running: data.category_proxy_running,
+    fillSectionStatus({
+      status: "settings-category-status",
       path: `/mcp/${data.category_url_segment || "category"}/<name>`,
-      off: "No port of its own",
+      managerPort: data.port, onManagerPort: data.category_endpoints_enabled === true,
+      port: data.category_port, running: data.category_proxy_running,
+      nothing: "Not served — no category endpoint answers anywhere",
     });
 
     const retention = document.getElementById("settings-retention");
