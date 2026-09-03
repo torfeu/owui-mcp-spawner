@@ -533,7 +533,7 @@
       <div class="settings-section">
         <h3 class="settings-section-title">Instance Endpoints</h3>
         <div class="settings-status" id="settings-shared-status"></div>
-        <p class="modal-hint">Reach every running instance as <code>/mcp/&lt;id&gt;</code> — on this manager's port, on a port of its own, on both, or on neither. Both are off by default: an instance that binds to localhost becomes reachable from outside the moment one of them is on. Rights are decided by the instance, as on a direct connection. With a port of its own set, instances bind to localhost only and pick that up on their next restart.</p>
+        <p class="modal-hint">Reach every running instance as <code>/mcp/&lt;id&gt;</code> — on this manager's port, on a port of its own, on both, or on neither. Both are off by default: an instance that binds to localhost becomes reachable from outside the moment one of them is on. Rights are decided by the instance, as on a direct connection. As soon as either is on, the instances bind to localhost only — the point is one way in, not one more. Running instances are restarted for that when you save.</p>
         <div class="form-grid">
           <label></label>
           <label class="checkbox-label">

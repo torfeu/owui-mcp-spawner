@@ -96,6 +96,20 @@ def proxy_running() -> bool:
     return listener_running(configured_port())
 
 
+def instances_localhost_only() -> bool:
+    """Whether the runners are force-bound to loopback.
+
+    True as soon as there is a way in that does not need their own port. Both
+    switches promise "reachable through one port", and that promise is only
+    kept if the instance ports stop answering from outside — otherwise the
+    second door stays open and nobody asked for it to.
+
+    `process_manager` reads this when starting a runner, and the settings route
+    restarts what is running when the answer changes.
+    """
+    return configured_port() is not None or manager_port_enabled()
+
+
 def advertised_port() -> Optional[int]:
     """The port to hand out for `/mcp/<id>`, or None for the instance's own.
 
@@ -184,7 +198,7 @@ def _target_host(inst) -> str:
     else its own config host, and that is the address to dial. A wildcard is
     not an address: 0.0.0.0 and :: are reached on their loopback.
     """
-    if configured_port():
+    if instances_localhost_only():
         return "127.0.0.1"
     host = os.environ.get("MCP_RUNNER_HOST") or inst.host or "127.0.0.1"
     host = {"0.0.0.0": "127.0.0.1", "::": "::1", "::0": "::1"}.get(host, host)

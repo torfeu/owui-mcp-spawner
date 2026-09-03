@@ -211,7 +211,7 @@ Notes:
 
 - Only two open ports remain: the manager UI and the shared MCP port.
 - The MCP Bearer token keeps working unchanged (headers are passed through to the instance).
-- Already-running instances pick up the localhost-only binding on their next restart.
+- Instances bind to localhost only as soon as **either** way in is on — a port of its own or the manager port. That is the point of both: one way in, not one more. Instances that are already running are restarted when the switch is saved, so the change takes effect at once.
 - The proxy answers `503` for stopped instances and `404` for unknown IDs.
 
 ### Where they answer

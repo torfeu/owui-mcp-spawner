@@ -272,9 +272,12 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
 
         try:
             cmd = [runner_python, str(RUNNER_SCRIPT), "--config", str(config_path)]
-            # Shared-port mode: instances stay on localhost, only the proxy is public
-            from .settings_store import load_settings
-            if load_settings().get("shared_port"):
+            # Served through a port that is not this instance's own — the
+            # manager port, a shared one, or both: then this instance stays on
+            # localhost and only that way in is public. Otherwise it binds what
+            # it was told to.
+            from . import shared_proxy
+            if shared_proxy.instances_localhost_only():
                 runner_host = "127.0.0.1"
             else:
                 runner_host = os.environ.get("MCP_RUNNER_HOST")

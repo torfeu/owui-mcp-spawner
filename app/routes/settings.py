@@ -271,6 +271,9 @@ async def update_settings(body: dict) -> dict:
         if url != content_base_url():
             store_changes["content_base_url"] = url or None
 
+    # Whether the runners are on loopback is decided by two settings at once,
+    # so it is measured before and after rather than guessed from either.
+    bound_localhost_before = shared_proxy.instances_localhost_only()
     segment_changed = False
     # The category URL segment. Checked here rather than in the endpoint: a
     # segment an instance already answers to would hide that instance behind
@@ -360,12 +363,6 @@ async def update_settings(body: dict) -> dict:
             raise HTTPException(409, "; ".join(errors))
         for key, value in sorted(port_changes.items()):
             changed.append(key if value is not None else key + "_disabled")
-        if ("shared_port" in port_changes
-                and (current_shared is None) != (wanted_shared is None)):
-            # Mode switched (shared ↔ per-port): move instances between
-            # localhost-only and the configured host.
-            _rebind_running_instances()
-            changed.append("instances_restarting")
 
     if pw:
         set_password(pw)
@@ -402,8 +399,14 @@ async def update_settings(body: dict) -> dict:
         # reconnects on the new URL, instead of holding one that answers 404.
         if segment_changed:
             await category_endpoint.stop_all()
-        # Read fresh on every call, in both the manager and the runners — no
-        # restart, unlike the identity settings above.
+
+    # Both the shared port and the manager-port switch decide whether a runner
+    # binds loopback. Whichever of them moved, the instances that are already
+    # running still listen on the old address, while the URLs the dashboard
+    # shows already point at the new one.
+    if shared_proxy.instances_localhost_only() != bound_localhost_before:
+        _rebind_running_instances()
+        changed.append("instances_restarting")
 
     if update_change is not None:
         from ..settings_store import save_settings

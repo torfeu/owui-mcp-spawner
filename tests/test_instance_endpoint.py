@@ -415,6 +415,94 @@ class SettingsRouteTests(unittest.TestCase):
         self.assertEqual(400, response.status_code)
 
 
+class RebindRouteTests(unittest.TestCase):
+    """Flipping a switch has to move the instances that are already running."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from app.admin_server import app
+        import app.auth as auth
+
+        self.client = TestClient(app)
+        original = auth._password_hash
+        auth._password_hash = None
+        self.addCleanup(lambda: setattr(auth, "_password_hash", original))
+        self.rebinds = []
+        rebinder = patch("app.routes.settings._rebind_running_instances",
+                         lambda: self.rebinds.append(True))
+        rebinder.start()
+        self.addCleanup(rebinder.stop)
+
+        # A settings store that answers with what was written to it. A fake
+        # that never changes cannot show a change, and "before vs. after" is
+        # exactly what the route decides on here.
+        self.state = {}
+        reader = patch.object(sp, "load_settings", lambda: dict(self.state))
+        reader.start()
+        self.addCleanup(reader.stop)
+        saver = patch("app.settings_store.save_settings", lambda changes: self.state.update(changes))
+        saver.start()
+        self.addCleanup(saver.stop)
+
+    def test_switching_the_manager_port_on_rebinds(self):
+        # Without this the instances keep listening on their public address
+        # while the dashboard already shows the manager-port URL.
+        response = self.client.put("/api/settings", json={"instance_endpoints_enabled": True})
+        self.assertEqual(200, response.status_code)
+        self.assertIn("instances_restarting", response.json()["changed"])
+        self.assertEqual([True], self.rebinds)
+
+    def test_a_change_that_does_not_move_them_leaves_them_alone(self):
+        # A shared port beside an already-on manager port: they were on
+        # loopback before and stay there. Restarting every instance for that
+        # would be a cost with nothing bought.
+        self.state["instance_endpoints_enabled"] = True
+        with patch("app.shared_proxy.port_conflicts", lambda port: []), \
+             patch("app.shared_proxy.sync_listeners", self._sync):
+            response = self.client.put("/api/settings", json={"shared_port": 8100})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([], self.rebinds)
+
+    async def _sync(self, host=None):
+        return []
+
+
+class LocalhostOnlyTests(unittest.TestCase):
+    """When a runner is force-bound to loopback — the "one port" promise.
+
+    Asked for by the user on 03.09.: with the manager port serving `/mcp/<id>`,
+    the instance ports were still answering from the LAN. Both switches say
+    "reachable through one port", and that is only true once the other door is
+    shut.
+    """
+
+    def test_neither_switch_leaves_the_instances_where_they_are(self):
+        settings(self)
+        self.assertFalse(sp.instances_localhost_only())
+
+    def test_the_shared_port_binds_them_to_loopback(self):
+        settings(self, shared_port=8100)
+        self.assertTrue(sp.instances_localhost_only())
+
+    def test_the_manager_port_does_the_same(self):
+        # The way in that has no port of its own still makes the instance
+        # ports unnecessary — and an unnecessary open port is a door.
+        settings(self, instance_endpoints_enabled=True)
+        self.assertTrue(sp.instances_localhost_only())
+
+    def test_the_runner_is_started_on_loopback(self):
+        # The rule has to reach the process, not just the answer above.
+        import app.process_manager as pm
+        import inspect
+
+        source = inspect.getsource(pm.start_instance)
+        self.assertIn("instances_localhost_only", source)
+
+    def test_the_forwarder_dials_loopback_when_they_are_bound_there(self):
+        settings(self, instance_endpoints_enabled=True)
+        self.assertEqual("127.0.0.1", sp._target_host(instance(host="192.168.1.100")))
+
+
 class AdvertisedUrlTests(unittest.TestCase):
     """Which address the dashboard shows and the export writes.
 
