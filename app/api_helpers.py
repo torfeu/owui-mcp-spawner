@@ -611,7 +611,11 @@ def _instance_to_dict(
     via_port: int | None = None,
 ) -> dict:
     """*via_port*: the port `/mcp/<id>` is served on — a port of its own or the
-    manager's. None means neither, and the instance's own address is the URL."""
+    manager's. None means neither, and the instance's own address is the URL.
+
+    When it is set, `port` below is an internal number bound to localhost, not
+    an address anybody can dial — `local_port` says so, because a column of
+    port numbers that cannot be used reads as a second way in."""
     host = inst.host
     # If binding on all interfaces and caller knows the real IP, show that
     if display_host and host in ("0.0.0.0", "127.0.0.1", "::1", "localhost"):
@@ -631,6 +635,7 @@ def _instance_to_dict(
         "host": host,
         "endpoint": inst.endpoint,
         "url": url,
+        "local_port": bool(via_port),
         "pid": inst.pid,
         "error": inst.error,
     }

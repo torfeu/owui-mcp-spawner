@@ -535,6 +535,18 @@ class AdvertisedUrlTests(unittest.TestCase):
         settings(self, instance_endpoints_enabled=True, shared_port=8100)
         self.assertEqual(8100, sp.advertised_port())
 
+    def test_the_row_says_the_port_column_is_internal(self):
+        # The number stays — it is what the process holds and what a port
+        # conflict is about — but the table must not present it as a second
+        # address once nothing outside can reach it.
+        from app.api_helpers import _instance_to_dict
+
+        inst = instance("gesetze", port=8106)
+        settings(self, instance_endpoints_enabled=True)
+        self.assertIs(True, _instance_to_dict(inst, "h", sp.advertised_port())["local_port"])
+        settings(self)
+        self.assertIs(False, _instance_to_dict(inst, "h", sp.advertised_port())["local_port"])
+
     def test_the_row_url_follows(self):
         from app.api_helpers import _instance_to_dict
 
