@@ -187,8 +187,7 @@ function closeSettings() {
   // A freshly issued agent token must not still be on screen the next time the
   // dialog opens — it is shown once, and closing the dialog is that once
   // ending.
-  document.getElementById("settings-agent-token-box").classList.add("hidden");
-  document.getElementById("settings-agent-token-value").value = "";
+  hideIssuedToken();
 }
 
 async function loadSettingsData() {
@@ -672,6 +671,7 @@ async function resetCaller(sub, rows) {
   // Both lists, not just this one: removing an agent takes its token with it,
   // and a block above that still shows the identity is worse than stale — it
   // invites work with something that is gone.
+  hideIssuedToken();
   await renderKnownCallers();
   await renderAgentIdentities();
 }
@@ -735,6 +735,19 @@ async function renderAgentIdentities() {
   });
 }
 
+/** Take the one-time token off the screen.
+ *
+ * Not only when the dialog closes: revoking or removing the identity kills the
+ * token, and a box that still offers it for copying is worse than stale — it
+ * hands out a credential that opens nothing and looks like it does.
+ */
+function hideIssuedToken() {
+  const box = document.getElementById("settings-agent-token-box");
+  if (!box) return;
+  box.classList.add("hidden");
+  document.getElementById("settings-agent-token-value").value = "";
+}
+
 function showIssuedToken(token) {
   const box = document.getElementById("settings-agent-token-box");
   document.getElementById("settings-agent-token-value").value = token;
@@ -794,6 +807,7 @@ async function revokeAgentIdentity(sub) {
   if (!confirm(`Revoke '${sub}'? Its token stops working immediately. Any access rules for it stay.`)) return;
   try {
     await apiFetch(`/api/agent-identities/${encodeURIComponent(sub)}`, { method: "DELETE" });
+    hideIssuedToken();
     showAlert("success", `Agent identity '${sub}' revoked.`);
     await renderAgentIdentities();
     await renderKnownCallers();
