@@ -312,7 +312,7 @@ Only instances set to `required` are offered: a checkbox that governs nothing wo
 
 Two switches sit at the bottom. *Match by e-mail* lets a rule find its user by address when the id does not match — an address can be reassigned by an admin. *Match by name* does the same for the display name and is labelled unsafe on purpose: **the user can change that themselves in OpenWebUI**, so anyone could rename into someone else's rule. Both are off by default; the user id is always matched and cannot be switched off.
 
-**Roles** are the second tab of the same list. OpenWebUI's token carries no groups, but it does carry a role, and that one is signed — so a role is the closest thing to a group available here. It works as base equipment: a personal entry adds to what the role grants rather than replacing it, per instance, and an explicit deny on the person wins over everything. *Every admin may search the law database, but Nextcloud only for whoever is named.*
+**Roles** are the second tab of the same list. OpenWebUI's token carries no groups, but it does carry a role, and that one is signed — so a role is the closest thing to a group available here. It works as base equipment: a personal entry adds to what the role grants rather than replacing it, per instance, and an explicit deny on the person wins over everything.
 
 ### Callers without a login
 
