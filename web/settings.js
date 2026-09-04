@@ -669,7 +669,11 @@ async function resetCaller(sub, rows) {
       : "";
     showAlert("error", `Could not remove ${label}: ${e.message}${hint}`);
   }
+  // Both lists, not just this one: removing an agent takes its token with it,
+  // and a block above that still shows the identity is worse than stale — it
+  // invites work with something that is gone.
   await renderKnownCallers();
+  await renderAgentIdentities();
 }
 
 async function renderAgentIdentities() {
