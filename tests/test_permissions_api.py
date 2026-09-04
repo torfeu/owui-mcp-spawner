@@ -155,3 +155,114 @@ class PermissionsApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResetIdentityTests(PermissionsApiTests):
+    """The stop button: out of the list, out of the rules, out of the tokens.
+
+    Its reason for existing is somebody misbehaving right now, so it asks a
+    question and not a password — and it is written so that it *cannot* do the
+    thing the password guards. It deletes a key; it never writes a policy a
+    caller handed it. `PUT /api/policy` keeps the password because granting
+    rights hands somebody another account's credentials.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_agent_identity import StoreTestCase  # noqa: F401 — path only
+        self.agent_file = pathlib.Path(self.tmp.name) / "agent_identities.json"
+        self.agent_env = patch.dict(os.environ,
+                                    {"MCP_AGENT_IDENTITIES_FILE": str(self.agent_file)})
+        self.agent_env.start()
+        self.addCleanup(self.agent_env.stop)
+        os.environ.pop("MCP_AGENT_IDENTITIES", None)
+        from app import agent_identity
+        agent_identity._file_cache.clear()
+        self.addCleanup(agent_identity._file_cache.clear)
+        self.agent_identity = agent_identity
+
+    def _grant(self, sub):
+        response = self.client.put("/api/policy", headers=self.auth_header, json={
+            "policy": {"users": {sub: {"instances": {"inst": "*"}}}}})
+        self.assertEqual(200, response.status_code, response.text)
+
+    def _policy_users(self):
+        return list((policy.load_policy(force=True).get("users") or {}))
+
+    def test_forgetting_leaves_the_rules_where_they_are(self):
+        registry.record(ANNA, "inst")
+        self._grant("sub-anna")
+        body = self.client.delete("/api/identities/sub-anna",
+                                  headers=self.auth_header).json()
+        self.assertTrue(body["forgotten"])
+        self.assertEqual(["sub-anna"], self._policy_users())
+
+    def test_reset_takes_the_rules_with_it(self):
+        registry.record(ANNA, "inst")
+        self._grant("sub-anna")
+        body = self.client.delete("/api/identities/sub-anna/reset",
+                                  headers=self.auth_header).json()
+        self.assertTrue(body["forgotten"])
+        self.assertTrue(body["rules_removed"])
+        self.assertEqual([], self._policy_users())
+
+    def test_reset_of_an_agent_takes_its_token_too(self):
+        # A record without a token is not an agent any more, and a token
+        # without a record is a key without a lock.
+        self.agent_identity.create("claude", "Claude", "KI")
+        registry.record(Identity(sub="claude", name="Claude"), "inst")
+        self._grant("claude")
+        body = self.client.delete("/api/identities/claude/reset",
+                                  headers=self.auth_header).json()
+        self.assertTrue(body["token_removed"])
+        self.assertEqual([], [r["sub"] for r in self.agent_identity.public_list()])
+        self.assertEqual([], self._policy_users())
+
+    def test_a_person_is_not_mistaken_for_an_agent(self):
+        registry.record(ANNA, "inst")
+        body = self.client.delete("/api/identities/sub-anna/reset",
+                                  headers=self.auth_header).json()
+        self.assertFalse(body["token_removed"])
+
+    def test_the_route_cannot_grant_anything(self):
+        # The whole reason it may run without the password. Every other user's
+        # rules survive untouched, and no rule can appear that was not there.
+        registry.record(ANNA, "inst")
+        self.client.put("/api/policy", headers=self.auth_header, json={"policy": {"users": {
+            "sub-anna": {"instances": {"inst": "*"}},
+            "sub-ben": {"instances": {"other": ["one"]}}}}})
+        self.client.delete("/api/identities/sub-anna/reset", headers=self.auth_header)
+        after = policy.load_policy(force=True)
+        self.assertEqual(["sub-ben"], list(after["users"]))
+        self.assertEqual({"instances": {"other": ["one"]}}, after["users"]["sub-ben"])
+
+    def test_reset_needs_the_password_like_every_other_access_change(self):
+        # One line for everything that changes who may do what: no second,
+        # softer door into the room that PUT /api/policy guards.
+        registry.record(ANNA, "inst")
+        self._grant("sub-anna")
+        with patch.dict(os.environ, {"MCP_MANAGER_AGENT_TOKEN": "agent-token"}):
+            refused = self.client.delete("/api/identities/sub-anna/reset",
+                                         headers={"Authorization": "Bearer agent-token"})
+        # 403, not 401: the agent token is a valid credential, it is simply
+        # not the one an access change costs.
+        self.assertEqual(403, refused.status_code)
+        self.assertEqual(["sub-anna"], self._policy_users())
+
+    def test_forgetting_needs_no_password_because_it_takes_nothing_away(self):
+        # The agent token may write, but it may not change who is allowed what.
+        # Tidying the list is not that, so it goes through.
+        registry.record(ANNA, "inst")
+        self._grant("sub-anna")
+        with patch.dict(os.environ, {"MCP_MANAGER_AGENT_TOKEN": "agent-token"}):
+            response = self.client.delete("/api/identities/sub-anna",
+                                          headers={"Authorization": "Bearer agent-token"})
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(["sub-anna"], self._policy_users())
+
+    def test_resetting_somebody_who_was_never_there_is_not_an_error(self):
+        body = self.client.delete("/api/identities/nobody/reset",
+                                  headers=self.auth_header).json()
+        self.assertFalse(body["forgotten"])
+        self.assertFalse(body["rules_removed"])
+        self.assertFalse(body["token_removed"])

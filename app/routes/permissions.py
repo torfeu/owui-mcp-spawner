@@ -13,6 +13,7 @@ account without ever displaying a password.
 from fastapi import APIRouter, Depends, HTTPException
 
 from .. import agent_identity, identity_registry
+from ..agent_identity import AgentIdentityError
 from ..auth import require_admin_auth, require_auth
 from ..api_helpers import require_upload_or_edit
 from ..identity import PLAIN_HEADERS, header_name, identity_configured, trust_plain_headers
@@ -84,9 +85,60 @@ async def forget_identity(sub: str) -> dict:
     """Drop one person from the roster.
 
     Not a revocation: the rules live in the policy and stay untouched, and the
-    person reappears on their next call. It only tidies the list.
+    person reappears on their next call. It only tidies the list — which is why
+    it needs no password. To take rights away, see `reset` below.
     """
     return {"ok": True, "forgotten": identity_registry.forget(sub)}
+
+
+# Its own address rather than a flag on the route above: this one needs the
+# password, and a query parameter that quietly changes which credential is
+# required is the kind of thing nobody sees a year later.
+@router.delete("/api/identities/{sub}/reset",
+               dependencies=[Depends(require_auth), Depends(require_admin_auth),
+                             Depends(require_upload_or_edit)])
+async def reset_identity(sub: str) -> dict:
+    """The stop button: out of the list, out of the rules, out of the tokens.
+
+    The roster row goes, the rules go, and an agent identity of that id loses
+    its token as well — a record without a token is not an agent any more, and
+    a token without a record is a key without a lock. From the next request on
+    the caller is refused (with the usual deny-by-default) and reappears,
+    blank, whenever they try again.
+
+    Password, like `PUT /api/policy` and the token routes: one line for
+    everything that changes who may do what. The reason for reaching for this
+    is usually that something is going wrong right now, so the *code* is
+    removal-only — it deletes one key and never writes a policy a caller
+    supplied — but the credential is the same one every other access change
+    needs. No second, softer door into the same room.
+    """
+    forgotten = identity_registry.forget(sub)
+
+    rules_removed = False
+    try:
+        policy = load_policy(force=True)
+        users = policy.get("users")
+        if isinstance(users, dict) and sub in users:
+            del users[sub]
+            save_policy(policy)
+            rules_removed = True
+    except PolicyError as e:
+        # A policy file that cannot be read cannot be edited either. Say so
+        # rather than reporting a reset that did not happen.
+        raise HTTPException(422, f"Rules not removed: {e}")
+
+    token_removed = False
+    if any(record["sub"] == sub for record in agent_identity.public_list()):
+        try:
+            token_removed = agent_identity.delete(sub)
+        except AgentIdentityError as e:
+            raise HTTPException(409, f"Rules removed, token kept: {e}")
+
+    logger.info(f"Reset identity '{sub}' — roster={forgotten}, "
+                f"rules={rules_removed}, token={token_removed}")
+    return {"ok": True, "forgotten": forgotten, "rules_removed": rules_removed,
+            "token_removed": token_removed}
 
 
 @router.get("/api/policy", dependencies=[Depends(require_auth)])

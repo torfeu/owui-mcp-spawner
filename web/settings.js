@@ -321,6 +321,7 @@ async function loadSettingsData() {
 
     await renderVenvSettings();
     await renderAgentIdentities();
+    await renderKnownCallers();
     // Under the switch that turns them on, and only while they are on.
     await renderCategorySettingsList();
     settingsLoaded = true;
@@ -594,6 +595,83 @@ async function renderVenvSettings() {
 // one is its own route, and issuing a credential is not something to leave
 // sitting in a form until somebody presses a button somewhere else.
 
+/** Everyone this manager has seen or been told about, with the way back.
+ *
+ * The stop button lives here and not in Users & permissions on purpose: that
+ * page is for granting, and a destructive button on a screen somebody uses
+ * daily gets pressed by accident sooner or later. Same reason the confirmation
+ * spells out the consequences instead of asking "are you sure?".
+ */
+async function renderKnownCallers() {
+  const list = document.getElementById("settings-callers-list");
+  const status = document.getElementById("settings-callers-status");
+  if (!list || !status) return;
+
+  let data;
+  try {
+    data = await apiFetch("/api/identities");
+  } catch (e) {
+    list.innerHTML = "";
+    status.textContent = "Could not load the callers: " + e.message;
+    status.className = "settings-status settings-status-warn";
+    return;
+  }
+
+  const rows = data.identities || [];
+  status.textContent = rows.length
+    ? `${rows.length} known caller${rows.length === 1 ? "" : "s"}`
+    : "Nobody has called yet, and no rule names anybody";
+  status.className = "settings-status " + (rows.length ? "settings-status-ok" : "");
+
+  list.innerHTML = rows.map(row => {
+    const label = row.name || row.email || row.sub;
+    const bits = [];
+    if (row.agent) bits.push("agent identity");
+    if (row.has_rules) bits.push("has rules");
+    if (row.never_seen) bits.push("never called");
+    else if (row.last_seen) bits.push(`last seen ${new Date(row.last_seen * 1000).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}`);
+    if (row.last_instance) bits.push(esc(row.last_instance));
+    return `<div class="venv-row">
+      <span class="venv-badge">${esc(label)}</span>
+      <span class="venv-meta">${bits.join(" · ")}</span>
+      <button class="btn btn-danger btn-sm" data-caller-reset="${esc(row.sub)}"
+        title="Remove this caller: entry, rules and — for an agent — its token">Remove</button>
+    </div>`;
+  }).join("");
+
+  list.querySelectorAll("[data-caller-reset]").forEach(btn => {
+    btn.addEventListener("click", () => resetCaller(btn.dataset.callerReset, rows));
+  });
+}
+
+async function resetCaller(sub, rows) {
+  const row = rows.find(r => r.sub === sub) || {};
+  const label = row.name || row.email || sub;
+  const loses = ["the entry in this list"];
+  if (row.has_rules) loses.push("its access rules");
+  if (row.agent) loses.push("its token — the agent stops working at once");
+  if (!confirm(`Remove ${label}?\n\nThis deletes ${loses.join(", ")}.\n\n`
+      + "Anyone using it is refused from their next request on, and reappears "
+      + "here with no rights when they call again.")) return;
+
+  try {
+    const result = await apiFetch(`/api/identities/${encodeURIComponent(sub)}/reset`,
+                                  { method: "DELETE" });
+    const gone = [result.forgotten ? "entry" : "", result.rules_removed ? "rules" : "",
+                  result.token_removed ? "token" : ""].filter(Boolean);
+    showAlert("success", gone.length ? `Removed ${label}: ${gone.join(", ")}`
+                                     : `Nothing left to remove for ${label}`);
+  } catch (e) {
+    // The one credential this needs is the password; a read or agent token
+    // gets a 403 here, and saying so beats "request failed".
+    const hint = /403/.test(e.message)
+      ? " — this needs the admin password; log in with it rather than a token"
+      : "";
+    showAlert("error", `Could not remove ${label}: ${e.message}${hint}`);
+  }
+  await renderKnownCallers();
+}
+
 async function renderAgentIdentities() {
   const list = document.getElementById("settings-agent-list");
   const status = document.getElementById("settings-agents-status");
@@ -688,6 +766,7 @@ async function createAgentIdentity() {
     showIssuedToken(result.token);
     showAlert("success", `Agent identity '${sub}' created.`);
     await renderAgentIdentities();
+    await renderKnownCallers();
   } catch (e) {
     showAlert("error", e.message);
   }
@@ -701,6 +780,7 @@ async function regenerateAgentToken(sub) {
     showIssuedToken(result.token);
     showAlert("success", `New token for '${sub}'.`);
     await renderAgentIdentities();
+    await renderKnownCallers();
   } catch (e) {
     showAlert("error", e.message);
   }
@@ -712,6 +792,7 @@ async function revokeAgentIdentity(sub) {
     await apiFetch(`/api/agent-identities/${encodeURIComponent(sub)}`, { method: "DELETE" });
     showAlert("success", `Agent identity '${sub}' revoked.`);
     await renderAgentIdentities();
+    await renderKnownCallers();
   } catch (e) {
     showAlert("error", e.message);
   }

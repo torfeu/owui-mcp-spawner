@@ -1001,6 +1001,14 @@ It is passed on now, but narrowly. `forward_agent_token` in an instance's config
 
 ---
 
+### Removing a caller
+
+The permissions page grants; **Settings → Identity → Known callers** takes away. *Remove* deletes the roster entry, the access rules, and — for an agent identity — its token. Under deny-by-default the caller is refused from their very next request, mid-conversation included, and reappears with nothing whenever they call again.
+
+It costs the admin password, like every other change to who may do what: `DELETE /api/identities/<sub>/reset` sits behind the same guard as `PUT /api/policy`. The lighter `DELETE /api/identities/<sub>` still only tidies the list and leaves the rules alone, which is why it does not. The reset route can only ever *remove* — it deletes one key and never writes a policy a caller supplied — so the password protects granting, not the way back.
+
+---
+
 ## Tests
 
 ```bash

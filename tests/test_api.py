@@ -23,6 +23,7 @@ EXPECTED_API_ROUTES = {
     ("POST", "/api/agent-identities/{sub}/token"),
     ("GET", "/api/identities"),
     ("DELETE", "/api/identities/{sub}"),
+    ("DELETE", "/api/identities/{sub}/reset"),
     ("GET", "/api/policy"),
     ("PUT", "/api/policy"),
     ("POST", "/api/policy/preview"),
@@ -701,6 +702,9 @@ class AgentTokenTests(unittest.TestCase):
         ("GET", "/api/settings/read-token"),
         ("GET", "/api/settings/agent-token"),
         ("GET", "/api/instances/{instance_id}/export"),
+        # Taking somebody's rights away is an access change like granting them,
+        # so it costs the same credential — one line for the whole subject.
+        ("DELETE", "/api/identities/{sub}/reset"),
         ("GET", "/api/categories/{name}/export"),
         ("PUT", "/api/settings"),
         # Assigning an account to a person hands them that account's data.

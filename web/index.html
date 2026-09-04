@@ -533,6 +533,12 @@
         </div>
         <div id="settings-agent-env" class="settings-locked hidden"></div>
       </div>
+      <div class="settings-section settings-section-last">
+        <h3 class="settings-section-title">Known callers</h3>
+        <div class="settings-status" id="settings-callers-status"></div>
+        <p class="modal-hint">Everyone the runners have seen, plus every agent identity and everyone a rule names. <strong>Remove</strong> is the stop button: the entry goes, the access rules go, and an agent loses its token as well. Under deny-by-default the caller is refused from their very next request, mid-conversation included, and reappears here — with nothing — whenever they try again. Granting rights happens in <strong>Users &amp; permissions</strong>; this is only the way back.</p>
+        <div id="settings-callers-list" class="venv-list"></div>
+      </div>
       </div>
 
       <div class="settings-panel hidden" data-settings-panel="system">
