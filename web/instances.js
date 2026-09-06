@@ -504,8 +504,10 @@ export async function updateFromExample(id, inst = null) {
     const res = await apiFetch(`${API}/${id}/update-from-example`, { method: "POST" });
     showAlert("success", `${id} updated to ${res.version} from ${res.source}.`);
     if (res.restart_error) {
+      // Not "still running the previous code": the restart stops before it
+      // starts, so a failed start leaves the instance down.
       showAlert("warning", `${id} updated, but the restart failed: ${res.restart_error} ` +
-        `— it is still running the previous code.`);
+        `— check its status, it may not be running.`);
     } else if (res.restarted) showAlert("info", `${id} was restarted.`);
     (res.warnings || []).forEach(w => showAlert("info", w));
   } catch (e) {

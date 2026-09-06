@@ -235,10 +235,12 @@ async function runInstall() {
       if (data.warnings?.length) showAlert("warning", "Warnings: " + data.warnings.join("; "));
       // Saved is not the same as live. A restart the manager tried and failed
       // has to say so here, or the instance keeps serving the old code behind
-      // a green message.
+      // a green message. What it must not do is claim the old runner survived:
+      // restart_instance() stops first and starts second, so a failed start
+      // leaves the instance down, not serving the previous version.
       if (data.restart_error) {
         showAlert("warning", `Tool '${meta.name}' saved, but the restart failed: ` +
-          `${data.restart_error} — the instance is still running the previous code.`);
+          `${data.restart_error} — check the instance's status, it may not be running.`);
       } else {
         showAlert("success", data.restarted
           ? `Tool '${meta.name}' saved and restarted.`
