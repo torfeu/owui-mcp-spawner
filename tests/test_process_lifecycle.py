@@ -9,9 +9,17 @@ at instances marked `running`: nothing on the dashboard said anything was there.
 
 The two tests that carry this module are the two orders. A stop landing while
 the venv is being prepared must leave nothing behind, and a stop landing after
-the runner exists must find its pid and kill it. Everything is faked down to
-`Popen`: this suite runs on the server, where spawning a real runner would take
-a real port.
+the runner exists must find its pid and kill it.
+
+The third is the one the lock alone did not cover: a start that is overtaken
+while it waits for its port. It used to recognise a stop only by the shared
+status, and a *later* start puts that status back to running — so the first
+start woke up, concluded it had never been stopped, and wrote its long-dead pid
+over the live one. Each start now holds a number instead, and a stop or a newer
+start takes it away for good.
+
+Everything is faked down to `Popen`: this suite runs on the server, where
+spawning a real runner would take a real port.
 """
 import os
 import pathlib
@@ -73,9 +81,12 @@ class LifecycleRaceTests(unittest.TestCase):
         self.addCleanup(lambda: config_store._state.pop("demo", None))
 
         # A fresh lock pair per test — the registries are module state, and a
-        # test holding a lock from a previous run would hang the next one.
+        # test holding a lock from a previous run would hang the next one. The
+        # generation counter goes with them: it is per instance, and "demo"
+        # is reused by every test here.
         pm._start_locks.clear()
         pm._spawn_locks.clear()
+        pm._generations.clear()
 
         self.procs = []
 
@@ -177,6 +188,71 @@ class LifecycleRaceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(MCPStatus.stopped, self.inst.status)
         self.assertIsNone(self.inst.pid)
+
+    def test_a_start_overtaken_by_a_newer_one_does_not_publish_its_own_pid(self):
+        """Start A waits for its port; a stop kills A; start B takes over and
+        registers itself; then A wakes up. A must not overwrite B — the manager
+        and the watchdog would follow a pid that is gone while B holds the
+        port, which is the orphan from the other direction."""
+        waiting = threading.Event()
+        release = threading.Event()
+
+        def wait_for_port(*a, **kw):
+            if not waiting.is_set():
+                waiting.set()
+                release.wait(5)
+            return True
+
+        with patch.object(pm, "ensure_venv", lambda _v: (True, "")), \
+             patch.object(pm, "_port_answering", wait_for_port):
+            thread_a, result_a = self.start_in_thread()
+            self.assertTrue(waiting.wait(5), "A never reached the port check")
+            proc_a = self.procs[0]
+
+            ok, err = pm.stop_instance("demo")
+            self.assertTrue(ok, err)
+            self.assertFalse(proc_a.alive)
+
+            ok, err = pm.start_instance("demo")
+            self.assertTrue(ok, err)
+            proc_b = self.procs[1]
+
+            release.set()
+            thread_a.join(10)
+
+        self.assertFalse(result_a["ok"], "the overtaken start reported success")
+        self.assertTrue(proc_b.alive)
+        self.assertEqual(proc_b.pid, self.inst.pid)
+        self.assertEqual(MCPStatus.running, self.inst.status)
+        self.assertEqual(proc_b.pid, pm._load_pids()["demo"]["pid"])
+
+    def test_an_overtaken_start_does_not_mark_the_new_runner_failed(self):
+        """The same race through the other exit: A's own process dies while B
+        is already running. A must not write that failure onto the instance."""
+        waiting = threading.Event()
+        release = threading.Event()
+
+        def wait_for_port(*a, **kw):
+            if not waiting.is_set():
+                waiting.set()
+                release.wait(5)
+            return True
+
+        with patch.object(pm, "ensure_venv", lambda _v: (True, "")), \
+             patch.object(pm, "_port_answering", wait_for_port):
+            thread_a, result_a = self.start_in_thread()
+            self.assertTrue(waiting.wait(5))
+            pm.stop_instance("demo")                 # kills A's process
+            ok, err = pm.start_instance("demo")      # B takes over
+            self.assertTrue(ok, err)
+            proc_b = self.procs[1]
+            release.set()
+            thread_a.join(10)
+
+        self.assertFalse(result_a["ok"])
+        self.assertEqual(MCPStatus.running, self.inst.status)
+        self.assertEqual(proc_b.pid, self.inst.pid)
+        self.assertIn("demo", pm._load_pids())
 
     def test_an_undisturbed_start_still_ends_up_running_and_tracked(self):
         with patch.object(pm, "ensure_venv", lambda _v: (True, "")):

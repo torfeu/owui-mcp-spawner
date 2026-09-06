@@ -67,6 +67,37 @@ def _spawn_lock_for(instance_id: str) -> threading.Lock:
     return _lock_from(_spawn_locks, _spawn_locks_guard, instance_id)
 
 
+# Which start currently speaks for an instance. Read and written only under
+# that instance's spawn lock.
+#
+# The lock alone was not enough. It made each individual step indivisible, but
+# a start recognised a stop only by the shared status — and a *later* start
+# sets that status back to starting and then running. So: A spawns and waits
+# for its port; a stop kills A; B spawns and registers itself; A wakes up,
+# finds the status "running" again, decides it was never stopped, and writes
+# its own long-dead pid over B's. The manager and the watchdog then follow a
+# pid that is gone while B holds the port, which is the orphan from the other
+# direction.
+#
+# A number settles it. Every start takes the next one; every stop takes one
+# too, which makes whatever start was holding the previous number stale. Stale
+# is permanent: a later start raises the number further, it can never hand an
+# earlier one back its authority.
+_generations: dict[str, int] = {}
+
+
+def _claim_generation(instance_id: str) -> int:
+    """Take the next number for this instance. Call under its spawn lock."""
+    number = _generations.get(instance_id, 0) + 1
+    _generations[instance_id] = number
+    return number
+
+
+def _is_current(instance_id: str, generation: int) -> bool:
+    """Whether *generation* still speaks for the instance."""
+    return _generations.get(instance_id, 0) == generation
+
+
 def _abandon(proc, instance_id: str) -> None:
     """Kill a runner this start spawned but must not keep.
 
@@ -280,10 +311,14 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     if not cfg:
         return False, "Config not found"
 
-    def _stopped_concurrently() -> bool:
-        # _state holds live object references, so a stop_instance() running in
-        # another thread is visible here as a status change on our own inst.
-        return inst.status in (MCPStatus.stopping, MCPStatus.stopped)
+    def _superseded() -> bool:
+        """Whether this start still speaks for the instance.
+
+        Asked instead of reading the shared status: a stop *or* a newer start
+        takes the number away, and neither can give it back.
+        """
+        with _spawn_lock_for(instance_id):
+            return not _is_current(instance_id, generation)
 
     with _start_lock_for(instance_id):
         inst = get_instance_state(instance_id)
@@ -305,6 +340,12 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
         inst.status = MCPStatus.starting
         inst.error = ""
         set_instance_state(inst)
+
+        # Claimed before the slow part, not at the spawn: a stop landing during
+        # ensure_venv has to be able to invalidate this attempt, and claiming
+        # afterwards would hand it a fresh number and hide the stop.
+        with _spawn_lock_for(instance_id):
+            generation = _claim_generation(instance_id)
 
         # The runner must use the instance's venv so the tool's deps are importable.
         venv_ok, venv_err = ensure_venv(cfg.venv)
@@ -357,7 +398,7 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
             # the instance is still 'starting': that is what lets a stop
             # arriving a moment later kill this process instead of missing it.
             with _spawn_lock_for(instance_id):
-                if _stopped_concurrently():
+                if not _is_current(instance_id, generation):
                     return False, "Instance was stopped during startup"
                 proc = subprocess.Popen(
                     cmd,
@@ -382,28 +423,33 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     deadline = time.monotonic() + START_TIMEOUT
     port_open = False
     while time.monotonic() < deadline:
-        if _stopped_concurrently():
+        if _superseded():
             return _stopped_during_startup(proc, instance_id)
         if proc.poll() is not None:
-            if _stopped_concurrently():
-                return _stopped_during_startup(proc, instance_id)
             tail = _log_tail(log_path)
-            inst.status = MCPStatus.failed
-            inst.error = f"Process exited during startup. Log tail:\n{tail}" if tail \
+            reason = f"Process exited during startup. Log tail:\n{tail}" if tail \
                 else "Process exited during startup"
-            inst.pid = None
-            set_instance_state(inst)
-            with _pids_lock:
-                pids = _load_pids()
-                pids.pop(instance_id, None)
-                _save_pids(pids)
-            return False, inst.error
+            # Even a failure is only ours to record while we still speak for
+            # the instance: marking it failed after a newer start took over
+            # would bury a runner that is coming up fine.
+            with _spawn_lock_for(instance_id):
+                if not _is_current(instance_id, generation):
+                    return False, "Instance was stopped during startup"
+                inst.status = MCPStatus.failed
+                inst.error = reason
+                inst.pid = None
+                set_instance_state(inst)
+                with _pids_lock:
+                    pids = _load_pids()
+                    pids.pop(instance_id, None)
+                    _save_pids(pids)
+            return False, reason
         if _port_answering(check_host, cfg.server.port):
             port_open = True
             break
         time.sleep(0.25)
 
-    if _stopped_concurrently():
+    if _superseded():
         return _stopped_during_startup(proc, instance_id)
 
     if not port_open:
@@ -413,19 +459,18 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
             f"within {START_TIMEOUT:.0f}s — marking running, watchdog will monitor it"
         )
 
-    # Same question, same lock: a stop that lands here must not be overwritten
-    # by a start declaring the instance running a microsecond later.
+    # Same question, same lock — and pids.json inside it, so a start that lost
+    # its claim cannot leave its pid behind in the file either.
     with _spawn_lock_for(instance_id):
-        if _stopped_concurrently():
+        if not _is_current(instance_id, generation):
             return _stopped_during_startup(proc, instance_id)
         inst.status = MCPStatus.running
         inst.pid = proc.pid
         set_instance_state(inst)
-
-    with _pids_lock:
-        pids = _load_pids()
-        pids[instance_id] = {"pid": proc.pid, "status": "running", "port": cfg.server.port}
-        _save_pids(pids)
+        with _pids_lock:
+            pids = _load_pids()
+            pids[instance_id] = {"pid": proc.pid, "status": "running", "port": cfg.server.port}
+            _save_pids(pids)
 
     logger.info(f"Started {instance_id} (pid={proc.pid}, port={cfg.server.port})")
     return True, ""
@@ -459,6 +504,10 @@ def stop_instance(instance_id: str) -> tuple[bool, str]:
         pid = inst.pid or (pids.get(instance_id, {}).get("pid"))
         inst.status = MCPStatus.stopping
         set_instance_state(inst)
+        # Whatever start was holding the current number no longer speaks for
+        # this instance — including one that is still waiting for its port and
+        # would otherwise publish itself over whatever comes next.
+        _claim_generation(instance_id)
 
     if pid and _is_pid_alive(pid):
         if not _pid_is_our_runner(pid):
