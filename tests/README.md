@@ -165,6 +165,18 @@ the real one rather than eight stars — plus the refusal, because a masked valu
 inside a list that can no longer be traced back to what it stood for has to come
 back as a `422` instead of being filled in from the wrong entry.
 
+`test_dependencies.py` covers package installation: every requirement goes into
+one pip call so the resolver sees them together, and exit code 0 alone is not
+taken as success — `pip check` runs before and after, and only what it newly
+complains about counts against this install. A conflict that was already in a
+shared venv must not fail an install that did not cause it, and a `pip check`
+that cannot run must not fail one either. Faked down to `subprocess.run`; the
+conflicting-wheels case was checked against real pip by hand.
+
+`test_save_routes.py` also holds the two write routes to their commit: a value
+saved while a code save is installing must survive it, and a lock set in that
+window must stop the save with a `409` rather than being cleared by it.
+
 `test_e2e.py` additionally creates a temporary project tree and manager process.
 It validates a complete tool lifecycle through the real HTTP and MCP transports,
 including direct and shared-port MCP calls. It reuses the ready `default` venv
