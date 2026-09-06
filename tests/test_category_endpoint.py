@@ -21,6 +21,7 @@ from unittest.mock import patch
 from mcp import types
 
 import app.category_endpoint as ce
+import app.shared_proxy as sp
 from app.schema import MCPInstance, MCPStatus
 from tests.test_runner_identity import isolate_agent_store, make_context
 
@@ -107,9 +108,17 @@ def switch(case, on: bool):
     to it.
     """
     payload = {"category_endpoints_enabled": on}
-    patcher = patch.object(ce, "load_settings", lambda: dict(payload))
-    patcher.start()
-    case.addCleanup(patcher.stop)
+    # The instance endpoint reads the same file through its own module, and the
+    # dispatcher asks both. Pinning only the category half left "switched off"
+    # meaning "off unless this machine happens to have `/mcp/<id>` on" — which
+    # the server does: there the off-test walked into the instance branch,
+    # where `category` is an unknown instance id, and the fake ASGI `send` of
+    # None turned that into a TypeError. Green here, red there, and the whole
+    # point of this helper is that the two agree.
+    for module in (ce, sp):
+        patcher = patch.object(module, "load_settings", lambda: dict(payload))
+        patcher.start()
+        case.addCleanup(patcher.stop)
 
 
 class CategoryListingTests(unittest.TestCase):
