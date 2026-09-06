@@ -830,8 +830,11 @@ class InstanceTransportTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(serving.cancel)
         self.addCleanup(lambda: setattr(server, "should_exit", True))
         await await_port(self.port)
-        self.addCleanup(lambda: asyncio.get_event_loop().create_task(
-            sp.stop_dispatch_client()))
+        # Awaited, not fired off: as a bare task this closed the shared client
+        # *during* the next test's request, which then answered 503 "MCP proxy
+        # is shutting down" instead of the 401 it was asking about. It only
+        # showed up once the suite grew enough to shift the timing.
+        self.addAsyncCleanup(sp.stop_dispatch_client)
 
     async def test_a_real_session_runs_through_the_manager_port(self):
         import httpx2
@@ -882,7 +885,7 @@ class InstanceTransportTests(unittest.IsolatedAsyncioTestCase):
                                         json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         # The 401 was written by the runner, not here — the proxy forwards the
         # header and lets the instance decide, exactly as on a direct connection.
-        self.assertEqual(401, refused.status_code)
+        self.assertEqual(401, refused.status_code, refused.text)
 
     async def test_an_unknown_id_is_answered_at_the_socket(self):
         import httpx2
