@@ -133,6 +133,32 @@ The suite redirects the roster into a temp file wherever a verified identity is
 recorded (`redirect_registry`). Without it the tests would fill the real
 `runtime/identities.db` with `sub-anna`, quietly, in a file nobody looks at.
 
+`test_process_lifecycle.py` covers the window in which a start and a stop meet.
+Starting holds a lock across `ensure_venv()` — minutes, when a venv is built —
+and stopping must not wait for it, which is how a confirmed stop used to leave a
+runner behind: spawned after the stop, never published as running, invisible to
+the watchdog, holding the port. Both orders are pinned (a stop during the venv
+preparation leaves nothing alive; a stop after the spawn finds the pid and kills
+it), plus fifty rounds of the same race with the timing left to the machine.
+Everything is faked down to `Popen`: this suite runs on the server, where
+spawning a real runner would take a real port.
+
+`test_id_reservation.py` pins that an instance id is held from the availability
+check until the config is written. Two creates of one id used to pass the check,
+install in parallel and both answer `ok` with their own port, and only one config
+survived it. Two *different* ids must still be created side by side, and a
+refused create has to give its reservation back — a leaked one would make the id
+unusable until a restart.
+
+`test_save_routes.py` covers the two routes that write a config or a tool's code,
+and the two rules they broke. Saved is not the same as live: a restart the
+manager tried and could not finish must never come back as `restarted: true`,
+and the reason travels with it. And a save changes what it was given, not the
+file around it — the manifest, the creation time and any field an import brought
+along survive an edit. The nested-secret round trip lives here too: read the
+config, save it back untouched, and the credential one level down must still be
+the real one rather than eight stars.
+
 `test_e2e.py` additionally creates a temporary project tree and manager process.
 It validates a complete tool lifecycle through the real HTTP and MCP transports,
 including direct and shared-port MCP calls. It reuses the ready `default` venv
