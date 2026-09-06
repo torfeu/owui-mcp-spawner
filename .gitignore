@@ -23,6 +23,8 @@ tools/
 chat.txt
 docs/plan-*.md
 docs/bug-*.md
+# Fremdgutachten, wie die Pläne: die Befunde stehen im Changelog
+docs/review-*.md
 
 # Claude Code's local settings: the allow-list quotes whole curl commands,
 # tokens and internal addresses included. It was only kept out by
