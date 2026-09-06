@@ -61,14 +61,25 @@ export async function openEdit(id) {
     container.innerHTML = '<div class="values-grid">' +
       Object.entries(cfg.values).map(([k, v]) => {
         const isSecret = secretFields.has(k);
+        // A valve may hold a structure — `values` is dict[str, Any], and a
+        // credential can sit inside one. String(v) turns that into the literal
+        // "[object Object]", which this dialog then wrote back over the real
+        // thing: opening the config and pressing save was enough to destroy it.
+        const isStructure = v !== null && typeof v === "object";
         const type = typeof v === "boolean" ? "checkbox"
                    : typeof v === "number" ? "number" : "text";
         if (type === "checkbox") {
           return `<label>${esc(k)}</label><input type="checkbox" data-val="${esc(k)}" ${v ? "checked" : ""} />`;
         }
-        const inputVal = isSecret ? "" : esc(String(v));
-        const placeholder = isSecret ? "●●●●●●●●" : "";
-        return `<label>${esc(k)}</label><input type="${type}" data-val="${esc(k)}"${isSecret ? ' data-secret="1"' : ""} value="${inputVal}" placeholder="${placeholder}" />`;
+        // A structure is shown even when its name reads like a credential: the
+        // server has already masked the secret leaves *inside* it, and blanking
+        // the whole field would hide settings that are not secrets and leave no
+        // way to edit them. Whatever comes back masked is put back on save.
+        const hide = isSecret && !isStructure;
+        const shown = isStructure ? JSON.stringify(v) : String(v);
+        const inputVal = hide ? "" : esc(shown);
+        const placeholder = hide ? "●●●●●●●●" : "";
+        return `<label>${esc(k)}</label><input type="${type}" data-val="${esc(k)}"${hide ? ' data-secret="1"' : ""}${isStructure ? ' data-json="1"' : ""} value="${inputVal}" placeholder="${placeholder}" />`;
       }).join("") + "</div>";
   } else {
     container.innerHTML = "<p style='color:var(--text-muted);font-size:13px'>No configurable values.</p>";
@@ -80,6 +91,7 @@ export async function openEdit(id) {
 async function saveEdit(restart) {
   const id = currentEditId;
   const values = {};
+  const broken = [];
 
   document.querySelectorAll("[data-val]").forEach(input => {
     const key = input.dataset.val;
@@ -88,8 +100,20 @@ async function saveEdit(restart) {
     // Secrets: an empty field means "unchanged" (the real value is never shown).
     // Non-secret fields are sent as-is, so a value can be cleared to "".
     else if (input.dataset.secret) { if (input.value !== "") values[key] = input.value; }
+    else if (input.dataset.json) {
+      // Came in as a structure and has to leave as one. A field edited into
+      // something that is not JSON any more stops the save: sending it as a
+      // string would overwrite the structure with the typo.
+      try { values[key] = JSON.parse(input.value); }
+      catch { broken.push(key); }
+    }
     else values[key] = input.value;
   });
+  if (broken.length) {
+    showAlert("error", `Not valid JSON: ${broken.join(", ")} — this valve holds a ` +
+      `structure, so it has to stay one. Nothing was saved.`);
+    return;
+  }
 
   const deps = document.getElementById("edit-deps").value
     .split("\n").map(s => s.trim()).filter(Boolean);
