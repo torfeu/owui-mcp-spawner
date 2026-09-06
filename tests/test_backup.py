@@ -313,6 +313,71 @@ class RestoreTests(IsolatedStateTestCase):
         users = policy.load_policy(force=True)["users"]
         self.assertEqual({"kept": "*"}, users["anna"]["instances"])
 
+    def test_a_whole_policy_comes_back_on_an_empty_target(self):
+        """Roles and the two globals are policy too, and a restore that keeps
+        only `users` hands back a server that denies the people it listed:
+        rules keyed by role match nobody, and `default` reverts to deny."""
+        archive = self.archive("demo")
+        archive["policy"] = {
+            "default": {"deny": False},
+            "match_email": True,
+            "roles": {"KI": {"instances": {"demo": "*"}}},
+            "users": {"anna": {"instances": {"demo": ["hi"]}}},
+        }
+        report = backup.restore(archive)
+        self.assertEqual(["anna"], report["policy_users_restored"])
+        self.assertEqual(["KI"], report["policy_roles_restored"])
+        self.assertEqual(["default", "match_email"], report["policy_globals_restored"])
+
+        restored = policy.load_policy(force=True)
+        self.assertEqual({"instances": {"demo": "*"}}, restored["roles"]["KI"])
+        self.assertEqual({"deny": False}, restored["default"])
+        self.assertTrue(restored["match_email"])
+
+    def test_a_role_only_policy_is_not_skipped_for_having_no_users(self):
+        archive = self.archive("demo")
+        archive["policy"] = {"roles": {"KI": {"instances": "*"}}}
+        report = backup.restore(archive)
+        self.assertEqual(["KI"], report["policy_roles_restored"])
+        self.assertEqual("*", policy.load_policy(force=True)["roles"]["KI"]["instances"])
+
+    def test_roles_and_globals_this_server_already_decided_are_left_alone(self):
+        policy.save_policy({"default": {"deny": True},
+                            "roles": {"KI": {"instances": {"kept": "*"}}}})
+        archive = self.archive("demo")
+        archive["policy"] = {"default": {"deny": False},
+                             "match_email": True,
+                             "roles": {"KI": {"instances": {"other": "*"}},
+                                       "Mensch": {"instances": {"demo": "*"}}}}
+        report = backup.restore(archive)
+        self.assertEqual(["KI"], report["policy_roles_skipped"])
+        self.assertEqual(["Mensch"], report["policy_roles_restored"])
+        self.assertEqual(["default"], report["policy_globals_skipped"])
+        self.assertEqual(["match_email"], report["policy_globals_restored"])
+
+        kept = policy.load_policy(force=True)
+        self.assertEqual({"deny": True}, kept["default"])
+        self.assertEqual({"kept": "*"}, kept["roles"]["KI"]["instances"])
+
+    def test_a_policy_the_validator_refuses_is_reported_not_claimed(self):
+        archive = self.archive("demo")
+        archive["policy"] = {"roles": {"KI": {"token": "nope"}}}
+        report = backup.restore(archive)
+        self.assertEqual([], report["policy_roles_restored"])
+        self.assertIn("secrets do not belong", report["policy_failed"])
+        self.assertEqual({}, policy.load_policy(force=True))
+        # The rest of the restore still ran.
+        self.assertEqual(["demo"], [r["id"] for r in report["instances_restored"]])
+
+    def test_a_dry_run_leaves_roles_and_globals_alone(self):
+        archive = self.archive("demo")
+        archive["policy"] = {"default": {"deny": False},
+                             "roles": {"KI": {"instances": "*"}}}
+        preview = backup.restore(archive, dry_run=True)
+        self.assertEqual(["KI"], preview["policy_roles_restored"])
+        self.assertEqual(["default"], preview["policy_globals_restored"])
+        self.assertEqual({}, policy.load_policy(force=True))
+
     def test_a_dry_run_reports_the_same_and_writes_nothing(self):
         archive = self.archive("demo")
         archive["settings"] = {"content_warn_percent": 70}

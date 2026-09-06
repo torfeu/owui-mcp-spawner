@@ -1096,6 +1096,11 @@ function renderRestoreReport(report) {
   list("Agents kept", report.agents_skipped);
   list("Rules added for", report.policy_users_restored);
   list("Rules kept for", report.policy_users_skipped);
+  list("Roles added", report.policy_roles_restored || []);
+  list("Roles kept", report.policy_roles_skipped || []);
+  list("Global rules added", report.policy_globals_restored || []);
+  list("Global rules kept", report.policy_globals_skipped || []);
+  if (report.policy_failed) lines.push(`<div class="backup-line"><span class="backup-label">Rules refused</span>${esc(report.policy_failed)}</div>`);
   if (report.content_key) lines.push(`<div class="backup-line"><span class="backup-label">File key</span>${esc(report.content_key)}</div>`);
 
   if (!lines.length) lines.push('<div class="backup-line">Nothing in this backup, and nothing to do.</div>');
@@ -1106,6 +1111,8 @@ function renderRestoreReport(report) {
   // it came from, and it is the proof that a mistaken click costs nothing.
   const wrote = report.instances_restored.length || report.settings_restored.length
     || report.agents_restored.length || report.policy_users_restored.length
+    || (report.policy_roles_restored || []).length
+    || (report.policy_globals_restored || []).length
     || report.content_key === "restored";
   const head = report.dry_run
     ? '<div class="settings-status">Nothing was written. This is what a restore would do:</div>'

@@ -208,6 +208,9 @@ def restore(payload: dict, dry_run: bool = False) -> dict:
         "ports_reassigned": [], "settings_restored": [], "settings_skipped": [],
         "agents_restored": [], "agents_skipped": [],
         "policy_users_restored": [], "policy_users_skipped": [],
+        "policy_roles_restored": [], "policy_roles_skipped": [],
+        "policy_globals_restored": [], "policy_globals_skipped": [],
+        "policy_failed": "",
         "content_key": "",
     }
 
@@ -324,27 +327,71 @@ def _restore_agents(records, report: dict, dry_run: bool) -> None:
         agent_identity._save(keep)
 
 
+# Everything a policy file can hold (app/policy.py): two keyed sections and
+# two global switches. Restoring only "users" is what a backup looks like when
+# it silently forgets half the access rules — a role-based installation comes
+# back denying everyone, and the restore still reports success.
+_POLICY_SECTIONS = (
+    ("users", "policy_users_restored", "policy_users_skipped"),
+    ("roles", "policy_roles_restored", "policy_roles_skipped"),
+)
+_POLICY_GLOBALS = ("default", "match_email")
+
+
 def _restore_policy(incoming, report: dict, dry_run: bool) -> None:
+    """Write back the policy sections the target does not already have.
+
+    Same rule as everywhere else in the restore: what is there stays. Users
+    and roles merge per key; the two globals are single values and are only
+    written where the target holds none — a server that already decided how
+    to treat unknown callers does not get that decision changed by a file.
+    """
     if not isinstance(incoming, dict):
-        return
-    users = incoming.get("users")
-    if not isinstance(users, dict) or not users:
         return
     try:
         current = policy.load_policy(force=True)
     except Exception:
         current = {}
     merged = dict(current)
-    existing_users = dict(merged.get("users") or {})
-    for sub, entry in sorted(users.items()):
-        if sub in existing_users:
-            report["policy_users_skipped"].append(sub)
+    wrote = False
+
+    for section, restored_key, skipped_key in _POLICY_SECTIONS:
+        entries = incoming.get(section)
+        if not isinstance(entries, dict) or not entries:
             continue
-        existing_users[sub] = entry
-        report["policy_users_restored"].append(sub)
-    if report["policy_users_restored"] and not dry_run:
-        merged["users"] = existing_users
+        existing = dict(merged.get(section) or {})
+        for key, entry in sorted(entries.items()):
+            if key in existing:
+                report[skipped_key].append(key)
+                continue
+            existing[key] = entry
+            report[restored_key].append(key)
+            wrote = True
+        if report[restored_key]:
+            merged[section] = existing
+
+    for key in _POLICY_GLOBALS:
+        if key not in incoming:
+            continue
+        if key in merged:
+            report["policy_globals_skipped"].append(key)
+            continue
+        merged[key] = incoming[key]
+        report["policy_globals_restored"].append(key)
+        wrote = True
+
+    if not wrote or dry_run:
+        return
+    try:
         policy.save_policy(merged)
+    except Exception as e:
+        # save_policy validates the shape. A backup carrying something it
+        # refuses must not leave the report claiming rules that were never
+        # written — and it must not stop the rest of the restore either.
+        report["policy_failed"] = str(e)
+        for _, restored_key, _skipped in _POLICY_SECTIONS:
+            report[restored_key].clear()
+        report["policy_globals_restored"].clear()
 
 
 def _restore_content_key(key, report: dict, dry_run: bool) -> None:
