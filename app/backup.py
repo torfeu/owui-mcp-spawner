@@ -350,8 +350,19 @@ def _restore_policy(incoming, report: dict, dry_run: bool) -> None:
         return
     try:
         current = policy.load_policy(force=True)
-    except Exception:
-        current = {}
+    except Exception as e:
+        # A *missing* policy already comes back as {} without raising, so this
+        # is a file that exists and cannot be read — and treating that as an
+        # empty target is how "what is there stays" broke in exactly the case
+        # where it matters most. The unreadable file would have been replaced
+        # wholesale, silently, and a broken policy denies everything while the
+        # one written over it grants. It stays where it is; repairing it is a
+        # deliberate act, not a side effect of a restore.
+        report["policy_failed"] = (
+            f"the policy already on this server could not be read ({e}) — it was left "
+            "untouched and nothing from the backup was written into it"
+        )
+        return
     merged = dict(current)
     wrote = False
 

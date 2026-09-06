@@ -383,6 +383,27 @@ class RestoreTests(IsolatedStateTestCase):
         self.assertEqual({"deny": True}, kept["default"])
         self.assertEqual({"kept": "*"}, kept["roles"]["KI"]["instances"])
 
+    def test_a_policy_this_server_cannot_read_is_left_where_it_is(self):
+        """The one case where "what is there stays" mattered most and did not
+        hold: an unreadable policy was treated as an empty target and replaced
+        wholesale. A broken policy denies everything — the one written over it
+        would have granted."""
+        broken = b'{"roles": {"KI": '
+        policy.policy_path().parent.mkdir(parents=True, exist_ok=True)
+        policy.policy_path().write_bytes(broken)
+
+        archive = self.archive("demo")
+        archive["policy"] = {"roles": {"Fremd": {"instances": "*"}},
+                             "default": {"deny": False}}
+        report = backup.restore(archive)
+
+        self.assertEqual(broken, policy.policy_path().read_bytes())
+        self.assertEqual([], report["policy_roles_restored"])
+        self.assertEqual([], report["policy_globals_restored"])
+        self.assertIn("could not be read", report["policy_failed"])
+        # The rest of the restore is independent and still runs.
+        self.assertEqual(["demo"], [r["id"] for r in report["instances_restored"]])
+
     def test_a_policy_the_validator_refuses_is_reported_not_claimed(self):
         archive = self.archive("demo")
         archive["policy"] = {"roles": {"KI": {"token": "nope"}}}
