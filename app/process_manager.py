@@ -31,14 +31,59 @@ _pids_lock = threading.Lock()
 _start_locks: dict[str, threading.Lock] = {}
 _start_locks_guard = threading.Lock()
 
+# The second, *short* lock — the one stop_instance can afford to wait for.
+# The start lock above is held across ensure_venv(), which builds a venv and
+# runs pip: minutes, sometimes. A stop that waited for it would be a stop that
+# hangs, so stop deliberately does not take it — and that is exactly how a
+# confirmed stop used to leave a runner behind. It returned "stopped" while the
+# start was still inside ensure_venv; the start then spawned anyway, saw the
+# stop afterwards and returned an error without killing what it had just
+# created. Status stopped, pid set, port held, and the watchdog only looks at
+# instances marked running.
+#
+# So the two sides meet on this lock instead, held only for moments: start
+# takes it to make the last cancellation check, spawn, and publish the pid as
+# one indivisible step; stop takes it to mark the instance stopping and read
+# the pid it must kill, then releases it and does the killing outside. Whoever
+# gets there first, the other one sees it.
+_spawn_locks: dict[str, threading.Lock] = {}
+_spawn_locks_guard = threading.Lock()
 
-def _start_lock_for(instance_id: str) -> threading.Lock:
-    with _start_locks_guard:
-        lock = _start_locks.get(instance_id)
+
+def _lock_from(registry: dict, guard: threading.Lock, instance_id: str) -> threading.Lock:
+    with guard:
+        lock = registry.get(instance_id)
         if lock is None:
             lock = threading.Lock()
-            _start_locks[instance_id] = lock
+            registry[instance_id] = lock
         return lock
+
+
+def _start_lock_for(instance_id: str) -> threading.Lock:
+    return _lock_from(_start_locks, _start_locks_guard, instance_id)
+
+
+def _spawn_lock_for(instance_id: str) -> threading.Lock:
+    return _lock_from(_spawn_locks, _spawn_locks_guard, instance_id)
+
+
+def _abandon(proc, instance_id: str) -> None:
+    """Kill a runner this start spawned but must not keep.
+
+    Anything that spawns and then gives up has to come through here. A process
+    nobody publishes a pid for cannot be stopped from the dashboard and cannot
+    be seen by the watchdog; it would simply sit on the port until someone
+    finds it with `ps`.
+    """
+    try:
+        proc.terminate()
+        if not _wait_pid_gone(proc.pid, 5.0):
+            proc.kill()
+            _wait_pid_gone(proc.pid, 2.0)
+    except Exception as e:
+        logger.warning(f"Could not clean up abandoned runner for '{instance_id}': {e}")
+    else:
+        logger.info(f"Cleaned up runner for '{instance_id}' (pid={proc.pid}) — stopped during startup")
 
 def start_in_progress(instance_id: str) -> bool:
     """True while a start or restart holds this instance's spawn lock.
@@ -235,6 +280,11 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     if not cfg:
         return False, "Config not found"
 
+    def _stopped_concurrently() -> bool:
+        # _state holds live object references, so a stop_instance() running in
+        # another thread is visible here as a status change on our own inst.
+        return inst.status in (MCPStatus.stopping, MCPStatus.stopped)
+
     with _start_lock_for(instance_id):
         inst = get_instance_state(instance_id)
         if inst and inst.status == MCPStatus.running:
@@ -268,6 +318,10 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
         config_path = BASE_DIR / "configs" / f"{instance_id}.json"
         log_path = get_runtime_log_path(instance_id)
         _rotate_runtime_log(log_path)
+        # The child gets its own copy of this handle; the manager's copy is
+        # closed in the finally below. Leaving it open cost one file descriptor
+        # per start — invisible until an instance that restarts on every config
+        # change had been running for weeks.
         log_file = open(log_path, "a")
 
         try:
@@ -297,29 +351,30 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
                     env["MCP_CONTENT_DIR"] = str(content_dir)
                     env["MCP_CONTENT_URL"] = instance_url(cfg.id)
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=log_file,
-                cwd=str(BASE_DIR),
-                env=env,
-            )
+            # Ask once more whether we are still wanted, spawn, and publish the
+            # pid — all three under the spawn lock, so a stop cannot slip
+            # between the question and the answer. The pid is published while
+            # the instance is still 'starting': that is what lets a stop
+            # arriving a moment later kill this process instead of missing it.
+            with _spawn_lock_for(instance_id):
+                if _stopped_concurrently():
+                    return False, "Instance was stopped during startup"
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=log_file,
+                    cwd=str(BASE_DIR),
+                    env=env,
+                )
+                inst.pid = proc.pid
+                set_instance_state(inst)
         except Exception as e:
             inst.status = MCPStatus.failed
             inst.error = str(e)
             set_instance_state(inst)
             return False, str(e)
-
-        # Expose the PID while still 'starting' so a concurrent stop_instance can
-        # actually kill the process instead of silently missing it. Set inside
-        # the lock: from here on a second start sees "Already starting" above.
-        inst.pid = proc.pid
-        set_instance_state(inst)
-
-    def _stopped_concurrently() -> bool:
-        # _state holds live object references, so a stop_instance() running in
-        # another thread is visible here as a status change on our own inst.
-        return inst.status in (MCPStatus.stopping, MCPStatus.stopped)
+        finally:
+            log_file.close()
 
     # Health check: wait until the runner answers on its port instead of
     # blindly assuming success after a fixed delay.
@@ -328,10 +383,10 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     port_open = False
     while time.monotonic() < deadline:
         if _stopped_concurrently():
-            return False, "Instance was stopped during startup"
+            return _stopped_during_startup(proc, instance_id)
         if proc.poll() is not None:
             if _stopped_concurrently():
-                return False, "Instance was stopped during startup"
+                return _stopped_during_startup(proc, instance_id)
             tail = _log_tail(log_path)
             inst.status = MCPStatus.failed
             inst.error = f"Process exited during startup. Log tail:\n{tail}" if tail \
@@ -349,7 +404,7 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
         time.sleep(0.25)
 
     if _stopped_concurrently():
-        return False, "Instance was stopped during startup"
+        return _stopped_during_startup(proc, instance_id)
 
     if not port_open:
         # Process is alive but slow to bind — keep it, but leave a trace in the log
@@ -358,9 +413,14 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
             f"within {START_TIMEOUT:.0f}s — marking running, watchdog will monitor it"
         )
 
-    inst.status = MCPStatus.running
-    inst.pid = proc.pid
-    set_instance_state(inst)
+    # Same question, same lock: a stop that lands here must not be overwritten
+    # by a start declaring the instance running a microsecond later.
+    with _spawn_lock_for(instance_id):
+        if _stopped_concurrently():
+            return _stopped_during_startup(proc, instance_id)
+        inst.status = MCPStatus.running
+        inst.pid = proc.pid
+        set_instance_state(inst)
 
     with _pids_lock:
         pids = _load_pids()
@@ -371,16 +431,34 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _stopped_during_startup(proc, instance_id: str) -> tuple[bool, str]:
+    """Give up on a start a stop overtook — and take the runner with us.
+
+    The stop may have killed this process already (it holds the pid from the
+    moment we published it); _abandon() then finds nothing to do. What must not
+    happen is returning from here with the process still alive.
+    """
+    if proc.poll() is None:
+        _abandon(proc, instance_id)
+    return False, "Instance was stopped during startup"
+
+
 def stop_instance(instance_id: str) -> tuple[bool, str]:
     inst = get_instance_state(instance_id)
     if not inst:
         return False, "Instance not found"
 
     pids = _load_pids()
-    pid = inst.pid or (pids.get(instance_id, {}).get("pid"))
 
-    inst.status = MCPStatus.stopping
-    set_instance_state(inst)
+    # Under the spawn lock, so a start that is about to create a runner either
+    # has already published its pid (we read it here and kill it) or has not
+    # spawned yet (it finds 'stopping' at its own last check and gives up).
+    # Only the reading and the marking are locked; the killing below can take
+    # seven seconds and holds nothing.
+    with _spawn_lock_for(instance_id):
+        pid = inst.pid or (pids.get(instance_id, {}).get("pid"))
+        inst.status = MCPStatus.stopping
+        set_instance_state(inst)
 
     if pid and _is_pid_alive(pid):
         if not _pid_is_our_runner(pid):
