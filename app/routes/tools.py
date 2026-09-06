@@ -141,14 +141,20 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
     tool_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
     save_config(cfg)
 
-    # Restart if running and restart_on_change
+    # Restart if running and restart_on_change. Saved and *running the saved
+    # code* are two different things: the file is written either way, but a
+    # restart can fail — a port taken meanwhile, a venv that no longer builds —
+    # and reporting it as done would leave the old runner serving the old code
+    # while the dashboard says the change is live.
     inst = get_instance_state(instance_id)
-    restarted = False
+    restarted, restart_error = False, ""
     if inst and inst.status == MCPStatus.running and cfg.lifecycle.restart_on_change:
-        await asyncio.to_thread(restart_instance, instance_id)
-        restarted = True
+        restarted, restart_error = await asyncio.to_thread(restart_instance, instance_id)
+        if not restarted:
+            logger.warning(f"'{instance_id}': code saved, restart failed — {restart_error}")
 
-    return {"ok": True, "restarted": restarted, "warnings": result["warnings"]}
+    return {"ok": True, "restarted": restarted, "restart_error": restart_error,
+            "warnings": result["warnings"]}
 
 # Treated as an upload, not as code editing: the code comes from a file this
 # spawner ships, not from a text box, so it stays available under

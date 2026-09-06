@@ -233,9 +233,17 @@ async function runInstall() {
         body: JSON.stringify({ code: getEditorCode() }),
       });
       if (data.warnings?.length) showAlert("warning", "Warnings: " + data.warnings.join("; "));
-      showAlert("success", data.restarted
-        ? `Tool '${meta.name}' saved and restarted.`
-        : `Tool '${meta.name}' saved. Restart to apply changes.`);
+      // Saved is not the same as live. A restart the manager tried and failed
+      // has to say so here, or the instance keeps serving the old code behind
+      // a green message.
+      if (data.restart_error) {
+        showAlert("warning", `Tool '${meta.name}' saved, but the restart failed: ` +
+          `${data.restart_error} — the instance is still running the previous code.`);
+      } else {
+        showAlert("success", data.restarted
+          ? `Tool '${meta.name}' saved and restarted.`
+          : `Tool '${meta.name}' saved. Restart to apply changes.`);
+      }
     } else {
       // New tool: create_tool installs deps, validates in the venv and saves — one step.
       // A venv named here that does not exist yet is created by the server.

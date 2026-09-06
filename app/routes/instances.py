@@ -271,7 +271,7 @@ async def update_config(instance_id: str, body: dict) -> dict:
     # restart just like a changed address — gated by restart_on_change below.
     needs_restart = (server_changed or venv_changed or deps_changed or values_changed
                      or identity_changed or content_changed)
-    restarted = False
+    restarted, restart_error = False, ""
     if inst:
         inst.name = cfg.name
         inst.category = cfg.category
@@ -284,8 +284,13 @@ async def update_config(instance_id: str, body: dict) -> dict:
                     else "identity mode" if identity_changed \
                     else "content storage" if content_changed else "values"
                 logger.info(f"{reason} changed for '{instance_id}', restarting")
-                await asyncio.to_thread(restart_instance, instance_id)
-                restarted = True
+                # The config is already written. Whether the runner picked it
+                # up is a separate answer, and a failed restart that reports
+                # success leaves the old process serving the old settings.
+                restarted, restart_error = await asyncio.to_thread(restart_instance, instance_id)
+                if not restarted:
+                    logger.warning(
+                        f"'{instance_id}': config saved, restart failed — {restart_error}")
             else:
                 # Keep UI pointing at what is actually running until user restarts manually
                 pass
@@ -297,7 +302,7 @@ async def update_config(instance_id: str, body: dict) -> dict:
             inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
             set_instance_state(inst)
 
-    return {"ok": True, "restarted": restarted}
+    return {"ok": True, "restarted": restarted, "restart_error": restart_error}
 
 @router.post("/api/instances/{instance_id}/start", dependencies=[Depends(require_auth)])
 async def start(instance_id: str) -> dict:

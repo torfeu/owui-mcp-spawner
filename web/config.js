@@ -126,9 +126,16 @@ async function saveEdit(restart) {
   };
 
   try {
-    await apiFetch(`${API}/${id}`, { method: "PUT", body: JSON.stringify(body) });
+    const res = await apiFetch(`${API}/${id}`, { method: "PUT", body: JSON.stringify(body) });
     closeEdit();
-    showAlert("success", "Config saved.");
+    // The config is on disk either way. Whether the runner took it is the
+    // second half of the answer, and the half worth interrupting for.
+    if (res && res.restart_error) {
+      showAlert("warning", `Config saved, but the automatic restart failed: ${res.restart_error} ` +
+        `— the instance is still running with the previous settings.`);
+    } else {
+      showAlert("success", "Config saved.");
+    }
     if (restart) {
       await apiFetch(`${API}/${id}/restart`, { method: "POST" });
       showAlert("info", "Restarting…");
