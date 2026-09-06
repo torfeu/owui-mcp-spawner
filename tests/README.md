@@ -140,8 +140,10 @@ runner behind: spawned after the stop, never published as running, invisible to
 the watchdog, holding the port. Both orders are pinned (a stop during the venv
 preparation leaves nothing alive; a stop after the spawn finds the pid and kills
 it), plus fifty rounds of the same race with the timing left to the machine.
-Everything is faked down to `Popen`: this suite runs on the server, where
-spawning a real runner would take a real port.
+A third case covers the start that is overtaken rather than stopped: A waits for
+its port, a stop kills it, B takes over — and A must not publish itself over B
+when it wakes up. Everything is faked down to `Popen`: this suite runs on the
+server, where spawning a real runner would take a real port.
 
 `test_id_reservation.py` pins that an instance id is held from the availability
 check until the config is written. Two creates of one id used to pass the check,
@@ -157,7 +159,9 @@ and the reason travels with it. And a save changes what it was given, not the
 file around it — the manifest, the creation time and any field an import brought
 along survive an edit. The nested-secret round trip lives here too: read the
 config, save it back untouched, and the credential one level down must still be
-the real one rather than eight stars.
+the real one rather than eight stars — plus the refusal, because a masked value
+inside a list that can no longer be traced back to what it stood for has to come
+back as a `422` instead of being filled in from the wrong entry.
 
 `test_e2e.py` additionally creates a temporary project tree and manager process.
 It validates a complete tool lifecycle through the real HTTP and MCP transports,
