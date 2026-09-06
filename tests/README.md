@@ -140,9 +140,11 @@ runner behind: spawned after the stop, never published as running, invisible to
 the watchdog, holding the port. Both orders are pinned (a stop during the venv
 preparation leaves nothing alive; a stop after the spawn finds the pid and kills
 it), plus fifty rounds of the same race with the timing left to the machine.
-A third case covers the start that is overtaken rather than stopped: A waits for
-its port, a stop kills it, B takes over — and A must not publish itself over B
-when it wakes up. Everything is faked down to `Popen`: this suite runs on the
+Three more cover the rest of the lifecycle, all of them about one operation
+overwriting a newer one: a start that is overtaken rather than stopped must not
+publish itself over its successor; a stop that is still killing must not
+deregister the runner that replaced it; and a stop landing between a start's
+announcement and its claim must not be forgotten. Everything is faked down to `Popen`: this suite runs on the
 server, where spawning a real runner would take a real port.
 
 `test_id_reservation.py` pins that an instance id is held from the availability
