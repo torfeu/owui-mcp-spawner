@@ -50,6 +50,14 @@ _background_tasks: set = set()
 _inflight_ports: set[int] = set()
 _inflight_ports_lock = threading.Lock()
 
+# The same problem one field over. The id was checked against the configs on
+# disk and then *not* held, while the install ran — so two creates of the same
+# id could both pass the check, both answer ok, and the second config simply
+# overwrite the first. The caller of the losing one has an id, a port and a
+# success message for an instance that is not there.
+_inflight_ids: set[str] = set()
+_inflight_ids_lock = threading.Lock()
+
 
 def str_field(value) -> str:
     """Coerce an arbitrary JSON value to a stripped string ('' for non-strings).
@@ -83,6 +91,29 @@ def require_available_id(tool_id: str) -> None:
             f"ID '{tool_id}' already exists — use the code editor / save_tool_code "
             "to modify the existing tool, or choose a different ID",
         )
+
+
+@contextmanager
+def reserve_id(tool_id: str):
+    """Hold *tool_id* from the availability check until the config is written.
+
+    Checks and reserves under one lock, so the answer cannot go stale between
+    the two. A second request for an id that is currently being installed is
+    told so, rather than being allowed to race for the file.
+    """
+    with _inflight_ids_lock:
+        if tool_id in _inflight_ids:
+            raise HTTPException(409, (
+                f"ID '{tool_id}' is already being created — wait for that to finish, "
+                "or choose a different ID"
+            ))
+        require_available_id(tool_id)
+        _inflight_ids.add(tool_id)
+    try:
+        yield tool_id
+    finally:
+        with _inflight_ids_lock:
+            _inflight_ids.discard(tool_id)
 
 
 @contextmanager
@@ -425,7 +456,7 @@ async def _provision_new_tool(
     # A tool may declare its own category; anything the caller passes wins.
     category = category or _category_from_code(code)
 
-    with reserve_port(port) as port:
+    with reserve_id(tool_id), reserve_port(port) as port:
         # 1. Install dependencies into the instance venv (creates it on first use)
         ok, err = await asyncio.to_thread(install_dependencies, tool_id, requirements, False, venv)
         if not ok:
@@ -546,7 +577,7 @@ async def _import_mcp_config(
         except Exception as e:
             raise HTTPException(400, f"Invalid port: {e}")
 
-    with reserve_port(cfg.server.port):
+    with reserve_id(cfg.id), reserve_port(cfg.server.port):
         src_path = resolve_tool_path(cfg)
         # Reject paths that escape the project directory
         try:

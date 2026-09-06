@@ -265,10 +265,15 @@ def _restore_instance(entry, report: dict, dry_run: bool) -> None:
         return
 
     if not dry_run:
+        # The same reservation an upload takes: a restore and a create running
+        # into each other would otherwise both write a config under this id,
+        # and only one of them would survive it.
+        from .api_helpers import reserve_id
         try:
-            TOOLS_DIR.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(tool_path, json.dumps(entry["tool"], indent=2))
-            save_config(cfg)
+            with reserve_id(instance_id):
+                TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(tool_path, json.dumps(entry["tool"], indent=2))
+                save_config(cfg)
         except Exception as e:
             report["instances_failed"].append({"id": instance_id, "reason": str(e)})
             return
