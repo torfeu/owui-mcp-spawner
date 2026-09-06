@@ -176,12 +176,14 @@ pre-existing and report success — what an install leaves behind is noted per
 venv until it is gone. Faked down to `subprocess.run`; the conflicting-wheels
 case and the laundering repeat were both checked against real pip by hand.
 
-`test_save_routes.py` also holds the two write routes to their commit: a value
-saved while a code save is installing must survive it, a lock set in that window
-must stop the save with a `409` rather than being cleared by it, a venv changed
-in that window must stop it too (what was installed and validated no longer
-matches where it would be written), and a dependency added meanwhile must not be
-dropped by the older merged list.
+`test_save_routes.py` also holds the two write routes to their contract: one
+change at a time per instance. A second change arriving while the first is
+installing is refused with a `409` and writes nothing, the same change works the
+moment the first is done, and locking — which stays possible at any time — stops
+a save at its commit instead of being cleared by it. The threads in those tests
+are joined before their patches are undone: a save thread that outlives them
+writes into the real `configs/`, which is how a `demo.json` once ended up in the
+live directory.
 
 `test_e2e.py` additionally creates a temporary project tree and manager process.
 It validates a complete tool lifecycle through the real HTTP and MCP transports,
