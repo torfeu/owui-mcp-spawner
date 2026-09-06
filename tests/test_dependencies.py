@@ -18,6 +18,7 @@ network policy, and what is pinned here is the shape of the calls and what is
 made of their results. The conflicting-wheels case was checked against real pip
 by hand — pip's resolver refuses it outright, which is the better outcome.
 """
+import json
 import pathlib
 import tempfile
 import unittest
@@ -173,6 +174,24 @@ class UnresolvedConflictTests(DependencyTestCase):
         # gets its exemption.
         ok, err = self.install(Recorder(check_before=self.BROKEN, check_after=self.BROKEN))
         self.assertTrue(ok, err)
+
+    def test_a_foreign_conflict_is_not_adopted_when_our_own_one_appears(self):
+        """The whole sequence, not the two kinds separately: a foreign conflict
+        is standing, this install causes its own on top, and later its own is
+        resolved. The foreign one must be exactly as exempt at the end as it
+        was at the start — written down with ours, it would block every install
+        in this venv from then on."""
+        foreign = "gamma 1.0 has requirement other==1.0, but you have other 2.0."
+        ok, _ = self.install(Recorder(check_before=foreign,
+                                      check_after=f"{foreign}\n{self.BROKEN}"))
+        self.assertFalse(ok)
+        self.assertEqual([self.BROKEN],
+                         json.loads((self.conflicts / "default.json").read_text()))
+
+        # Ours is fixed, the foreign one is not. That must be a success.
+        ok, err = self.install(Recorder(check_before=foreign, check_after=foreign))
+        self.assertTrue(ok, err)
+        self.assertFalse((self.conflicts / "default.json").exists())
 
     def test_a_foreign_conflict_is_still_not_blamed_on_this_install(self):
         foreign = "gamma 1.0 has requirement other==1.0, but you have other 2.0."

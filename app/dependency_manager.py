@@ -105,8 +105,12 @@ def install_dependencies(
         # The packages are on disk. Saying so is the point: an instance whose
         # venv contradicts itself fails at import time, in the runtime log,
         # far away from the install that caused it. Written down so a repeat of
-        # this call cannot inherit the damage as somebody else's.
-        _write_unresolved(venv, after)
+        # this call cannot inherit the damage as somebody else's — but only
+        # what is *ours*: `after` also holds the foreign conflicts that were
+        # exempted a moment ago, and adopting those would turn somebody else's
+        # old problem into a permanent one of ours, blocking every later
+        # install here for good.
+        _write_unresolved(venv, introduced)
         return False, msg
 
     # Whatever was on the list and is gone is genuinely resolved.

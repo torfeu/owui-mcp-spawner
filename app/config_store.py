@@ -31,16 +31,38 @@ _config_locks: dict[str, threading.Lock] = {}
 _config_locks_guard = threading.Lock()
 
 
+class InstanceBusy(Exception):
+    """Another change to this instance is already running."""
+
+
 @contextmanager
 def instance_lock(instance_id: str):
-    """Serialize the commit of a config change for one instance."""
+    """Hold an instance against any other change for the length of this block.
+
+    Taken without waiting: a route that finds the lock held raises
+    `InstanceBusy` and answers 409 rather than queueing. Two reasons. The block
+    covers a package install, which can run for minutes, and a request that
+    hangs that long is worse than one that says "not now". And these routes are
+    async — waiting on a threading lock inside one would stall the event loop
+    for every other request in the process, not just this instance's.
+
+    Held across the *whole* route, not only its final write. Point checks at
+    the commit were tried first and closed one interleaving at a time; each
+    round of review found the next one, because the routes prepare an
+    environment from one state and save into another. One change at a time per
+    instance ends the class instead of narrowing it.
+    """
     with _config_locks_guard:
         lock = _config_locks.get(instance_id)
         if lock is None:
             lock = threading.Lock()
             _config_locks[instance_id] = lock
-    with lock:
+    if not lock.acquire(blocking=False):
+        raise InstanceBusy(instance_id)
+    try:
         yield
+    finally:
+        lock.release()
 
 
 def _resolve_path(p: str) -> Path:

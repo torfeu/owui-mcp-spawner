@@ -7,7 +7,7 @@ from ..activity import forget as forget_usage, read_usage
 from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _valve_names_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
 from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
 from ..content_store import forget_instance as forget_content
-from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, instance_lock, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
+from ..config_store import (InstanceBusy, config_exists, delete_config, find_free_port, get_all_states, get_instance_state, instance_lock, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..policy import PolicyError, load_policy
@@ -126,6 +126,18 @@ async def get_config(instance_id: str) -> dict:
 
 @router.put("/api/instances/{instance_id}", dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
 async def update_config(instance_id: str, body: dict) -> dict:
+    try:
+        with instance_lock(instance_id):
+            return await _update_config(instance_id, body)
+    except InstanceBusy:
+        raise HTTPException(409, (
+            f"Another change to '{instance_id}' is running — an install can take "
+            "minutes. Wait for it to finish and try again."
+        ))
+
+
+async def _update_config(instance_id: str, body: dict) -> dict:
+    """The body of the route, with the instance held for its whole length."""
     require_not_locked(instance_id)
     cfg = load_config(instance_id)
     if not cfg:
@@ -260,7 +272,7 @@ async def update_config(instance_id: str, body: dict) -> dict:
     # the new venv) or the dependency list changed (otherwise the instance would
     # restart into a venv missing the new packages). A failed install must not
     # leave the config pointing at an unprepared venv.
-    prepared_venv = ""
+    prepared_venv, prepared_deps = "", []
     if venv_changed or deps_changed:
         ok, err = await asyncio.to_thread(
             install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
@@ -268,43 +280,51 @@ async def update_config(instance_id: str, body: dict) -> dict:
         if not ok:
             raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
         prepared_venv = cfg.venv
+        # What the environment was prepared *with*. Saving a different list
+        # afterwards means the venv is missing something the config promises.
+        prepared_deps = list(cfg.install.dependencies)
 
     # Same rule as save_tool_code, and the same reason: everything above ran on
     # a config read before the dependency install, which can take minutes.
     # Writing that snapshot back overwrites whatever else was saved meanwhile —
     # `locked: true` included. Read it again under the lock and set only the
     # fields this request actually named.
-    with instance_lock(instance_id):
-        fresh = load_config(instance_id)
-        if not fresh:
-            raise HTTPException(404, f"Config '{instance_id}' not found")
-        if fresh.locked:
-            raise HTTPException(409, (
-                f"'{instance_id}' was locked while this change was being prepared — "
-                "nothing was written. Unlock it and save again."
-            ))
-        old_server = (fresh.server.host, fresh.server.port, fresh.server.endpoint)
-        for field in ("name", "description", "category", "server", "install",
-                      "lifecycle", "content", "identity_mode", "forward_agent_token",
-                      "venv"):
-            if field in body:
-                setattr(fresh, field, getattr(cfg, field))
-        if "values" in body:
-            # Recomputed against the current values, not the snapshot's: a mask
-            # stands for whatever is there *now*.
-            before = dict(fresh.values)
-            try:
-                fresh.values.update(keep_masked_values(body["values"], before))
-            except AmbiguousMask as e:
-                raise HTTPException(422, str(e))
-            values_changed = fresh.values != before
-        if prepared_venv and fresh.venv != prepared_venv:
-            raise HTTPException(409, (
-                f"'{instance_id}' was moved to venv '{fresh.venv}' while this change was "
-                f"being prepared in '{prepared_venv}' — nothing was written. Save again."
-            ))
-        save_config(fresh)
-        cfg = fresh
+    fresh = load_config(instance_id)
+    if not fresh:
+        raise HTTPException(404, f"Config '{instance_id}' not found")
+    if fresh.locked:
+        raise HTTPException(409, (
+            f"'{instance_id}' was locked while this change was being prepared — "
+            "nothing was written. Unlock it and save again."
+        ))
+    # Compared *before* the requested fields land on it. Afterwards the answer
+    # is worthless: this request sets `venv` itself, so the venv it prepared and
+    # the venv it is about to save always agree — and the dependency list it
+    # prepared for may still be somebody else's newer one.
+    if prepared_venv and (fresh.venv != prepared_venv
+                          or list(fresh.install.dependencies) != prepared_deps):
+        raise HTTPException(409, (
+            f"'{instance_id}' changed while venv '{prepared_venv}' was being prepared — "
+            "what was installed no longer matches what would be saved, so nothing was "
+            "written. Try again."
+        ))
+    old_server = (fresh.server.host, fresh.server.port, fresh.server.endpoint)
+    for field in ("name", "description", "category", "server", "install",
+                  "lifecycle", "content", "identity_mode", "forward_agent_token",
+                  "venv"):
+        if field in body:
+            setattr(fresh, field, getattr(cfg, field))
+    if "values" in body:
+        # Recomputed against the current values, not the snapshot's: a mask
+        # stands for whatever is there *now*.
+        before = dict(fresh.values)
+        try:
+            fresh.values.update(keep_masked_values(body["values"], before))
+        except AmbiguousMask as e:
+            raise HTTPException(422, str(e))
+        values_changed = fresh.values != before
+    save_config(fresh)
+    cfg = fresh
 
     # Restart so the runner picks up the new interpreter / address / deps (below).
     inst = get_instance_state(instance_id)

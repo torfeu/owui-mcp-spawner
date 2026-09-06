@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 from ..api_helpers import (_backup_tool_file, _bundled_version_info, _example_code, _import_mcp_config, _import_openwebui_tool, _provision_new_tool, require_available_id, require_code_edit, require_not_locked, require_upload_or_edit, str_field)
 from ..auth import require_auth
-from ..config_store import get_instance_state, instance_lock, load_config, resolve_tool_path, save_config, set_instance_state
+from ..config_store import InstanceBusy, get_instance_state, instance_lock, load_config, resolve_tool_path, save_config, set_instance_state
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..process_manager import restart_instance
@@ -90,6 +90,18 @@ async def get_tool_code(instance_id: str) -> dict:
 
 @router.put("/api/instances/{instance_id}/tool-code", dependencies=[Depends(require_auth), Depends(require_code_edit)])
 async def save_tool_code(instance_id: str, body: dict) -> dict:
+    try:
+        with instance_lock(instance_id):
+            return await _save_tool_code(instance_id, body)
+    except InstanceBusy:
+        raise HTTPException(409, (
+            f"Another change to '{instance_id}' is running — an install can take "
+            "minutes. Wait for it to finish and try again."
+        ))
+
+
+async def _save_tool_code(instance_id: str, body: dict) -> dict:
+    """The body of the route, with the instance held for its whole length."""
     require_not_locked(instance_id)
     cfg = load_config(instance_id)
     if not cfg:
@@ -141,56 +153,59 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
         "Could not instantiate Valves" in w for w in result.get("warnings", [])
     )
     new_defaults = result.get("valves", {}) or {}
-    with instance_lock(instance_id):
-        cfg = load_config(instance_id)
-        if not cfg:
-            raise HTTPException(404, "Config not found")
-        # Checked again, not only at the door: locking is exactly the thing
-        # somebody does *while* a long save is running.
-        if cfg.locked:
-            raise HTTPException(409, (
-                f"'{instance_id}' was locked while this save was running — nothing "
-                "was written. Unlock it and save again."
-            ))
-        if cfg.venv != venv_used:
-            raise HTTPException(409, (
-                f"'{instance_id}' was moved from venv '{venv_used}' to '{cfg.venv}' while "
-                "this save was being prepared — the code was installed and validated in "
-                "the old one, so nothing was written. Save again."
-            ))
-        # Merged onto the list as it stands *now*, never written over it: the
-        # list computed before the install is older than whatever else was
-        # saved meanwhile, and replacing it dropped a dependency somebody had
-        # added and installed in between.
-        if deps_installed:
-            current = list(cfg.install.dependencies)
-            merged_now = list(dict.fromkeys([*current, *new_reqs]))
-            if merged_now != current:
-                cfg.install = InstallConfig(dependencies=merged_now,
-                                            upgrade=cfg.install.upgrade)
+    # The instance has been held since the top of the route, so nothing
+    # below can be overtaken. The re-read and the checks stay all the same:
+    # they are cheap, and they are what makes a path that forgets the lock
+    # fail loudly instead of quietly.
+    cfg = load_config(instance_id)
+    if not cfg:
+        raise HTTPException(404, "Config not found")
+    # Checked again, not only at the door: locking is exactly the thing
+    # somebody does *while* a long save is running.
+    if cfg.locked:
+        raise HTTPException(409, (
+            f"'{instance_id}' was locked while this save was running — nothing "
+            "was written. Unlock it and save again."
+        ))
+    if cfg.venv != venv_used:
+        raise HTTPException(409, (
+            f"'{instance_id}' was moved from venv '{venv_used}' to '{cfg.venv}' while "
+            "this save was being prepared — the code was installed and validated in "
+            "the old one, so nothing was written. Save again."
+        ))
+    # Merged onto the list as it stands *now*, never written over it: the
+    # list computed before the install is older than whatever else was
+    # saved meanwhile, and replacing it dropped a dependency somebody had
+    # added and installed in between.
+    if deps_installed:
+        current = list(cfg.install.dependencies)
+        merged_now = list(dict.fromkeys([*current, *new_reqs]))
+        if merged_now != current:
+            cfg.install = InstallConfig(dependencies=merged_now,
+                                        upgrade=cfg.install.upgrade)
 
-        # Sync config.values with the code's Valve defaults so new/changed valves are
-        # editable in the UI; keep user-set values, drop valves no longer in the code (B2).
-        for k, v in new_defaults.items():
-            cfg.values.setdefault(k, v)
-        if valves_introspected:
-            cfg.values = {k: cfg.values[k] for k in cfg.values if k in new_defaults}
+    # Sync config.values with the code's Valve defaults so new/changed valves are
+    # editable in the UI; keep user-set values, drop valves no longer in the code (B2).
+    for k, v in new_defaults.items():
+        cfg.values.setdefault(k, v)
+    if valves_introspected:
+        cfg.values = {k: cfg.values[k] for k in cfg.values if k in new_defaults}
 
-        # Update the tool JSON file: id/name/description come from the config, the
-        # code and its schemas from this save — and everything else in the file
-        # stays. Regenerating it wholesale is what used to empty an imported tool's
-        # manifest on the first save. Inside the lock and after the refusal above,
-        # so a rejected save leaves no half-written state behind.
-        tool_path = resolve_tool_path(cfg)
-        _backup_tool_file(tool_path, instance_id)
-        try:
-            existing = json.loads(tool_path.read_text())
-        except (OSError, ValueError):
-            existing = None
-        updated = merge_openwebui_json(existing, code, cfg.id, cfg.name, cfg.description,
-                                       validation=result)
-        tool_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
-        save_config(cfg)
+    # Update the tool JSON file: id/name/description come from the config, the
+    # code and its schemas from this save — and everything else in the file
+    # stays. Regenerating it wholesale is what used to empty an imported tool's
+    # manifest on the first save. Inside the lock and after the refusal above,
+    # so a rejected save leaves no half-written state behind.
+    tool_path = resolve_tool_path(cfg)
+    _backup_tool_file(tool_path, instance_id)
+    try:
+        existing = json.loads(tool_path.read_text())
+    except (OSError, ValueError):
+        existing = None
+    updated = merge_openwebui_json(existing, code, cfg.id, cfg.name, cfg.description,
+                                   validation=result)
+    tool_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
+    save_config(cfg)
 
     # Restart if running and restart_on_change. Saved and *running the saved
     # code* are two different things: the file is written either way, but a

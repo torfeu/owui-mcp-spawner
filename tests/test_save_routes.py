@@ -90,6 +90,9 @@ class SaveRouteTestCase(unittest.TestCase):
             target.start()
             self.addCleanup(target.stop)
 
+        # Module state: a lock left held by a previous test would 409 this one.
+        config_store._config_locks.clear()
+
         self.client = TestClient(app)
         lockout.clear_all()
         self.original_hash = auth._password_hash
@@ -298,21 +301,32 @@ class NestedSecretRoundTripTests(SaveRouteTestCase):
 
 
 class ConcurrentCommitTests(SaveRouteTestCase):
-    """What a long save may still write when it finally gets there.
+    """One change at a time per instance, and what that is worth.
 
-    Saving code installs packages and validates in the venv — minutes, on a
-    fresh dependency. All of that ran against a config read at the start, and
-    the whole object was written back at the end. Anything saved in between was
-    overwritten by a snapshot older than it, `locked: true` included: a flag set
+    Saving code installs packages and validates in the venv — minutes, on a new
+    dependency — and used to write a config read before all that, overwriting
+    whatever had been saved meanwhile. `locked: true` went with it: a flag set
     to protect the instance, cleared by a save that began before it was set.
 
-    Both routes read the config again before writing now, under one lock per
-    instance, and set only the fields they own. The other direction is the same
-    story with the parts swapped, so it is pinned here too.
+    Checking the state again at the commit was tried first and closed one
+    interleaving at a time; each round of review found the next, because these
+    routes prepare an environment from one state and save into another. So an
+    instance is now held for the whole route and a second change is refused
+    with a 409 rather than queued — a request that waits out a pip install is
+    worse than one that says "not now", and waiting on a lock inside an async
+    route would stall every other request in the process.
+
+    The re-read and the checks at the commit stay: they cost nothing, and they
+    are what makes a path that forgets to take the lock fail loudly.
     """
 
-    def pause_validation(self):
-        """Hold a code save inside validation until the returned event is set."""
+    def start_code_save(self):
+        """Begin a code save that stops inside validation.
+
+        The patches live for the whole test and the thread is joined before
+        they are undone — a save thread that outlives them writes into the
+        *real* configs directory, which is exactly what happened once.
+        """
         import threading
         holding, release = threading.Event(), threading.Event()
 
@@ -322,110 +336,78 @@ class ConcurrentCommitTests(SaveRouteTestCase):
             return {"valid": True, "errors": [], "warnings": [],
                     "tools": [], "valves": {"setting": 1}}
 
-        return holding, release, slow
+        for target in (
+            patch.object(tools_route, "validate_tool_code", slow),
+            patch.object(tools_route, "ensure_venv", lambda venv: (True, "")),
+            patch.object(tools_route, "install_dependencies", lambda *a, **kw: (True, "")),
+            patch.object(tools_route, "restart_instance", lambda _id: (True, "")),
+        ):
+            target.start()
+            self.addCleanup(target.stop)
 
-    def test_a_value_saved_during_a_code_save_is_not_overwritten(self):
-        import threading
-        cfg = json.loads((self.configs / "demo.json").read_text())
-        cfg["values"] = {"setting": 1}
-        (self.configs / "demo.json").write_text(json.dumps(cfg))
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(
+            {"status": self.save_code().status_code}))
+        # Registered after the patches, so it runs before they are undone.
+        self.addCleanup(lambda: (release.set(), thread.join(10)))
+        thread.start()
+        self.assertTrue(holding.wait(5), "the code save never reached validation")
+        return release, thread, result
 
-        holding, release, slow = self.pause_validation()
-        with patch.object(tools_route, "validate_tool_code", slow), \
-             patch.object(tools_route, "restart_instance", lambda _id: (True, "")), \
-             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
-            saving = threading.Thread(target=self.save_code)
-            saving.start()
-            self.assertTrue(holding.wait(5), "the code save never reached validation")
+    def test_a_config_change_during_a_code_save_is_refused(self):
+        release, thread, result = self.start_code_save()
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")), \
+             patch.object(instances_route, "_valve_names_from_tool_file",
+                          lambda cfg: {"setting"}):
+            refused = self.save_config(port=8397, values={"setting": 2})
+        self.assertEqual(409, refused.status_code, refused.json())
+        self.assertIn("Another change", refused.json()["detail"])
 
-            with patch.object(instances_route, "restart_instance", lambda _id: (True, "")), \
-                 patch.object(instances_route, "_valve_names_from_tool_file",
-                              lambda cfg: {"setting"}):
-                response = self.save_config(port=8397, values={"setting": 2})
-            self.assertEqual(200, response.status_code, response.json())
-            self.assertEqual(2, self.stored_values()["setting"])
+        release.set()
+        thread.join(10)
+        self.assertEqual(200, result["status"])
+        # Refused means refused: nothing of it was written.
+        self.assertEqual(1, self.stored_values()["setting"])
 
-            release.set()
-            saving.join(10)
+    def test_the_same_change_works_once_the_first_one_is_done(self):
+        """The refusal is a "not now", not a "no"."""
+        release, thread, result = self.start_code_save()
+        release.set()
+        thread.join(10)
+        self.assertEqual(200, result["status"])
 
-        self.assertEqual(2, self.stored_values()["setting"],
-                         "the code save wrote its old snapshot back")
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")), \
+             patch.object(instances_route, "_valve_names_from_tool_file",
+                          lambda cfg: {"setting"}):
+            response = self.save_config(port=8397, values={"setting": 2})
+        self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual(2, self.stored_values()["setting"])
+
+    def test_a_venv_change_during_a_code_save_is_refused(self):
+        """What was installed and validated must match where it is saved. The
+        two cannot drift apart any more, because the second change never
+        starts."""
+        release, thread, result = self.start_code_save()
+        with patch.object(instances_route, "install_dependencies", lambda *a, **kw: (True, "")), \
+             patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+            refused = self.save_config(port=8397, venv="alternate")
+        self.assertEqual(409, refused.status_code)
+
+        release.set()
+        thread.join(10)
+        self.assertEqual("default",
+                         json.loads((self.configs / "demo.json").read_text())["venv"])
 
     def test_a_lock_set_during_a_code_save_stops_it(self):
-        import threading
-        holding, release, slow = self.pause_validation()
-        with patch.object(tools_route, "validate_tool_code", slow), \
-             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
-            result = {}
-            saving = threading.Thread(target=lambda: result.update(
-                {"status": self.save_code().status_code}))
-            saving.start()
-            self.assertTrue(holding.wait(5))
+        """Locking stays open at any moment — it is a safety action, and
+        refusing it for the length of an install would be the wrong trade. The
+        save catches it at the commit instead and writes nothing."""
+        release, thread, result = self.start_code_save()
+        locked = self.client.post("/api/instances/demo/lock", headers=self.headers())
+        self.assertEqual(200, locked.status_code, locked.text)
 
-            locked = self.client.post("/api/instances/demo/lock", headers=self.headers())
-            self.assertEqual(200, locked.status_code, locked.text)
-
-            release.set()
-            saving.join(10)
-
+        release.set()
+        thread.join(10)
         self.assertEqual(409, result["status"], "the save wrote through a lock")
         self.assertTrue(json.loads((self.configs / "demo.json").read_text())["locked"],
                         "the lock was cleared by the save")
-
-    def test_a_venv_change_during_a_code_save_stops_it(self):
-        """The code was installed and validated in the venv the config named at
-        the start. Writing the result onto a config that now points somewhere
-        else would leave it in an environment nobody prepared for it."""
-        import threading
-        holding, release, slow = self.pause_validation()
-        with patch.object(tools_route, "validate_tool_code", slow), \
-             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
-            result = {}
-            saving = threading.Thread(target=lambda: result.update(
-                {"status": self.save_code().status_code}))
-            saving.start()
-            self.assertTrue(holding.wait(5))
-
-            with patch.object(instances_route, "install_dependencies",
-                              lambda *a, **kw: (True, "")), \
-                 patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
-                moved = self.save_config(port=8397, venv="alternate")
-            self.assertEqual(200, moved.status_code, moved.json())
-
-            release.set()
-            saving.join(10)
-
-        self.assertEqual(409, result["status"])
-        stored = json.loads((self.configs / "demo.json").read_text())
-        self.assertEqual("alternate", stored["venv"])
-
-    def test_a_dependency_added_during_a_code_save_is_not_dropped(self):
-        """The merged list is computed before the install and is therefore
-        older than anything saved since. Written over the current one, it took
-        a dependency somebody had added and installed with it."""
-        import threading
-        holding, release, slow = self.pause_validation()
-
-        def code_with_import(*a, **kw):
-            return ["review-a==1.0"]
-
-        with patch.object(tools_route, "validate_tool_code", slow), \
-             patch.object(tools_route, "parse_requirements", code_with_import), \
-             patch.object(tools_route, "install_dependencies", lambda *a, **kw: (True, "")), \
-             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
-            saving = threading.Thread(target=self.save_code)
-            saving.start()
-            self.assertTrue(holding.wait(5))
-
-            with patch.object(instances_route, "install_dependencies",
-                              lambda *a, **kw: (True, "")), \
-                 patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
-                added = self.save_config(port=8397, install={"dependencies": ["review-b==1.0"]})
-            self.assertEqual(200, added.status_code, added.json())
-
-            release.set()
-            saving.join(10)
-
-        deps = json.loads((self.configs / "demo.json").read_text())["install"]["dependencies"]
-        self.assertIn("review-b==1.0", deps, "the newer dependency was dropped")
-        self.assertIn("review-a==1.0", deps, "the code's own requirement is missing")
