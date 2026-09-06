@@ -300,6 +300,62 @@ class NestedSecretRoundTripTests(SaveRouteTestCase):
                          self.stored_values()["accounts"])
 
 
+class PlainConfigChangeTests(SaveRouteTestCase):
+    """The ordinary single request, with nobody else anywhere near it.
+
+    This class exists because its absence cost a P1. The guard that asks
+    whether anything moved under a running change was written to compare the
+    freshly read config against the state the request *wants* — so a plain venv
+    switch conflicted with itself, answered 409 and saved nothing, after the
+    packages had already been installed. Every concurrency test passed: they
+    all expected a 409 and got one, for the wrong reason.
+
+    A guard about concurrency has to be pinned by what happens when there is
+    none.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for target in (
+            patch.object(instances_route, "install_dependencies", lambda *a, **kw: (True, "")),
+            patch.object(instances_route, "restart_instance", lambda _id: (True, "")),
+        ):
+            target.start()
+            self.addCleanup(target.stop)
+
+    def stored(self):
+        return json.loads((self.configs / "demo.json").read_text())
+
+    def put(self, **changes):
+        body = self.stored()
+        body.update(changes)
+        return self.client.put("/api/instances/demo", json=body, headers=self.headers())
+
+    def test_switching_the_venv_works_on_its_own(self):
+        response = self.put(venv="alternate")
+        self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual("alternate", self.stored()["venv"])
+
+    def test_adding_changing_and_removing_a_dependency_all_work(self):
+        for deps in (["review-a==1.0"], ["review-b==2.0"], []):
+            response = self.put(install={"dependencies": deps, "upgrade": False})
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual(deps, self.stored()["install"]["dependencies"])
+
+    def test_switching_the_venv_and_the_dependencies_together_works(self):
+        response = self.put(venv="alternate",
+                            install={"dependencies": ["review-a==1.0"], "upgrade": False})
+        self.assertEqual(200, response.status_code, response.json())
+        stored = self.stored()
+        self.assertEqual("alternate", stored["venv"])
+        self.assertEqual(["review-a==1.0"], stored["install"]["dependencies"])
+
+    def test_a_change_that_prepares_nothing_still_works(self):
+        response = self.put(description="a new description")
+        self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual("a new description", self.stored()["description"])
+
+
 class ConcurrentCommitTests(SaveRouteTestCase):
     """One change at a time per instance, and what that is worth.
 

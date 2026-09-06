@@ -143,6 +143,13 @@ async def _update_config(instance_id: str, body: dict) -> dict:
     if not cfg:
         raise HTTPException(404, f"Config '{instance_id}' not found")
 
+    # The state this request started from, before a single field of the body
+    # touches it. What the commit below has to be sure of is that nothing moved
+    # *underneath* — and the only way to ask that is against the state it read,
+    # never against the state it wants.
+    original_venv = cfg.venv
+    original_deps = list(cfg.install.dependencies)
+
     # Sub-objects come from arbitrary JSON — reject wrong shapes with a 422
     # instead of crashing on .get()/.items() below.
     for key in ("server", "values", "install", "lifecycle", "content"):
@@ -272,17 +279,14 @@ async def _update_config(instance_id: str, body: dict) -> dict:
     # the new venv) or the dependency list changed (otherwise the instance would
     # restart into a venv missing the new packages). A failed install must not
     # leave the config pointing at an unprepared venv.
-    prepared_venv, prepared_deps = "", []
+    prepared = False
     if venv_changed or deps_changed:
         ok, err = await asyncio.to_thread(
             install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
         )
         if not ok:
             raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
-        prepared_venv = cfg.venv
-        # What the environment was prepared *with*. Saving a different list
-        # afterwards means the venv is missing something the config promises.
-        prepared_deps = list(cfg.install.dependencies)
+        prepared = True
 
     # Same rule as save_tool_code, and the same reason: everything above ran on
     # a config read before the dependency install, which can take minutes.
@@ -297,16 +301,20 @@ async def _update_config(instance_id: str, body: dict) -> dict:
             f"'{instance_id}' was locked while this change was being prepared — "
             "nothing was written. Unlock it and save again."
         ))
-    # Compared *before* the requested fields land on it. Afterwards the answer
-    # is worthless: this request sets `venv` itself, so the venv it prepared and
-    # the venv it is about to save always agree — and the dependency list it
-    # prepared for may still be somebody else's newer one.
-    if prepared_venv and (fresh.venv != prepared_venv
-                          or list(fresh.install.dependencies) != prepared_deps):
+    # Did anything move underneath while the venv was being prepared? Asked
+    # against the state this request *started* from. Comparing it against the
+    # state the request wants instead — which is what stood here first — makes
+    # every real change look like a conflict with itself: a plain venv switch,
+    # with no second request anywhere, answered 409 and saved nothing.
+    #
+    # Under the instance lock this cannot fire. It stays as the assertion that
+    # the lock is doing its job, not as the thing doing it.
+    if prepared and (fresh.venv != original_venv
+                     or list(fresh.install.dependencies) != original_deps):
         raise HTTPException(409, (
-            f"'{instance_id}' changed while venv '{prepared_venv}' was being prepared — "
-            "what was installed no longer matches what would be saved, so nothing was "
-            "written. Try again."
+            f"'{instance_id}' changed while its venv was being prepared — what was "
+            "installed no longer matches what would be saved, so nothing was written. "
+            "Try again."
         ))
     old_server = (fresh.server.host, fresh.server.port, fresh.server.endpoint)
     for field in ("name", "description", "category", "server", "install",
