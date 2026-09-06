@@ -254,6 +254,78 @@ class LifecycleRaceTests(unittest.TestCase):
         self.assertEqual(proc_b.pid, self.inst.pid)
         self.assertIn("demo", pm._load_pids())
 
+    def test_a_stop_still_killing_does_not_deregister_a_newer_runner(self):
+        """Killing a process can run for seconds, and a start arriving in that
+        window is allowed to take over. What the stop must not then do is
+        finish its own bookkeeping: clearing the state and pids.json would
+        leave the new runner alive, unregistered and invisible to the
+        watchdog — the orphan again, from a third direction."""
+        with patch.object(pm, "ensure_venv", lambda _v: (True, "")):
+            ok, err = pm.start_instance("demo")
+            self.assertTrue(ok, err)
+            proc_a = self.procs[0]
+
+            killing, release = threading.Event(), threading.Event()
+            original = pm._wait_pid_gone
+
+            def slow_wait(pid, timeout):
+                if not killing.is_set():
+                    killing.set()
+                    release.wait(5)
+                return original(pid, timeout)
+
+            with patch.object(pm, "_wait_pid_gone", slow_wait):
+                stop_result = {}
+                stopping = threading.Thread(target=lambda: stop_result.update(
+                    zip(("ok", "error"), pm.stop_instance("demo"))))
+                stopping.start()
+                self.assertTrue(killing.wait(5), "the stop never reached the wait")
+
+                ok, err = pm.start_instance("demo")
+                self.assertTrue(ok, err)
+                proc_b = self.procs[1]
+
+                release.set()
+                stopping.join(10)
+
+        self.assertTrue(stop_result["ok"], stop_result)   # A really is gone
+        self.assertFalse(proc_a.alive)
+        self.assertTrue(proc_b.alive)
+        self.assertEqual(MCPStatus.running, self.inst.status)
+        self.assertEqual(proc_b.pid, self.inst.pid)
+        self.assertEqual(proc_b.pid, pm._load_pids()["demo"]["pid"])
+
+    def test_a_stop_landing_between_starting_and_the_claim_is_not_forgotten(self):
+        """The narrow window the generation itself opened: the state said
+        `starting` and the number had not been taken yet, so a stop that ran
+        to completion raised the counter — and the start then took a *higher*
+        number and looked current. Publishing the status and claiming the
+        number are one step now."""
+        announced, release = threading.Event(), threading.Event()
+        original, paused = pm.set_instance_state, []
+
+        def watch(inst):
+            original(inst)
+            if not paused and inst.status == MCPStatus.starting:
+                paused.append(1)
+                announced.set()
+                release.wait(5)
+
+        with patch.object(pm, "ensure_venv", lambda _v: (True, "")), \
+             patch.object(pm, "set_instance_state", watch):
+            thread, result = self.start_in_thread()
+            self.assertTrue(announced.wait(5), "the start never announced itself")
+            ok, err = pm.stop_instance("demo")
+            self.assertTrue(ok, err)
+            release.set()
+            thread.join(10)
+
+        self.assertFalse(result["ok"], "the start ran on through a completed stop")
+        self.assertFalse([p for p in self.procs if p.alive],
+                         "a runner outlived a confirmed stop")
+        self.assertEqual(MCPStatus.stopped, self.inst.status)
+        self.assertIsNone(self.inst.pid)
+
     def test_an_undisturbed_start_still_ends_up_running_and_tracked(self):
         with patch.object(pm, "ensure_venv", lambda _v: (True, "")):
             ok, err = pm.start_instance("demo")

@@ -337,14 +337,17 @@ def start_instance(instance_id: str) -> tuple[bool, str]:
         inst.host = cfg.server.host
         inst.endpoint = cfg.server.endpoint
         inst.url = f"http://{cfg.server.host}:{cfg.server.port}{cfg.server.endpoint}"
-        inst.status = MCPStatus.starting
-        inst.error = ""
-        set_instance_state(inst)
-
-        # Claimed before the slow part, not at the spawn: a stop landing during
-        # ensure_venv has to be able to invalidate this attempt, and claiming
-        # afterwards would hand it a fresh number and hide the stop.
+        # Announcing the start and claiming its number are one step, under the
+        # lock a stop also takes. Split apart — the state published first, the
+        # number taken a moment later — a stop that ran completely in between
+        # was simply forgotten: it raised the counter, and the start then took
+        # a *higher* number and looked perfectly current. Together, a stop is
+        # either entirely before this (and the start is the later intent, which
+        # is allowed to proceed) or after it (and takes the number away).
         with _spawn_lock_for(instance_id):
+            inst.status = MCPStatus.starting
+            inst.error = ""
+            set_instance_state(inst)
             generation = _claim_generation(instance_id)
 
         # The runner must use the instance's venv so the tool's deps are importable.
@@ -506,8 +509,12 @@ def stop_instance(instance_id: str) -> tuple[bool, str]:
         set_instance_state(inst)
         # Whatever start was holding the current number no longer speaks for
         # this instance — including one that is still waiting for its port and
-        # would otherwise publish itself over whatever comes next.
-        _claim_generation(instance_id)
+        # would otherwise publish itself over whatever comes next. The stop
+        # keeps the number it took: killing a process can run for seconds, and
+        # a start arriving in that window is the later intent and may take
+        # over. When it does, this stop no longer speaks for the instance
+        # either, and everything below is no longer its to write.
+        generation = _claim_generation(instance_id)
 
     if pid and _is_pid_alive(pid):
         if not _pid_is_our_runner(pid):
@@ -527,21 +534,32 @@ def stop_instance(instance_id: str) -> tuple[bool, str]:
             # orphan would keep the port and escape the watchdog (status
             # stopped + pid None is invisible to it).
             if not dead:
-                inst.status = MCPStatus.running
-                inst.pid = pid
-                inst.error = f"Could not stop process {pid} — it survived SIGTERM and SIGKILL"
-                set_instance_state(inst)
+                error = f"Could not stop process {pid} — it survived SIGTERM and SIGKILL"
                 logger.error(f"Failed to stop {instance_id}: pid {pid} still alive after SIGKILL")
-                return False, inst.error
+                with _spawn_lock_for(instance_id):
+                    if _is_current(instance_id, generation):
+                        inst.status = MCPStatus.running
+                        inst.pid = pid
+                        inst.error = error
+                        set_instance_state(inst)
+                return False, error
 
-    inst.status = MCPStatus.stopped
-    inst.pid = None
-    set_instance_state(inst)
-
-    with _pids_lock:
-        pids = _load_pids()
-        pids.pop(instance_id, None)
-        _save_pids(pids)
+    with _spawn_lock_for(instance_id):
+        if not _is_current(instance_id, generation):
+            # A start came along while we were killing and has registered its
+            # own runner. The process we were asked to end is gone, which is
+            # what was asked for — but the state and pids.json now describe
+            # *its* runner, and clearing them would leave a live process with
+            # no registration and no watchdog.
+            logger.info(f"Stopped {instance_id} — a newer start has taken the instance over")
+            return True, ""
+        inst.status = MCPStatus.stopped
+        inst.pid = None
+        set_instance_state(inst)
+        with _pids_lock:
+            pids = _load_pids()
+            pids.pop(instance_id, None)
+            _save_pids(pids)
 
     logger.info(f"Stopped {instance_id}")
     return True, ""
