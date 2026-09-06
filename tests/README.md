@@ -170,12 +170,18 @@ one pip call so the resolver sees them together, and exit code 0 alone is not
 taken as success — `pip check` runs before and after, and only what it newly
 complains about counts against this install. A conflict that was already in a
 shared venv must not fail an install that did not cause it, and a `pip check`
-that cannot run must not fail one either. Faked down to `subprocess.run`; the
-conflicting-wheels case was checked against real pip by hand.
+that cannot run must not fail one either. One case is about the exemption itself: a failed
+install leaves its packages behind, so a repeat used to read its own damage as
+pre-existing and report success — what an install leaves behind is noted per
+venv until it is gone. Faked down to `subprocess.run`; the conflicting-wheels
+case and the laundering repeat were both checked against real pip by hand.
 
 `test_save_routes.py` also holds the two write routes to their commit: a value
-saved while a code save is installing must survive it, and a lock set in that
-window must stop the save with a `409` rather than being cleared by it.
+saved while a code save is installing must survive it, a lock set in that window
+must stop the save with a `409` rather than being cleared by it, a venv changed
+in that window must stop it too (what was installed and validated no longer
+matches where it would be written), and a dependency added meanwhile must not be
+dropped by the older merged list.
 
 `test_e2e.py` additionally creates a temporary project tree and manager process.
 It validates a complete tool lifecycle through the real HTTP and MCP transports,
