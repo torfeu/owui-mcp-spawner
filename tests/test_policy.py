@@ -356,3 +356,41 @@ class CacheTests(PolicyTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExplicitDenialTests(PolicyTestCase):
+    """A ban is the one answer in this file that nothing overrules.
+
+    It used to be indistinguishable from "no rule at all": `rules_for()`
+    returns None for both, and `allowed_tools()` reads that None as "unlisted"
+    — which an installation with a relaxed default lets straight through. An
+    explicit ban therefore granted *everything* on exactly the installations
+    that had opened their default, which is the opposite of what it says.
+    """
+
+    DENIED = Identity(sub=ANNA.sub, name=ANNA.name, email=ANNA.email, role="admin")
+
+    def test_a_ban_beats_a_relaxed_default(self):
+        self.write({"default": {"deny": False}, "users": {ANNA.sub: {"deny": True}}})
+        self.assertFalse(policy.is_tool_allowed(self.DENIED, "inst", "read_item"))
+        self.assertEqual([], policy.visible_tools(self.DENIED, "inst", ["read_item"]))
+        # Someone the policy does not name still gets the relaxed default.
+        self.assertTrue(policy.is_tool_allowed(Identity(sub="other"), "inst", "read_item"))
+
+    def test_a_ban_beats_the_role(self):
+        self.write({"roles": {"admin": {"instances": {"inst": "*"}}},
+                    "users": {ANNA.sub: {"deny": True}}})
+        self.assertFalse(policy.is_tool_allowed(self.DENIED, "inst", "read_item"))
+        self.assertTrue(policy.is_tool_allowed(Identity(sub="other", role="admin"),
+                                               "inst", "read_item"))
+
+    def test_a_ban_found_by_email_counts_as_much_as_one_found_by_sub(self):
+        self.write({"default": {"deny": False}, "match_email": True,
+                    "users": {"by-mail": {"email": ANNA.email, "deny": True}}})
+        self.assertFalse(policy.is_tool_allowed(
+            Identity(sub="unknown-sub", email=ANNA.email), "inst", "read_item"))
+
+    def test_an_entry_without_a_ban_is_not_one(self):
+        self.write({"default": {"deny": False},
+                    "users": {ANNA.sub: {"instances": {"other": "*"}}}})
+        self.assertFalse(policy.is_explicitly_denied(ANNA))

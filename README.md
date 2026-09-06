@@ -1003,9 +1003,9 @@ It is passed on now, but narrowly. `forward_agent_token` in an instance's config
 
 ### Removing a caller
 
-The permissions page grants; **Settings → Identity → Known callers** takes away. *Remove* deletes the roster entry, the access rules, and — for an agent identity — its token. Under deny-by-default the caller is refused from their very next request, mid-conversation included, and reappears with nothing whenever they call again.
+The permissions page grants; **Settings → Identity → Known callers** takes away. *Remove* deletes the roster entry and — for an agent identity — its token, and replaces the access rules with a **block** for that id. The block is the point: deleting the rules alone stops nobody whose rights come from their signed *role*, and it would even lift a ban that was already there. A block outranks the role, the default, and any e-mail or name a rule can be matched by, so the caller is refused from their very next request, mid-conversation included, and stays refused until somebody removes the block under *Permissions*.
 
-It costs the admin password, like every other change to who may do what: `DELETE /api/identities/<sub>/reset` sits behind the same guard as `PUT /api/policy`. The lighter `DELETE /api/identities/<sub>` still only tidies the list and leaves the rules alone, which is why it does not. The reset route can only ever *remove* — it deletes one key and never writes a policy a caller supplied — so the password protects granting, not the way back.
+It costs the admin password, like every other change to who may do what: `DELETE /api/identities/<sub>/reset` sits behind the same guard as `PUT /api/policy`. The lighter `DELETE /api/identities/<sub>` still only tidies the list and leaves the rules alone, which is why it does not. The reset route never writes a policy a caller supplied — the single value it can write is the block — so the password protects granting, not the way back.
 
 ---
 

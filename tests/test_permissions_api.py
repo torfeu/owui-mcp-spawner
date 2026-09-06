@@ -189,6 +189,9 @@ class ResetIdentityTests(PermissionsApiTests):
     def _policy_users(self):
         return list((policy.load_policy(force=True).get("users") or {}))
 
+    def _entry(self, sub):
+        return (policy.load_policy(force=True).get("users") or {}).get(sub)
+
     def test_forgetting_leaves_the_rules_where_they_are(self):
         registry.record(ANNA, "inst")
         self._grant("sub-anna")
@@ -197,14 +200,41 @@ class ResetIdentityTests(PermissionsApiTests):
         self.assertTrue(body["forgotten"])
         self.assertEqual(["sub-anna"], self._policy_users())
 
-    def test_reset_takes_the_rules_with_it(self):
+    def test_reset_replaces_the_rules_with_a_block(self):
+        """Deleting the entry stops nobody whose rights come from their role,
+        and it would even lift a ban that was already there. The stop button
+        writes one."""
         registry.record(ANNA, "inst")
         self._grant("sub-anna")
         body = self.client.delete("/api/identities/sub-anna/reset",
                                   headers=self.auth_header).json()
         self.assertTrue(body["forgotten"])
         self.assertTrue(body["rules_removed"])
-        self.assertEqual([], self._policy_users())
+        self.assertTrue(body["blocked"])
+        self.assertEqual({"deny": True}, self._entry("sub-anna"))
+
+    def test_a_blocked_caller_is_refused_although_their_role_grants(self):
+        self.client.put("/api/policy", headers=self.auth_header, json={"policy": {
+            "default": {"deny": True},
+            "roles": {"user": {"instances": {"inst": "*"}}}}})
+        anna = Identity(sub="sub-anna", name="Anna", role="user")
+        self.assertTrue(policy.is_tool_allowed(anna, "inst", "hi"))
+
+        self.client.delete("/api/identities/sub-anna/reset", headers=self.auth_header)
+        self.assertFalse(policy.is_tool_allowed(anna, "inst", "hi"))
+        # And the role itself is untouched — this stops one person, not everyone.
+        self.assertEqual({"instances": {"inst": "*"}},
+                         policy.load_policy(force=True)["roles"]["user"])
+
+    def test_a_block_survives_a_reset_instead_of_being_lifted_by_it(self):
+        """The other direction, and the worse one: Remove used to *unblock*."""
+        self.client.put("/api/policy", headers=self.auth_header, json={"policy": {
+            "default": {"deny": True},
+            "roles": {"user": {"instances": {"inst": "*"}}},
+            "users": {"sub-anna": {"deny": True}}}})
+        anna = Identity(sub="sub-anna", name="Anna", role="user")
+        self.client.delete("/api/identities/sub-anna/reset", headers=self.auth_header)
+        self.assertFalse(policy.is_tool_allowed(anna, "inst", "hi"))
 
     def test_reset_of_an_agent_takes_its_token_too(self):
         # A record without a token is not an agent any more, and a token
@@ -216,7 +246,7 @@ class ResetIdentityTests(PermissionsApiTests):
                                   headers=self.auth_header).json()
         self.assertTrue(body["token_removed"])
         self.assertEqual([], [r["sub"] for r in self.agent_identity.public_list()])
-        self.assertEqual([], self._policy_users())
+        self.assertEqual({"deny": True}, self._entry("claude"))
 
     def test_a_person_is_not_mistaken_for_an_agent(self):
         registry.record(ANNA, "inst")
@@ -225,15 +255,16 @@ class ResetIdentityTests(PermissionsApiTests):
         self.assertFalse(body["token_removed"])
 
     def test_the_route_cannot_grant_anything(self):
-        # The whole reason it may run without the password. Every other user's
-        # rules survive untouched, and no rule can appear that was not there.
+        # Every other user's rules survive untouched, and the single value this
+        # route can write is the block — nothing it writes can open anything.
         registry.record(ANNA, "inst")
         self.client.put("/api/policy", headers=self.auth_header, json={"policy": {"users": {
             "sub-anna": {"instances": {"inst": "*"}},
             "sub-ben": {"instances": {"other": ["one"]}}}}})
         self.client.delete("/api/identities/sub-anna/reset", headers=self.auth_header)
         after = policy.load_policy(force=True)
-        self.assertEqual(["sub-ben"], list(after["users"]))
+        self.assertEqual(["sub-anna", "sub-ben"], sorted(after["users"]))
+        self.assertEqual({"deny": True}, after["users"]["sub-anna"])
         self.assertEqual({"instances": {"other": ["one"]}}, after["users"]["sub-ben"])
 
     def test_reset_needs_the_password_like_every_other_access_change(self):

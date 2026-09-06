@@ -106,12 +106,24 @@ async def reset_identity(sub: str) -> dict:
     the caller is refused (with the usual deny-by-default) and reappears,
     blank, whenever they try again.
 
+    Deleting the personal entry is not enough to stop anybody. Rights can come
+    from the signed *role* as well, and a role rule survives the deletion — so
+    the button that promised refusal handed a role-holder their access straight
+    back. Worse the other way round: an entry that was itself a ban got deleted
+    too, which meant *Remove* could unblock somebody. So this writes a ban
+    rather than removing one: `{"deny": true}`, which outranks the role, the
+    default and any e-mail or name a rule could be matched by.
+
+    It stays until somebody takes it away in the permissions dialog — that is
+    what makes it a stop button and not a tidy-up. The lighter
+    `DELETE /api/identities/<sub>` is still there for tidying.
+
     Password, like `PUT /api/policy` and the token routes: one line for
     everything that changes who may do what. The reason for reaching for this
-    is usually that something is going wrong right now, so the *code* is
-    removal-only — it deletes one key and never writes a policy a caller
-    supplied — but the credential is the same one every other access change
-    needs. No second, softer door into the same room.
+    is usually that something is going wrong right now, so the *code* still
+    writes nothing a caller supplied — the one value it can write is a ban —
+    but the credential is the same one every other access change needs. No
+    second, softer door into the same room.
     """
     forgotten = identity_registry.forget(sub)
 
@@ -119,10 +131,12 @@ async def reset_identity(sub: str) -> dict:
     try:
         policy = load_policy(force=True)
         users = policy.get("users")
-        if isinstance(users, dict) and sub in users:
-            del users[sub]
-            save_policy(policy)
-            rules_removed = True
+        if not isinstance(users, dict):
+            users = {}
+            policy["users"] = users
+        rules_removed = bool(users.get(sub))    # they had something to lose
+        users[sub] = {"deny": True}
+        save_policy(policy)
     except PolicyError as e:
         # A policy file that cannot be read cannot be edited either. Say so
         # rather than reporting a reset that did not happen.
@@ -136,8 +150,9 @@ async def reset_identity(sub: str) -> dict:
             raise HTTPException(409, f"Rules removed, token kept: {e}")
 
     logger.info(f"Reset identity '{sub}' — roster={forgotten}, "
-                f"rules={rules_removed}, token={token_removed}")
+                f"rules={rules_removed}, token={token_removed}, blocked=True")
     return {"ok": True, "forgotten": forgotten, "rules_removed": rules_removed,
+            "blocked": True,
             "token_removed": token_removed}
 
 

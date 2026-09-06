@@ -249,7 +249,10 @@ async function renderDetail() {
     });
   }
   detail.querySelector("#perm-remove")?.addEventListener("click", () => {
-    if (!confirm(`Remove all rules for this user?\nThey will then reach nothing.`)) return;
+    if (!confirm("Remove all rules for this user?\n\nThey fall back to whatever "
+        + "their role and the default grant — which may be more than nothing. To "
+        + "stop somebody, use Remove under Settings \u2192 Identity, which writes a "
+        + "block instead.")) return;
     delete policy.users[selected.key];
     selected = null;
     document.getElementById("perm-detail").innerHTML =

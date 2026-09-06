@@ -216,6 +216,20 @@ def rules_for(identity: Optional[Identity]) -> Optional[dict]:
     return merged
 
 
+def is_explicitly_denied(identity: Optional[Identity]) -> bool:
+    """True when the policy names this person and refuses them outright.
+
+    A ban has to outrank everything that could otherwise grant: the role, the
+    relaxed default, and the e-mail or name a rule may be matched by. It is
+    the one answer in this file that nothing overrules.
+    """
+    if identity is None:
+        return False
+    policy = load_policy()
+    entry = _user_entry(policy, policy.get("users"), identity)
+    return isinstance(entry, dict) and entry.get("deny") is True
+
+
 def _user_entry(policy: dict, users, identity: Identity) -> Optional[dict]:
     """The personal entry, matched by whatever this policy allows to identify."""
     if not isinstance(users, dict):
@@ -261,6 +275,12 @@ def allowed_tools(identity: Optional[Identity], instance_id: str) -> Optional[se
     None when the user may not reach the instance at all.
     """
     policy = load_policy()
+    if is_explicitly_denied(identity):
+        # "Named and refused" is not the same answer as "not named at all", and
+        # only the second one may fall through to a relaxed default. Telling
+        # them apart by `rules_for()` returning None alone turned an explicit
+        # ban into full access on any installation that had opened its default.
+        return None
     rules = rules_for(identity)
 
     if rules is None:

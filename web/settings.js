@@ -649,17 +649,19 @@ async function resetCaller(sub, rows) {
   const loses = ["the entry in this list"];
   if (row.has_rules) loses.push("its access rules");
   if (row.agent) loses.push("its token — the agent stops working at once");
-  if (!confirm(`Remove ${label}?\n\nThis deletes ${loses.join(", ")}.\n\n`
-      + "Anyone using it is refused from their next request on, and reappears "
-      + "here with no rights when they call again.")) return;
+  if (!confirm(`Remove ${label}?\n\nThis deletes ${loses.join(", ")} and writes a `
+      + "block for this id.\n\nAnyone using it is refused from their next request "
+      + "on — including a role that would otherwise grant them something. The "
+      + "block stays until it is removed under Permissions.")) return;
 
   try {
     const result = await apiFetch(`/api/identities/${encodeURIComponent(sub)}/reset`,
                                   { method: "DELETE" });
     const gone = [result.forgotten ? "entry" : "", result.rules_removed ? "rules" : "",
                   result.token_removed ? "token" : ""].filter(Boolean);
-    showAlert("success", gone.length ? `Removed ${label}: ${gone.join(", ")}`
-                                     : `Nothing left to remove for ${label}`);
+    showAlert("success", gone.length
+      ? `Removed ${label}: ${gone.join(", ")} — and blocked from now on.`
+      : `Nothing left to remove for ${label} — blocked from now on.`);
   } catch (e) {
     // The one credential this needs is the password; a read or agent token
     // gets a 403 here, and saying so beats "request failed".
