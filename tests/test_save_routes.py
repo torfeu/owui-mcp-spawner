@@ -295,3 +295,79 @@ class NestedSecretRoundTripTests(SaveRouteTestCase):
         self.assertEqual(200, response.status_code, response.json())
         self.assertEqual([{"name": "bob", "token": "T_BOB"}],
                          self.stored_values()["accounts"])
+
+
+class ConcurrentCommitTests(SaveRouteTestCase):
+    """What a long save may still write when it finally gets there.
+
+    Saving code installs packages and validates in the venv — minutes, on a
+    fresh dependency. All of that ran against a config read at the start, and
+    the whole object was written back at the end. Anything saved in between was
+    overwritten by a snapshot older than it, `locked: true` included: a flag set
+    to protect the instance, cleared by a save that began before it was set.
+
+    Both routes read the config again before writing now, under one lock per
+    instance, and set only the fields they own. The other direction is the same
+    story with the parts swapped, so it is pinned here too.
+    """
+
+    def pause_validation(self):
+        """Hold a code save inside validation until the returned event is set."""
+        import threading
+        holding, release = threading.Event(), threading.Event()
+
+        def slow(code, python, **kw):
+            holding.set()
+            release.wait(5)
+            return {"valid": True, "errors": [], "warnings": [],
+                    "tools": [], "valves": {"setting": 1}}
+
+        return holding, release, slow
+
+    def test_a_value_saved_during_a_code_save_is_not_overwritten(self):
+        import threading
+        cfg = json.loads((self.configs / "demo.json").read_text())
+        cfg["values"] = {"setting": 1}
+        (self.configs / "demo.json").write_text(json.dumps(cfg))
+
+        holding, release, slow = self.pause_validation()
+        with patch.object(tools_route, "validate_tool_code", slow), \
+             patch.object(tools_route, "restart_instance", lambda _id: (True, "")), \
+             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
+            saving = threading.Thread(target=self.save_code)
+            saving.start()
+            self.assertTrue(holding.wait(5), "the code save never reached validation")
+
+            with patch.object(instances_route, "restart_instance", lambda _id: (True, "")), \
+                 patch.object(instances_route, "_valve_names_from_tool_file",
+                              lambda cfg: {"setting"}):
+                response = self.save_config(port=8397, values={"setting": 2})
+            self.assertEqual(200, response.status_code, response.json())
+            self.assertEqual(2, self.stored_values()["setting"])
+
+            release.set()
+            saving.join(10)
+
+        self.assertEqual(2, self.stored_values()["setting"],
+                         "the code save wrote its old snapshot back")
+
+    def test_a_lock_set_during_a_code_save_stops_it(self):
+        import threading
+        holding, release, slow = self.pause_validation()
+        with patch.object(tools_route, "validate_tool_code", slow), \
+             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
+            result = {}
+            saving = threading.Thread(target=lambda: result.update(
+                {"status": self.save_code().status_code}))
+            saving.start()
+            self.assertTrue(holding.wait(5))
+
+            locked = self.client.post("/api/instances/demo/lock", headers=self.headers())
+            self.assertEqual(200, locked.status_code, locked.text)
+
+            release.set()
+            saving.join(10)
+
+        self.assertEqual(409, result["status"], "the save wrote through a lock")
+        self.assertTrue(json.loads((self.configs / "demo.json").read_text())["locked"],
+                        "the lock was cleared by the save")

@@ -7,7 +7,7 @@ from ..activity import forget as forget_usage, read_usage
 from ..api_helpers import (TOOLS_DIR, _bundled_version_info, _instance_to_dict, _request_host, _specs_from_tool_file, _valve_names_from_tool_file, _version_from_tool_file, require_not_locked, require_upload_or_edit)
 from ..auth import is_request_authenticated, mcp_bearer_token, require_admin_auth, require_auth
 from ..content_store import forget_instance as forget_content
-from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
+from ..config_store import (config_exists, delete_config, find_free_port, get_all_states, get_instance_state, instance_lock, is_port_free, load_all_configs, load_config, resolve_tool_path, save_config, set_instance_state)
 from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..policy import PolicyError, load_policy
@@ -130,8 +130,6 @@ async def update_config(instance_id: str, body: dict) -> dict:
     cfg = load_config(instance_id)
     if not cfg:
         raise HTTPException(404, f"Config '{instance_id}' not found")
-
-    old_server = (cfg.server.host, cfg.server.port, cfg.server.endpoint)
 
     # Sub-objects come from arbitrary JSON — reject wrong shapes with a 422
     # instead of crashing on .get()/.items() below.
@@ -269,7 +267,37 @@ async def update_config(instance_id: str, body: dict) -> dict:
         if not ok:
             raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
 
-    save_config(cfg)
+    # Same rule as save_tool_code, and the same reason: everything above ran on
+    # a config read before the dependency install, which can take minutes.
+    # Writing that snapshot back overwrites whatever else was saved meanwhile —
+    # `locked: true` included. Read it again under the lock and set only the
+    # fields this request actually named.
+    with instance_lock(instance_id):
+        fresh = load_config(instance_id)
+        if not fresh:
+            raise HTTPException(404, f"Config '{instance_id}' not found")
+        if fresh.locked:
+            raise HTTPException(409, (
+                f"'{instance_id}' was locked while this change was being prepared — "
+                "nothing was written. Unlock it and save again."
+            ))
+        old_server = (fresh.server.host, fresh.server.port, fresh.server.endpoint)
+        for field in ("name", "description", "category", "server", "install",
+                      "lifecycle", "content", "identity_mode", "forward_agent_token",
+                      "venv"):
+            if field in body:
+                setattr(fresh, field, getattr(cfg, field))
+        if "values" in body:
+            # Recomputed against the current values, not the snapshot's: a mask
+            # stands for whatever is there *now*.
+            before = dict(fresh.values)
+            try:
+                fresh.values.update(keep_masked_values(body["values"], before))
+            except AmbiguousMask as e:
+                raise HTTPException(422, str(e))
+            values_changed = fresh.values != before
+        save_config(fresh)
+        cfg = fresh
 
     # Restart so the runner picks up the new interpreter / address / deps (below).
     inst = get_instance_state(instance_id)

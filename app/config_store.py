@@ -1,6 +1,8 @@
 import errno
 import json
 import socket
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +17,30 @@ CONFIGS_DIR = BASE_DIR / "configs"
 CONFIGS_DIR.mkdir(exist_ok=True)
 
 _state: dict[str, MCPInstance] = {}
+
+# One lock per instance around a read-modify-write of its config.
+#
+# Routes that change a config are not atomic: they read it, then install
+# packages or validate code — seconds to minutes — and only then write the
+# whole object back. Whatever else was saved in between is overwritten by a
+# snapshot that predates it, and `locked: true` goes with it: a flag somebody
+# set to protect the instance, cleared by a save that started before they set
+# it. Holding this across "read again, apply what this route owns, write" makes
+# the commit indivisible without keeping anything locked during the slow part.
+_config_locks: dict[str, threading.Lock] = {}
+_config_locks_guard = threading.Lock()
+
+
+@contextmanager
+def instance_lock(instance_id: str):
+    """Serialize the commit of a config change for one instance."""
+    with _config_locks_guard:
+        lock = _config_locks.get(instance_id)
+        if lock is None:
+            lock = threading.Lock()
+            _config_locks[instance_id] = lock
+    with lock:
+        yield
 
 
 def _resolve_path(p: str) -> Path:
