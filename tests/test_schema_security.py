@@ -3,8 +3,8 @@ import unittest
 from pydantic import ValidationError
 
 from app.schema import MCPConfig, ServerConfig
-from app.security import (SECRET_MASK, drop_masked_values, keep_masked_values,
-                          mask_secrets, validate_package_spec)
+from app.security import (SECRET_MASK, AmbiguousMask, drop_masked_values,
+                          keep_masked_values, mask_secrets, validate_package_spec)
 
 
 class SchemaAndSecurityTests(unittest.TestCase):
@@ -53,13 +53,36 @@ class SchemaAndSecurityTests(unittest.TestCase):
         self.assertEqual("anna", masked["accounts"][0]["user"])
         self.assertEqual("plain", masked["note"])
 
-    def test_masking_does_not_spread_to_what_sits_under_a_secret_name(self):
+    def test_a_dictionary_under_a_secret_name_is_judged_by_its_own_keys(self):
         """is_secret_field matches substrings, so "key" fires on "keywords".
-        A rule that blanked whole subtrees would hide ordinary settings."""
+        A dictionary brings its own names, and those are the better evidence —
+        blanking a whole subtree over the name above it would hide ordinary
+        settings."""
         masked = mask_secrets({"keywords": {"topic": "birds"},
                                "author": {"name": "anna"}})
         self.assertEqual("birds", masked["keywords"]["topic"])
         self.assertEqual("anna", masked["author"]["name"])
+
+    def test_a_list_under_a_secret_name_has_no_inner_names_and_is_masked(self):
+        """`{"api_keys": ["…"]}` is the same secret as `{"api_key": "…"}`, and
+        it went out in the clear through the config API and into a redacted
+        backup. A list has no keys of its own to judge by, so the name above it
+        is all there is."""
+        masked = mask_secrets({"api_keys": ["K1", "K2"], "tokens": ["T"]})
+        self.assertEqual([SECRET_MASK, SECRET_MASK], masked["api_keys"])
+        self.assertEqual([SECRET_MASK], masked["tokens"])
+
+    def test_a_list_that_is_not_named_a_secret_stays_visible(self):
+        masked = mask_secrets({"hosts": ["a.local", "b.local"],
+                               "accounts": [{"name": "anna", "token": "T"}]})
+        self.assertEqual(["a.local", "b.local"], masked["hosts"])
+        self.assertEqual("anna", masked["accounts"][0]["name"])
+        self.assertEqual(SECRET_MASK, masked["accounts"][0]["token"])
+
+    def test_a_masked_list_entry_is_not_installed_as_the_literal_mask(self):
+        kept, dropped = drop_masked_values({"api_keys": [SECRET_MASK, SECRET_MASK]})
+        self.assertEqual({"api_keys": []}, kept)
+        self.assertEqual(["api_keys.0", "api_keys.1"], dropped)
 
     def test_reading_and_writing_back_unchanged_keeps_the_real_secret(self):
         """The half of the fix that matters more than the fix: masking without
@@ -82,6 +105,63 @@ class SchemaAndSecurityTests(unittest.TestCase):
             {"connection": {"password": SECRET_MASK, "host": "h"}, "note": "n"})
         self.assertEqual({"connection": {"host": "h"}, "note": "n"}, kept)
         self.assertEqual(["connection.password"], dropped)
+
+    # ── masked values inside lists ──────────────────────────────────────────
+
+    ACCOUNTS = {"accounts": [{"name": "anna", "token": "T_ANNA"},
+                             {"name": "bob", "token": "T_BOB"}]}
+
+    def masked_accounts(self):
+        return mask_secrets(self.ACCOUNTS)["accounts"]
+
+    def test_deleting_a_list_entry_does_not_hand_its_secret_to_the_next_one(self):
+        """The reported case, and the reason position is not enough: with
+        index matching, removing anna gave bob *her* token — a swapped
+        credential, which fails as a wrong login rather than a missing one."""
+        anna, bob = self.masked_accounts()
+        kept = keep_masked_values({"accounts": [bob]}, self.ACCOUNTS)
+        self.assertEqual([{"name": "bob", "token": "T_BOB"}], kept["accounts"])
+
+    def test_reordering_keeps_each_secret_with_its_own_entry(self):
+        anna, bob = self.masked_accounts()
+        kept = keep_masked_values({"accounts": [bob, anna]}, self.ACCOUNTS)
+        self.assertEqual([{"name": "bob", "token": "T_BOB"},
+                          {"name": "anna", "token": "T_ANNA"}], kept["accounts"])
+
+    def test_an_added_entry_leaves_the_existing_secrets_alone(self):
+        anna, bob = self.masked_accounts()
+        kept = keep_masked_values(
+            {"accounts": [anna, bob, {"name": "cid", "token": "T_CID"}]}, self.ACCOUNTS)
+        self.assertEqual(["T_ANNA", "T_BOB", "T_CID"],
+                         [a["token"] for a in kept["accounts"]])
+
+    def test_an_entry_renamed_while_masked_is_refused_not_guessed(self):
+        """Renamed or new — the two look the same from here, and picking one
+        would mean writing somebody's credential onto another account."""
+        anna, _bob = self.masked_accounts()
+        with self.assertRaises(AmbiguousMask) as caught:
+            keep_masked_values(
+                {"accounts": [anna, {"name": "bobby", "token": SECRET_MASK}]},
+                self.ACCOUNTS)
+        self.assertIn("entry 2", str(caught.exception))
+
+    def test_a_list_of_bare_secrets_round_trips_and_takes_edits_in_place(self):
+        previous = {"api_keys": ["K1", "K2"]}
+        masked = mask_secrets(previous)
+        self.assertEqual(previous, keep_masked_values(masked, previous))
+        # One replaced, the other left masked: position still says which.
+        self.assertEqual({"api_keys": ["NEU", "K2"]},
+                         keep_masked_values({"api_keys": ["NEU", SECRET_MASK]}, previous))
+
+    def test_deleting_from_a_list_of_bare_secrets_is_refused(self):
+        """Nothing distinguishes one mask from another, so which one survived
+        cannot be told — and guessing is how the wrong key gets kept."""
+        with self.assertRaises(AmbiguousMask):
+            keep_masked_values({"api_keys": [SECRET_MASK]}, {"api_keys": ["K1", "K2"]})
+
+    def test_two_identical_entries_survive_an_untouched_save(self):
+        previous = {"a": [{"n": "x", "token": "T1"}, {"n": "x", "token": "T2"}]}
+        self.assertEqual(previous, keep_masked_values(mask_secrets(previous), previous))
 
     def test_package_specs_reject_shell_metacharacters(self):
         self.assertTrue(validate_package_spec("httpx>=0.27"))

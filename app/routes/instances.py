@@ -13,7 +13,7 @@ from ..logger import get_manager_logger
 from ..policy import PolicyError, load_policy
 from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
 from ..schema import ContentConfig, IdentityMode, MCPStatus, ServerConfig, InstallConfig
-from ..security import is_secret_field, keep_masked_values, mask_secrets
+from ..security import AmbiguousMask, is_secret_field, keep_masked_values, mask_secrets
 from ..venv_manager import DEFAULT_VENV
 router = APIRouter()
 logger = get_manager_logger()
@@ -190,7 +190,13 @@ async def update_config(instance_id: str, body: dict) -> dict:
         # are put back before the update, so a nested credential survives a
         # read-and-save that never touched it.
         old_values = dict(cfg.values)
-        cfg.values.update(keep_masked_values(body["values"], old_values))
+        try:
+            cfg.values.update(keep_masked_values(body["values"], old_values))
+        except AmbiguousMask as e:
+            # Refused rather than guessed: filling a mask from the wrong list
+            # entry hands a tool somebody else's credential, which fails as a
+            # wrong login instead of a missing one.
+            raise HTTPException(422, str(e))
         values_changed = cfg.values != old_values
     deps_changed = False
     if "install" in body:

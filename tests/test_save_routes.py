@@ -265,3 +265,33 @@ class NestedSecretRoundTripTests(SaveRouteTestCase):
         stored = self.stored_values()
         self.assertEqual("db.remote", stored["connection"]["host"])
         self.assertEqual(self.SECRET, stored["connection"]["password"])
+
+    def test_an_untraceable_masked_list_entry_is_refused_by_the_route(self):
+        """A 422, not a quiet write: the config keeps what it had, and the
+        message says what to do about it."""
+        cfg = json.loads((self.configs / "demo.json").read_text())
+        cfg["values"] = {"accounts": [{"name": "anna", "token": "T_ANNA"},
+                                      {"name": "bob", "token": "T_BOB"}]}
+        (self.configs / "demo.json").write_text(json.dumps(cfg))
+
+        fetched = self.read_config()["values"]
+        fetched["accounts"][1]["name"] = "bobby"          # umbenannt, Token maskiert
+        response = self.save_config(port=8397, values=fetched)
+
+        self.assertEqual(422, response.status_code)
+        self.assertIn("cannot be traced back", response.json()["detail"])
+        self.assertEqual("T_BOB", self.stored_values()["accounts"][1]["token"])
+
+    def test_deleting_a_list_entry_keeps_the_survivor_s_own_secret(self):
+        cfg = json.loads((self.configs / "demo.json").read_text())
+        cfg["values"] = {"accounts": [{"name": "anna", "token": "T_ANNA"},
+                                      {"name": "bob", "token": "T_BOB"}]}
+        (self.configs / "demo.json").write_text(json.dumps(cfg))
+
+        fetched = self.read_config()["values"]
+        del fetched["accounts"][0]
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+            response = self.save_config(port=8397, values=fetched)
+        self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual([{"name": "bob", "token": "T_BOB"}],
+                         self.stored_values()["accounts"])
