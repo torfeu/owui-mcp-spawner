@@ -10,7 +10,7 @@ from ..dependency_manager import install_dependencies
 from ..logger import get_manager_logger
 from ..process_manager import restart_instance
 from ..schema import InstallConfig, MCPStatus
-from ..tool_editor import STARTER_TEMPLATE, generate_openwebui_json, parse_requirements, validate_tool_code
+from ..tool_editor import STARTER_TEMPLATE, generate_openwebui_json, merge_openwebui_json, parse_requirements, validate_tool_code
 from ..tool_loader import load_openwebui_json
 from ..venv_manager import DEFAULT_VENV, ensure_venv, python_path, venv_exists
 router = APIRouter()
@@ -134,10 +134,18 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
     if valves_introspected:
         cfg.values = {k: cfg.values[k] for k in cfg.values if k in new_defaults}
 
-    # Update the tool JSON file (preserve id/name/description from config)
+    # Update the tool JSON file: id/name/description come from the config, the
+    # code and its schemas from this save — and everything else in the file
+    # stays. Regenerating it wholesale is what used to empty an imported tool's
+    # manifest on the first save.
     tool_path = resolve_tool_path(cfg)
     _backup_tool_file(tool_path, instance_id)
-    updated = generate_openwebui_json(code, cfg.id, cfg.name, cfg.description, validation=result)
+    try:
+        existing = json.loads(tool_path.read_text())
+    except (OSError, ValueError):
+        existing = None
+    updated = merge_openwebui_json(existing, code, cfg.id, cfg.name, cfg.description,
+                                   validation=result)
     tool_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
     save_config(cfg)
 

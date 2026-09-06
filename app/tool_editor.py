@@ -239,6 +239,48 @@ def valve_names(code: str) -> set[str] | None:
     return names or None
 
 
+def merge_openwebui_json(
+    existing, code: str, tool_id: str, name: str, description: str,
+    validation: dict | None = None,
+) -> list[dict]:
+    """Update an installed tool's JSON in place instead of writing a new one.
+
+    Saving code used to hand the file to generate_openwebui_json(), which
+    builds a *fresh* export: `meta.manifest` back to `{}`, `created_at` set to
+    now, and every field an import brought along simply gone. A tool imported
+    from OpenWebUI lost its manifest — author, version, whatever else was in
+    it — on the first save, without touching a single line of it.
+
+    So only what this save actually decides is replaced: the code, the schemas
+    generated from it, `updated_at`, and the three fields the config owns
+    (id, name, description). Everything else in the file survives. A file that
+    is not a usable tool object — missing, unreadable, empty — falls back to
+    generating a new one, which is the honest answer for a tool that has no
+    previous JSON to preserve.
+    """
+    result = validation if validation is not None else validate_tool_code(code)
+    if not result["valid"]:
+        raise ValueError(f"Invalid tool code: {'; '.join(result['errors'])}")
+
+    if isinstance(existing, list):
+        existing = existing[0] if existing else None
+    if not isinstance(existing, dict) or not existing:
+        return generate_openwebui_json(code, tool_id, name, description, validation=result)
+
+    merged = dict(existing)
+    merged["id"] = tool_id
+    merged["name"] = name
+    merged["content"] = code
+    merged["specs"] = result["tools"]
+    merged["updated_at"] = int(time.time())
+    merged.setdefault("created_at", merged["updated_at"])
+    meta = dict(merged.get("meta") or {})
+    meta["description"] = description
+    meta.setdefault("manifest", {})
+    merged["meta"] = meta
+    return [merged]
+
+
 def generate_openwebui_json(
     code: str, tool_id: str, name: str, description: str,
     validation: dict | None = None,

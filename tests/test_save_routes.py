@@ -1,4 +1,6 @@
-"""Saving is not activating — what the two write routes may claim.
+"""What a save says, and what a save keeps.
+
+Two rules for the routes that write a config or a tool's code.
 
 Writing a config or a tool's code puts it on disk. Whether the running runner
 picked it up is a second question, and `restart_instance()` answers it with a
@@ -145,3 +147,60 @@ class RestartReportingTests(SaveRouteTestCase):
             body = self.save_config(port=8397).json()   # same port: nothing to apply
         self.assertFalse(body["restarted"])
         self.assertEqual("", body["restart_error"])
+
+
+class MetadataPreservationTests(SaveRouteTestCase):
+    """The second rule: saving code changes the code, not the file around it.
+
+    The tool JSON was regenerated from scratch on every save, so `meta.manifest`
+    came back as `{}`, `created_at` was reset to now, and any field an import
+    had brought along was gone — after a save that changed nothing but a line
+    of Python. For a tool whose version lives only in its manifest, that is
+    where the version display loses its source.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tool_file.write_text(json.dumps([{
+            "id": "demo", "user_id": "u1", "name": "demo", "content": CODE, "specs": [],
+            "meta": {"description": "imported", "manifest": {"version": "2.4.0",
+                                                             "author": "someone"}},
+            "access_control": {"read": ["team"]},
+            "is_active": True, "created_at": 1000, "updated_at": 1000,
+        }]))
+
+    def saved(self):
+        with patch.object(tools_route, "restart_instance", lambda _id: (True, "")):
+            response = self.save_code()
+        self.assertEqual(200, response.status_code, response.json())
+        return json.loads(self.tool_file.read_text())[0]
+
+    def test_the_manifest_survives_a_save_that_did_not_touch_it(self):
+        meta = self.saved()["meta"]
+        self.assertEqual({"version": "2.4.0", "author": "someone"}, meta["manifest"])
+
+    def test_fields_this_spawner_does_not_generate_are_kept(self):
+        tool = self.saved()
+        self.assertEqual({"read": ["team"]}, tool["access_control"])
+        self.assertEqual("u1", tool["user_id"])
+
+    def test_the_creation_time_is_not_reset_by_an_edit(self):
+        tool = self.saved()
+        self.assertEqual(1000, tool["created_at"])
+        self.assertGreater(tool["updated_at"], 1000)
+
+    def test_the_code_and_its_schemas_are_still_the_ones_being_saved(self):
+        new_code = CODE.replace('def hi(self)', 'def hello(self)')
+        with patch.object(tools_route, "restart_instance", lambda _id: (True, "")):
+            self.client.put("/api/instances/demo/tool-code",
+                            json={"code": new_code}, headers=self.headers())
+        tool = json.loads(self.tool_file.read_text())[0]
+        self.assertEqual(new_code, tool["content"])
+        self.assertEqual(["hello"], [s["name"] for s in tool["specs"]])
+
+    def test_a_tool_without_a_previous_json_still_gets_a_complete_one(self):
+        self.tool_file.unlink()
+        tool = self.saved()
+        self.assertEqual("demo", tool["id"])
+        self.assertEqual(CODE, tool["content"])
+        self.assertEqual({}, tool["meta"]["manifest"])
