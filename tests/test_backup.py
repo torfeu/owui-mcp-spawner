@@ -141,6 +141,18 @@ class ExportTests(IsolatedStateTestCase):
         self.assertEqual("https://example.org",
                          payload["instances"][0]["config"]["values"]["base_url"])
 
+    def test_a_nested_credential_does_not_travel_in_a_redacted_backup(self):
+        """The archive said contains_secrets: false and carried the password
+        anyway — valve values are dict[str, Any], and the masking only ever
+        looked at the top level."""
+        self.write_instance(values={"connection": {"password": "nested-s3cret",
+                                                   "host": "db.local"}})
+        payload = backup.build(include_secrets=False)
+        self.assertNotIn("nested-s3cret", json.dumps(payload))
+        values = payload["instances"][0]["config"]["values"]
+        self.assertEqual(SECRET_MASK, values["connection"]["password"])
+        self.assertEqual("db.local", values["connection"]["host"])
+
     def test_with_secrets_everything_needed_to_restore_is_there(self):
         self.write_instance()
         self.write_settings(mcp_bearer_token="shared", content_max_mb=200)
@@ -312,6 +324,18 @@ class RestoreTests(IsolatedStateTestCase):
         self.assertEqual(["bob"], report["policy_users_restored"])
         users = policy.load_policy(force=True)["users"]
         self.assertEqual({"kept": "*"}, users["anna"]["instances"])
+
+    def test_a_restore_names_the_nested_credential_it_could_not_bring(self):
+        archive = self.archive("demo")
+        archive["instances"][0]["config"]["values"] = {
+            "connection": {"password": SECRET_MASK, "host": "db.local"}}
+        report = backup.restore(archive)
+        restored = report["instances_restored"][0]
+        self.assertEqual(["connection.password"], restored["credentials_missing"])
+        # The mask itself must not be installed: an instance holding "********"
+        # fails in a way that reads like a broken tool.
+        saved = json.loads((self.configs / "demo.json").read_text())
+        self.assertEqual({"connection": {"host": "db.local"}}, saved["values"])
 
     def test_a_whole_policy_comes_back_on_an_empty_target(self):
         """Roles and the two globals are policy too, and a restore that keeps

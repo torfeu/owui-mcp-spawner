@@ -34,12 +34,85 @@ def is_secret_field(key: str) -> bool:
     return any(s in key_lower for s in _SECRET_FIELDS)
 
 
-def mask_secrets(values: dict) -> dict:
-    """Return a copy of values with secret fields masked."""
-    result = {}
-    for k, v in values.items():
-        if is_secret_field(k) and isinstance(v, str) and v:
-            result[k] = SECRET_MASK
-        else:
-            result[k] = v
-    return result
+def mask_secrets(value):
+    """Return a copy of *value* with every secret-named string masked.
+
+    Valve values are `dict[str, Any]`, so a credential can sit one level down —
+    `{"connection": {"password": "…"}}` — and the flat version of this function
+    handed it straight to the config API and into a backup taken *without*
+    secrets, which then labelled itself `contains_secrets: false`.
+
+    A key's own name decides, at whatever depth it sits, and the rule does not
+    spread to what is underneath it: `is_secret_field` matches on substrings,
+    so "key" and "auth" also fire on "keywords" and "author", and masking a
+    whole subtree because of a name like that would blank out settings nobody
+    calls secret. Under-masking was the bug; over-masking is not the fix.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (SECRET_MASK if is_secret_field(k) and isinstance(v, str) and v
+                else mask_secrets(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [mask_secrets(v) for v in value]
+    return value
+
+
+def keep_masked_values(incoming, previous):
+    """Return *incoming* with every mask replaced by what *previous* holds there.
+
+    The counterpart to mask_secrets, and the reason it has to exist: a client
+    that reads a config and writes it back unchanged sends `********` where the
+    credential was. Without this the recursion above would turn a read-then-save
+    in the edit dialog into a config whose password is literally eight stars —
+    a security fix that destroys credentials is not one.
+
+    A mask with nothing behind it is dropped rather than stored: there was no
+    value to keep, and the literal mask is not one either.
+    """
+    if isinstance(incoming, dict):
+        result = {}
+        for key, value in incoming.items():
+            known = isinstance(previous, dict) and key in previous
+            if value == SECRET_MASK:
+                if known:
+                    result[key] = previous[key]
+                continue
+            result[key] = keep_masked_values(value, previous[key] if known else None)
+        return result
+    if isinstance(incoming, list):
+        # Positional: a client echoes back the list it was given, in order.
+        return [keep_masked_values(
+                    item, previous[i] if isinstance(previous, list) and i < len(previous) else None)
+                for i, item in enumerate(incoming)]
+    return incoming
+
+
+def drop_masked_values(value, _prefix: str = "") -> tuple[object, list[str]]:
+    """Strip masks from *value*, and name where they were.
+
+    Used when a config arrives from somewhere that has no previous value to put
+    back — a redacted backup. The paths are what the restore report shows, so
+    "this instance came back without its credential" is something the person
+    reading the report can see rather than discover on the first call.
+    """
+    if isinstance(value, dict):
+        kept, dropped = {}, []
+        for key, item in value.items():
+            path = f"{_prefix}{key}"
+            if item == SECRET_MASK:
+                dropped.append(path)
+                continue
+            sub, sub_dropped = drop_masked_values(item, f"{path}.")
+            kept[key] = sub
+            dropped.extend(sub_dropped)
+        return kept, dropped
+    if isinstance(value, list):
+        kept, dropped = [], []
+        for i, item in enumerate(value):
+            sub, sub_dropped = drop_masked_values(item, f"{_prefix}{i}.")
+            kept.append(sub)
+            dropped.extend(sub_dropped)
+        return kept, dropped
+    return value, []

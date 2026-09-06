@@ -13,7 +13,7 @@ from ..logger import get_manager_logger
 from ..policy import PolicyError, load_policy
 from ..process_manager import _is_pid_alive, restart_instance, start_instance, stop_instance
 from ..schema import ContentConfig, IdentityMode, MCPStatus, ServerConfig, InstallConfig
-from ..security import is_secret_field, mask_secrets, SECRET_MASK
+from ..security import is_secret_field, keep_masked_values, mask_secrets
 from ..venv_manager import DEFAULT_VENV
 router = APIRouter()
 logger = get_manager_logger()
@@ -185,10 +185,12 @@ async def update_config(instance_id: str, body: dict) -> dict:
                     "auto_start and restart_on_change are not valves — they belong in "
                     "the 'lifecycle' field of this request, beside 'values'."
                 ))
-        # GET /config masks secrets; a client echoing the config back must not
-        # overwrite the real values with the mask.
+        # GET /config masks secrets — at any depth — and a client echoing the
+        # config back must not overwrite the real values with the mask. Masks
+        # are put back before the update, so a nested credential survives a
+        # read-and-save that never touched it.
         old_values = dict(cfg.values)
-        cfg.values.update({k: v for k, v in body["values"].items() if v != SECRET_MASK})
+        cfg.values.update(keep_masked_values(body["values"], old_values))
         values_changed = cfg.values != old_values
     deps_changed = False
     if "install" in body:

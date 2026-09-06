@@ -31,6 +31,7 @@ import app.routes.instances as instances_route
 import app.routes.tools as tools_route
 from app.admin_server import app
 from app.schema import MCPInstance, MCPStatus
+from app.security import SECRET_MASK
 
 CODE = ('"""\nversion: 1.0.0\n"""\n\n\nclass Tools:\n'
         '    def hi(self) -> str:\n        """Say hi."""\n        return "hi"\n')
@@ -102,10 +103,14 @@ class SaveRouteTestCase(unittest.TestCase):
         return self.client.put("/api/instances/demo/tool-code",
                                json={"code": CODE}, headers=self.headers())
 
-    def save_config(self, port=8398):
+    def save_config(self, port=8398, **extra):
         body = config(port=port)
         body["tool_source"]["path"] = str(self.tool_file)
+        body.update(extra)
         return self.client.put("/api/instances/demo", json=body, headers=self.headers())
+
+    def stored_values(self):
+        return json.loads((self.configs / "demo.json").read_text())["values"]
 
 
 class RestartReportingTests(SaveRouteTestCase):
@@ -204,3 +209,59 @@ class MetadataPreservationTests(SaveRouteTestCase):
         self.assertEqual("demo", tool["id"])
         self.assertEqual(CODE, tool["content"])
         self.assertEqual({}, tool["meta"]["manifest"])
+
+
+class NestedSecretRoundTripTests(SaveRouteTestCase):
+    """Read the config, save it back untouched — the credential must survive.
+
+    The masking used to stop at the top level, so `connection.password` was
+    handed out in clear text by GET /config and travelled into a redacted
+    backup. Making the mask recursive is only half of it: the write-back has to
+    recognise a nested `********` as "leave this alone", or the edit dialog
+    would store eight stars as the password the first time anyone opens it and
+    presses save.
+    """
+
+    SECRET = "nested-s3cret"
+
+    def setUp(self):
+        super().setUp()
+        cfg = config()
+        cfg["tool_source"]["path"] = str(self.tool_file)
+        cfg["values"] = {"connection": {"password": self.SECRET, "host": "db.local"},
+                         "note": "plain"}
+        (self.configs / "demo.json").write_text(json.dumps(cfg))
+
+    def read_config(self):
+        response = self.client.get("/api/instances/demo/config", headers=self.headers())
+        self.assertEqual(200, response.status_code)
+        return response.json()
+
+    def test_a_nested_credential_is_not_handed_out(self):
+        values = self.read_config()["values"]
+        self.assertEqual(SECRET_MASK, values["connection"]["password"])
+        self.assertEqual("db.local", values["connection"]["host"])
+        self.assertEqual("plain", values["note"])
+
+    def test_saving_the_config_back_unchanged_keeps_the_credential(self):
+        fetched = self.read_config()
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+            response = self.save_config(port=8397, values=fetched["values"])
+        self.assertEqual(200, response.status_code, response.json())
+        self.assertEqual(self.SECRET, self.stored_values()["connection"]["password"])
+
+    def test_a_nested_credential_someone_actually_changed_is_stored(self):
+        fetched = self.read_config()
+        fetched["values"]["connection"]["password"] = "brand-new"
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+            self.save_config(port=8397, values=fetched["values"])
+        self.assertEqual("brand-new", self.stored_values()["connection"]["password"])
+
+    def test_a_neighbour_of_a_masked_field_can_still_be_edited(self):
+        fetched = self.read_config()
+        fetched["values"]["connection"]["host"] = "db.remote"
+        with patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+            self.save_config(port=8397, values=fetched["values"])
+        stored = self.stored_values()
+        self.assertEqual("db.remote", stored["connection"]["host"])
+        self.assertEqual(self.SECRET, stored["connection"]["password"])

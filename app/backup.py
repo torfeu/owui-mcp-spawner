@@ -56,7 +56,7 @@ from .config_store import (CONFIGS_DIR, config_exists, find_free_port, is_port_f
 from .content_store import SECRET_FILE as CONTENT_KEY_FILE
 from .logger import get_manager_logger
 from .schema import MCPConfig
-from .security import is_secret_field, SECRET_MASK
+from .security import drop_masked_values, mask_secrets
 from .settings_store import SETTINGS_FILE, atomic_write_text, load_settings
 
 logger = get_manager_logger()
@@ -126,10 +126,7 @@ def build(include_secrets: bool = False) -> dict:
             # The masked value is a marker, not a password: the restore refuses
             # to write it back, so a redacted backup cannot quietly install
             # "********" as somebody's API key.
-            record["values"] = {
-                k: (SECRET_MASK if is_secret_field(k) and isinstance(v, str) and v else v)
-                for k, v in record.get("values", {}).items()
-            }
+            record["values"] = mask_secrets(record.get("values", {}))
         tool = _tool_payload(cfg)
         if tool is None:
             missing_tools.append(instance_id)
@@ -244,9 +241,7 @@ def _restore_instance(entry, report: dict, dry_run: bool) -> None:
     # A redacted backup cannot bring credentials back. Dropping the marker is
     # the honest move — an instance with a missing key fails loudly on its first
     # call, one holding "********" fails in a way that reads like a broken tool.
-    dropped = [k for k, v in (raw.get("values") or {}).items() if v == SECRET_MASK]
-    if dropped:
-        raw["values"] = {k: v for k, v in raw["values"].items() if v != SECRET_MASK}
+    raw["values"], dropped = drop_masked_values(raw.get("values") or {})
 
     tool_path = TOOLS_DIR / f"{instance_id}.json"
     raw.setdefault("tool_source", {})
