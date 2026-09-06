@@ -4,7 +4,8 @@ from pydantic import ValidationError
 
 from app.schema import MCPConfig, ServerConfig
 from app.security import (SECRET_MASK, AmbiguousMask, drop_masked_values,
-                          keep_masked_values, mask_secrets, validate_package_spec)
+                          is_secret_field, keep_masked_values, mask_secrets,
+                          validate_package_spec)
 
 
 class SchemaAndSecurityTests(unittest.TestCase):
@@ -54,14 +55,37 @@ class SchemaAndSecurityTests(unittest.TestCase):
         self.assertEqual("plain", masked["note"])
 
     def test_a_dictionary_under_a_secret_name_is_judged_by_its_own_keys(self):
-        """is_secret_field matches substrings, so "key" fires on "keywords".
-        A dictionary brings its own names, and those are the better evidence —
-        blanking a whole subtree over the name above it would hide ordinary
-        settings."""
-        masked = mask_secrets({"keywords": {"topic": "birds"},
-                               "author": {"name": "anna"}})
-        self.assertEqual("birds", masked["keywords"]["topic"])
-        self.assertEqual("anna", masked["author"]["name"])
+        """A dictionary brings its own names, and those are the better
+        evidence — blanking a whole subtree over the name above it would hide
+        ordinary settings that happen to sit next to a credential."""
+        masked = mask_secrets({"auth": {"user": "anna", "password": "s3cret"},
+                               "credentials": {"host": "db.local"}})
+        self.assertEqual("anna", masked["auth"]["user"])
+        self.assertEqual(SECRET_MASK, masked["auth"]["password"])
+        self.assertEqual("db.local", masked["credentials"]["host"])
+
+    def test_a_secret_name_is_matched_by_word_and_not_by_substring(self):
+        """"key" used to fire on "keywords", "author" and "monkey". Harmless
+        while it only hid a string — reading a config and writing it back put
+        the value straight back — and no longer harmless once the masking
+        reached into lists, where a redacted backup lost the values for good."""
+        for name in ("keywords", "author", "monkey", "keyboard", "allow_delete",
+                     "EXTRA_ALLOWED_TOOLS"):
+            self.assertFalse(is_secret_field(name), name)
+        for name in ("api_key", "API_KEY", "apiKey", "apikey", "MCP_TOKEN",
+                     "app_password_file", "unsplash_access_key", "auth_token",
+                     "client_secret", "passphrase", "keys", "tokens"):
+            self.assertTrue(is_secret_field(name), name)
+
+    def test_an_ordinary_keyword_list_survives_a_redacted_backup(self):
+        """The reported loss, end to end: masked in the export, and then the
+        restore dropped it and called it a missing credential."""
+        values = {"keywords": ["birds", "nests"], "api_keys": ["K1"]}
+        masked = mask_secrets(values)
+        self.assertEqual(["birds", "nests"], masked["keywords"])
+        kept, dropped = drop_masked_values(masked)
+        self.assertEqual(["birds", "nests"], kept["keywords"])
+        self.assertEqual(["api_keys.0"], dropped)
 
     def test_a_list_under_a_secret_name_has_no_inner_names_and_is_masked(self):
         """`{"api_keys": ["…"]}` is the same secret as `{"api_key": "…"}`, and

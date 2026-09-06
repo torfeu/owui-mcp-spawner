@@ -2,7 +2,35 @@ import re
 from packaging.requirements import Requirement, InvalidRequirement
 
 _SAFE_PACKAGE_RE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
-_SECRET_FIELDS = {"api_key", "token", "secret", "password", "key", "auth"}
+# Words that name a credential — matched as *words*, never as substrings.
+#
+# The substring rule fired on "keywords", "author" and "monkey". As long as it
+# only reached single strings that was ugly but survivable, because reading a
+# config and writing it back puts the value straight back. Once the masking
+# reached into lists it stopped being survivable: an ordinary keyword list came
+# out of a backup taken *without* secrets as eight stars, and the restore then
+# dropped it and reported it as a missing credential. A setting nobody called a
+# secret, gone for good.
+#
+# Splitting on separators and on camelCase covers every valve name in this
+# installation — `API_KEY`, `app_password_file`, `unsplash_access_key` and the
+# rest all carry the word on its own. Names that run the words together have no
+# boundary to find, so the common spellings are listed as words in their own
+# right. What this cannot catch is an unlisted run-together invention; the
+# proper answer to that is a secret marked as one in the valve schema rather
+# than guessed from its name, and that is not built yet.
+_SECRET_WORDS = {
+    "key", "keys", "token", "tokens", "secret", "secrets",
+    "password", "passwords", "passwd", "passphrase", "pwd",
+    "auth", "authorization", "credential", "credentials",
+    "apikey", "apikeys", "apitoken", "authtoken", "accesstoken",
+    "refreshtoken", "privatekey", "secretkey", "clientsecret",
+}
+
+# Separator-delimited chunks, then camelCase inside each: "apiKey" and
+# "API_KEY" both come apart, "keywords" stays one word.
+_CHUNK_RE = re.compile(r"[A-Za-z0-9]+")
+_CAMEL_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|[0-9]+")
 
 # Placeholder returned instead of secret values; update endpoints must treat an
 # incoming value equal to this as "unchanged", or round-tripping a fetched
@@ -28,10 +56,16 @@ def validate_package_spec(spec: str) -> bool:
         return False
 
 
+def secret_words(key: str) -> list:
+    """The words *key* is made of, lowercased."""
+    return [word.lower()
+            for chunk in _CHUNK_RE.findall(key)
+            for word in _CAMEL_RE.findall(chunk)]
+
+
 def is_secret_field(key: str) -> bool:
     """True when *key* names a credential-like value that must be masked."""
-    key_lower = key.lower()
-    return any(s in key_lower for s in _SECRET_FIELDS)
+    return any(word in _SECRET_WORDS for word in secret_words(key))
 
 
 class AmbiguousMask(Exception):
