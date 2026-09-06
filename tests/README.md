@@ -176,7 +176,14 @@ pre-existing and report success — what an install leaves behind is noted per
 venv until it is gone. Faked down to `subprocess.run`; the conflicting-wheels
 case and the laundering repeat were both checked against real pip by hand.
 
-`test_save_routes.py` also holds the two write routes to their contract: one
+`test_save_routes.py` pins the ordinary single request first — switch the venv,
+add, change and remove a dependency, both at once, and a change that prepares
+nothing — because the guard about concurrency was once written to compare the
+config against the state the request *wanted*, and every concurrency test stayed
+green while a plain venv switch answered 409 to itself. An assertion about
+concurrency has to be held to what happens when there is none.
+
+It also holds the two write routes to their contract: one
 change at a time per instance. A second change arriving while the first is
 installing is refused with a `409` and writes nothing, the same change works the
 moment the first is done, and locking — which stays possible at any time — stops
