@@ -1,4 +1,6 @@
+import json
 import subprocess
+from pathlib import Path
 
 from .logger import get_install_log_path, get_manager_logger
 from .security import validate_package_spec
@@ -10,6 +12,9 @@ logger = get_manager_logger()
 PIP_TIMEOUT = 600
 # `pip check` reads installed metadata and does not go to the network.
 PIP_CHECK_TIMEOUT = 120
+# Conflicts an install left behind, per venv. A file rather than memory: the
+# damage outlives the manager process, so the note has to as well.
+CONFLICTS_DIR = Path(__file__).parent.parent / "runtime" / "venv-conflicts"
 
 
 def _log(instance_id: str, msg: str) -> None:
@@ -51,7 +56,15 @@ def install_dependencies(
     # What pip complains about *before* we touch anything. A venv that is
     # already inconsistent — shared with another instance, or broken by hand —
     # must not make every later install fail for a problem it did not cause.
-    before = _conflicts(py, instance_id)
+    #
+    # With one exception, and it is the whole reason the marker below exists:
+    # a complaint *we* left behind is not somebody else's old problem. An
+    # install that ends inconsistent leaves the packages where they are, so on
+    # the very next attempt its own damage looks pre-existing and gets the
+    # exemption — the same call, repeated, reported success over a venv that
+    # was still broken. Lines we already know are ours get no pass.
+    unresolved = _read_unresolved(venv)
+    before = [line for line in _conflicts(py, instance_id) if line not in unresolved]
 
     # One call for all of them, so pip resolves them against each other. Run
     # one at a time, a later package could replace a version an earlier one
@@ -84,17 +97,49 @@ def install_dependencies(
     # Exit code 0 is not the same as a usable environment: pip installs what it
     # was asked for and reports what that broke only if it is asked. Anything
     # new since the check above is ours.
-    introduced = [line for line in _conflicts(py, instance_id) if line not in before]
+    after = _conflicts(py, instance_id)
+    introduced = [line for line in after if line not in before]
     if introduced:
         msg = "Installed, but the environment is inconsistent: " + " ".join(introduced)
         _log(instance_id, f"[ERROR] {msg}")
         # The packages are on disk. Saying so is the point: an instance whose
         # venv contradicts itself fails at import time, in the runtime log,
-        # far away from the install that caused it.
+        # far away from the install that caused it. Written down so a repeat of
+        # this call cannot inherit the damage as somebody else's.
+        _write_unresolved(venv, after)
         return False, msg
 
+    # Whatever was on the list and is gone is genuinely resolved.
+    _write_unresolved(venv, [line for line in unresolved if line in after])
     _log(instance_id, "All dependencies installed successfully.")
     return True, ""
+
+
+def _unresolved_path(venv: str):
+    """Where the unfinished business of one venv is noted."""
+    return CONFLICTS_DIR / f"{venv}.json"
+
+
+def _read_unresolved(venv: str) -> list:
+    try:
+        data = json.loads(_unresolved_path(venv).read_text())
+    except (OSError, ValueError):
+        return []
+    return [line for line in data if isinstance(line, str)] if isinstance(data, list) else []
+
+
+def _write_unresolved(venv: str, lines: list) -> None:
+    path = _unresolved_path(venv)
+    try:
+        if not lines:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(set(lines)), indent=2))
+    except OSError as e:
+        # A note that cannot be written must not break an install; the worst
+        # case is the exemption this note exists to withhold.
+        logger.warning(f"Could not record venv conflicts for '{venv}': {e}")
 
 
 def _conflicts(py, instance_id: str) -> list:

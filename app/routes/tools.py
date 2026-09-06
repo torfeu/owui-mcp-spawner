@@ -103,6 +103,11 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
     # are already installed, so we only re-run pip when the set grows.
     new_reqs = parse_requirements(code)
     merged_reqs = list(dict.fromkeys([*cfg.install.dependencies, *new_reqs]))
+    # Which environment everything below is prepared *for*. Checked again at
+    # the commit: installing and validating in `default` and then saving the
+    # result onto a config that meanwhile points at `alternate` would leave the
+    # code sitting in an environment nobody prepared for it.
+    venv_used = cfg.venv
     deps_installed = False
     if merged_reqs != cfg.install.dependencies:
         ok, err = await asyncio.to_thread(
@@ -147,8 +152,22 @@ async def save_tool_code(instance_id: str, body: dict) -> dict:
                 f"'{instance_id}' was locked while this save was running — nothing "
                 "was written. Unlock it and save again."
             ))
-        if merged_reqs != list(cfg.install.dependencies) and deps_installed:
-            cfg.install = InstallConfig(dependencies=merged_reqs, upgrade=cfg.install.upgrade)
+        if cfg.venv != venv_used:
+            raise HTTPException(409, (
+                f"'{instance_id}' was moved from venv '{venv_used}' to '{cfg.venv}' while "
+                "this save was being prepared — the code was installed and validated in "
+                "the old one, so nothing was written. Save again."
+            ))
+        # Merged onto the list as it stands *now*, never written over it: the
+        # list computed before the install is older than whatever else was
+        # saved meanwhile, and replacing it dropped a dependency somebody had
+        # added and installed in between.
+        if deps_installed:
+            current = list(cfg.install.dependencies)
+            merged_now = list(dict.fromkeys([*current, *new_reqs]))
+            if merged_now != current:
+                cfg.install = InstallConfig(dependencies=merged_now,
+                                            upgrade=cfg.install.upgrade)
 
         # Sync config.values with the code's Valve defaults so new/changed valves are
         # editable in the UI; keep user-set values, drop valves no longer in the code (B2).

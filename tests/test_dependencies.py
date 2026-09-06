@@ -52,15 +52,21 @@ class Recorder:
         return [c for c in self.calls if "install" in c]
 
 
-class InstallTests(unittest.TestCase):
+class DependencyTestCase(unittest.TestCase):
+    """Every path install_dependencies writes to, pointed somewhere harmless."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         log = pathlib.Path(self.tmp.name) / "install.log"
+        # The note about unfinished business is a real file under runtime/;
+        # this suite runs on the server, where that belongs to a live venv.
+        self.conflicts = pathlib.Path(self.tmp.name) / "venv-conflicts"
         for target in (
             patch.object(dm, "ensure_venv", lambda venv, log=None: (True, "")),
             patch.object(dm, "python_path", lambda venv: pathlib.Path("/nowhere/python")),
             patch.object(dm, "get_install_log_path", lambda instance_id: log),
+            patch.object(dm, "CONFLICTS_DIR", self.conflicts),
         ):
             target.start()
             self.addCleanup(target.stop)
@@ -69,6 +75,8 @@ class InstallTests(unittest.TestCase):
         with patch.object(dm.subprocess, "run", recorder):
             return dm.install_dependencies("demo", list(deps), upgrade, "default")
 
+
+class InstallTests(DependencyTestCase):
     def test_every_requirement_goes_into_one_pip_call(self):
         """Separately, a later package can replace a version an earlier one
         needs — and pip has no way to know, because it is never told about
@@ -132,3 +140,42 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Invalid/unsafe", err)
         self.assertEqual([], recorder.calls)
+
+
+class UnresolvedConflictTests(DependencyTestCase):
+    """A repeat of a failed install must not inherit its own damage.
+
+    An install that ends inconsistent leaves the packages where they are. On
+    the next attempt `pip check` says the same thing it said before, the
+    "already there, not ours" exemption applies — and the very same call, run
+    twice, reported success over a venv that was still broken. Confirmed
+    against real pip: (True, "") while `pip check` still exits 1.
+    """
+
+    BROKEN = "alpha 1.0 has requirement shared==1.0, but you have shared 2.0."
+
+    def test_repeating_a_failed_install_fails_again(self):
+        first = Recorder(check_after=self.BROKEN)
+        ok, _err = self.install(first)
+        self.assertFalse(ok)
+
+        # Same call, same broken environment — now it reads as pre-existing.
+        again = Recorder(check_before=self.BROKEN, check_after=self.BROKEN)
+        ok, err = self.install(again)
+        self.assertFalse(ok, "a repeat laundered the failure into success")
+        self.assertIn("shared 2.0", err)
+
+    def test_a_conflict_that_got_resolved_stops_counting(self):
+        self.install(Recorder(check_after=self.BROKEN))
+        ok, err = self.install(Recorder(check_before="", check_after=""))
+        self.assertTrue(ok, err)
+        # And the note is gone, so a genuinely foreign conflict later on still
+        # gets its exemption.
+        ok, err = self.install(Recorder(check_before=self.BROKEN, check_after=self.BROKEN))
+        self.assertTrue(ok, err)
+
+    def test_a_foreign_conflict_is_still_not_blamed_on_this_install(self):
+        foreign = "gamma 1.0 has requirement other==1.0, but you have other 2.0."
+        ok, err = self.install(Recorder(check_before=foreign, check_after=foreign))
+        self.assertTrue(ok, err)
+        self.assertFalse((self.conflicts / "default.json").exists())

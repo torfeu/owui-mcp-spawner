@@ -371,3 +371,61 @@ class ConcurrentCommitTests(SaveRouteTestCase):
         self.assertEqual(409, result["status"], "the save wrote through a lock")
         self.assertTrue(json.loads((self.configs / "demo.json").read_text())["locked"],
                         "the lock was cleared by the save")
+
+    def test_a_venv_change_during_a_code_save_stops_it(self):
+        """The code was installed and validated in the venv the config named at
+        the start. Writing the result onto a config that now points somewhere
+        else would leave it in an environment nobody prepared for it."""
+        import threading
+        holding, release, slow = self.pause_validation()
+        with patch.object(tools_route, "validate_tool_code", slow), \
+             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
+            result = {}
+            saving = threading.Thread(target=lambda: result.update(
+                {"status": self.save_code().status_code}))
+            saving.start()
+            self.assertTrue(holding.wait(5))
+
+            with patch.object(instances_route, "install_dependencies",
+                              lambda *a, **kw: (True, "")), \
+                 patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+                moved = self.save_config(port=8397, venv="alternate")
+            self.assertEqual(200, moved.status_code, moved.json())
+
+            release.set()
+            saving.join(10)
+
+        self.assertEqual(409, result["status"])
+        stored = json.loads((self.configs / "demo.json").read_text())
+        self.assertEqual("alternate", stored["venv"])
+
+    def test_a_dependency_added_during_a_code_save_is_not_dropped(self):
+        """The merged list is computed before the install and is therefore
+        older than anything saved since. Written over the current one, it took
+        a dependency somebody had added and installed with it."""
+        import threading
+        holding, release, slow = self.pause_validation()
+
+        def code_with_import(*a, **kw):
+            return ["review-a==1.0"]
+
+        with patch.object(tools_route, "validate_tool_code", slow), \
+             patch.object(tools_route, "parse_requirements", code_with_import), \
+             patch.object(tools_route, "install_dependencies", lambda *a, **kw: (True, "")), \
+             patch.object(tools_route, "ensure_venv", lambda venv: (True, "")):
+            saving = threading.Thread(target=self.save_code)
+            saving.start()
+            self.assertTrue(holding.wait(5))
+
+            with patch.object(instances_route, "install_dependencies",
+                              lambda *a, **kw: (True, "")), \
+                 patch.object(instances_route, "restart_instance", lambda _id: (True, "")):
+                added = self.save_config(port=8397, install={"dependencies": ["review-b==1.0"]})
+            self.assertEqual(200, added.status_code, added.json())
+
+            release.set()
+            saving.join(10)
+
+        deps = json.loads((self.configs / "demo.json").read_text())["install"]["dependencies"]
+        self.assertIn("review-b==1.0", deps, "the newer dependency was dropped")
+        self.assertIn("review-a==1.0", deps, "the code's own requirement is missing")

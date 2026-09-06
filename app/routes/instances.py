@@ -260,12 +260,14 @@ async def update_config(instance_id: str, body: dict) -> dict:
     # the new venv) or the dependency list changed (otherwise the instance would
     # restart into a venv missing the new packages). A failed install must not
     # leave the config pointing at an unprepared venv.
+    prepared_venv = ""
     if venv_changed or deps_changed:
         ok, err = await asyncio.to_thread(
             install_dependencies, instance_id, cfg.install.dependencies, cfg.install.upgrade, cfg.venv
         )
         if not ok:
             raise HTTPException(422, {"message": f"Could not prepare venv '{cfg.venv}'", "errors": [err]})
+        prepared_venv = cfg.venv
 
     # Same rule as save_tool_code, and the same reason: everything above ran on
     # a config read before the dependency install, which can take minutes.
@@ -296,6 +298,11 @@ async def update_config(instance_id: str, body: dict) -> dict:
             except AmbiguousMask as e:
                 raise HTTPException(422, str(e))
             values_changed = fresh.values != before
+        if prepared_venv and fresh.venv != prepared_venv:
+            raise HTTPException(409, (
+                f"'{instance_id}' was moved to venv '{fresh.venv}' while this change was "
+                f"being prepared in '{prepared_venv}' — nothing was written. Save again."
+            ))
         save_config(fresh)
         cfg = fresh
 
