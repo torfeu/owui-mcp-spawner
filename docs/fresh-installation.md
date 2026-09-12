@@ -51,27 +51,19 @@ The first tool installation built `runtime/venvs/default` through the normal app
 
 The call endpoint used by these checks performs real MCP communication with the runner. Tool execution and the resulting files were not mocked. No Nextcloud, OpenHAB, OpenWebUI, LLM or third-party service account was used.
 
-## Full-suite result: compatibility issue still open
+## Full-suite result
 
 The repository suite was also run in another disposable copy, using the freshly installed manager packages and a copy of the freshly built default runner environment.
 
-**787 tests ran: 782 passed and 5 errored**, in 18.545 seconds. The errors are all in `tests/test_api.py`, where route enumeration assumes every item of `app.routes` has a `.path` attribute. With the freshly installed FastAPI 0.141.1, the collection also contains `_IncludedRouter` objects, producing:
+**787 tests ran, all green**, in 17.5 seconds — checked again on 2026-09-12 with FastAPI 0.141.1 and MCP SDK 2.2.0.
+
+The first run of this fresh installation was not green: five contract and permission sweeps in `tests/test_api.py` errored with
 
 ```text
 AttributeError: '_IncludedRouter' object has no attribute 'path'
 ```
 
-Affected checks:
-
-- `ApiContractTests.test_all_api_routes_remain_registered`
-- `ReadTokenTests.test_every_get_route_is_classified`
-- `ReadTokenTests.test_read_token_is_refused_on_every_mutating_route`
-- `AgentTokenTests.test_agent_token_opens_every_route_except_the_admin_ones`
-- `AgentTokenTests.test_every_admin_only_route_is_registered`
-
-This is a test-introspection incompatibility observed with the new dependency resolution. The direct browser and MCP checks above passed, but this installation cannot be described as having a fully green suite: the five contract/permission sweeps did not complete. Adapt route enumeration to include the actual nested API routes, rather than merely skipping objects without `.path`. Runtime dependencies and test code were not changed as part of this documentation task.
-
-For comparison, the previous 787-test green result used FastAPI 0.136.1 and Starlette 1.0.1 in the existing development environment. This fresh installation deliberately did not reuse that environment.
+Up to FastAPI 0.140, `include_router` copied the included routes straight into `app.routes`, and the sweeps read `route.path` off it. From 0.141 a single wrapper object sits there instead and the routes live one level down. Skipping the objects without a `.path` would have made the suite green while testing nothing at all — under the new FastAPI, *not one* `/api` route is registered directly any more, so all five sweeps would have swept an empty list. The enumeration now walks into the wrapper, and it finds the same 58 routes under both FastAPI 0.136.1 and 0.141.1. Runtime dependencies were not changed; the framework's own routing was never affected, only the test's introspection of it.
 
 ## README changes
 

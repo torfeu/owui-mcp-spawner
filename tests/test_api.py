@@ -15,6 +15,35 @@ from app.admin_server import app
 from app.schema import ContentConfig, IdentityMode
 
 
+def api_routes(prefix="/api"):
+    """Every registered route under *prefix*, as ``(path, methods)`` pairs.
+
+    Up to FastAPI 0.140 ``include_router`` copied the included routes straight
+    into ``app.routes``, so the sweeps below could read ``route.path`` off it.
+    From 0.141 it puts a single wrapper object there instead and the routes
+    live one level down: reading ``.path`` raises AttributeError, and merely
+    skipping the objects that do not have one would leave every sweep with an
+    empty list — not one ``/api`` route is registered directly any more. So
+    this walks into the wrapper instead of stepping around it, and the sweeps
+    keep the property they exist for: they see every route, or they fail.
+    """
+    found = []
+
+    def walk(routes, mounted_at=""):
+        for route in routes:
+            context = getattr(route, "include_context", None)
+            if context is not None:  # FastAPI >= 0.141
+                walk(context.included_router.routes, mounted_at + context.prefix)
+                continue
+            path = getattr(route, "path", None)
+            if path is None:
+                continue
+            found.append((mounted_at + path, set(getattr(route, "methods", None) or ())))
+
+    walk(app.routes)
+    return [(path, methods) for path, methods in found if path.startswith(prefix)]
+
+
 EXPECTED_API_ROUTES = {
     ("GET", "/api/agent-identities"),
     ("POST", "/api/agent-identities"),
@@ -216,10 +245,9 @@ class ApiContractTests(unittest.TestCase):
 
     def test_all_api_routes_remain_registered(self):
         actual = {
-            (method, route.path)
-            for route in app.routes
-            if route.path.startswith("/api")
-            for method in route.methods
+            (method, path)
+            for path, methods in api_routes()
+            for method in methods
         }
         self.assertEqual(EXPECTED_API_ROUTES, actual)
 
@@ -572,8 +600,7 @@ class ReadTokenTests(unittest.TestCase):
 
     def test_every_get_route_is_classified(self):
         actual = {
-            route.path for route in app.routes
-            if route.path.startswith("/api") and "GET" in route.methods
+            path for path, methods in api_routes() if "GET" in methods
         }
         self.assertEqual(self.READABLE | self.ADMIN_ONLY, actual)
 
@@ -598,15 +625,13 @@ class ReadTokenTests(unittest.TestCase):
         # another method would hand write access to a token that lives in clear
         # text inside instance configs.
         checked = 0
-        for route in app.routes:
-            if not route.path.startswith("/api"):
-                continue
-            for method in route.methods - {"GET", "HEAD", "OPTIONS"}:
-                with self.subTest(route=f"{method} {route.path}"):
+        for path, methods in api_routes():
+            for method in methods - {"GET", "HEAD", "OPTIONS"}:
+                with self.subTest(route=f"{method} {path}"):
                     response = self.client.request(
-                        method, self._fill(route.path), headers=self._headers()
+                        method, self._fill(path), headers=self._headers()
                     )
-                    self.assertEqual(401, response.status_code, f"{method} {route.path}")
+                    self.assertEqual(401, response.status_code, f"{method} {path}")
                 checked += 1
         self.assertGreater(checked, 10)  # guard against an empty sweep
 
@@ -775,29 +800,26 @@ class AgentTokenTests(unittest.TestCase):
             patch("app.routes.content.delete_file", return_value=True),
         ):
             checked = 0
-            for route in app.routes:
-                if not route.path.startswith("/api"):
-                    continue
-                for method in route.methods - {"HEAD", "OPTIONS"}:
-                    admin_only = (method, route.path) in self.ADMIN_ONLY
-                    with self.subTest(route=f"{method} {route.path}"):
+            for path, methods in api_routes():
+                for method in methods - {"HEAD", "OPTIONS"}:
+                    admin_only = (method, path) in self.ADMIN_ONLY
+                    with self.subTest(route=f"{method} {path}"):
                         response = self.client.request(
-                            method, self._fill(route.path), headers=self._headers()
+                            method, self._fill(path), headers=self._headers()
                         )
                         if admin_only:
-                            self.assertEqual(403, response.status_code, f"{method} {route.path}")
+                            self.assertEqual(403, response.status_code, f"{method} {path}")
                         else:
                             # 404/422 is fine — the point is that auth passed.
                             self.assertNotIn(response.status_code, (401, 403),
-                                             f"{method} {route.path}")
+                                             f"{method} {path}")
                     checked += 1
             self.assertGreater(checked, 25)  # guard against an empty sweep
 
     def test_every_admin_only_route_is_registered(self):
         # If a route in the list above is renamed away, the sweep would still
         # pass while silently testing nothing.
-        registered = {(m, r.path) for r in app.routes
-                      if r.path.startswith("/api") for m in r.methods}
+        registered = {(m, path) for path, methods in api_routes() for m in methods}
         self.assertTrue(self.ADMIN_ONLY <= registered, self.ADMIN_ONLY - registered)
 
     def test_agent_token_cannot_change_the_password(self):
