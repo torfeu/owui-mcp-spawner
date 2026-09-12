@@ -29,7 +29,7 @@ Open **http://127.0.0.1:7860** in a browser. Leave the terminal running; use `Ct
 
 The editable install uses the dependency list in `pyproject.toml`, including `psutil` for the system monitor and the required MCP SDK version. Keep the checkout in place because the application also uses its `web/` and `examples/` directories.
 
-A fresh checkout starts with **no instances**. `configs/example.json` is a template and is not loaded as an installed tool. Nextcloud, OpenHAB, OpenWebUI and an LLM are **not required** to install the spawner or try the examples below.
+A fresh checkout starts with **no instances**. `configs/example.json` is a template and is not loaded as an installed tool. OpenHAB, OpenWebUI and an LLM are **not required** to install the spawner or try the examples below.
 
 ![Empty dashboard before installing any tools](docs/images/fresh-empty.png)
 
@@ -65,7 +65,7 @@ Change `greeting` under **Edit → Values**, save, then repeat the call. With th
 
 Install each Python example through **+ New Tool**. For the calculator screenshot we chose a named environment, `calculator`, to demonstrate package separation; `default` also works for all three examples.
 
-The content example stores files in `content/<instance-id>/`. Under **Settings → Files**, set **Download base URL** to the manager address your client can reach (for a local demo, `http://127.0.0.1:7860`). This makes links usable from a chat client as well as the dashboard. The same tab lists files for download. It is local framework storage; Nextcloud or any other storage integration is optional tool code, not part of the installation.
+The content example stores files in `content/<instance-id>/`. Under **Settings → Files**, set **Download base URL** to the manager address your client can reach (for a local demo, `http://127.0.0.1:7860`). This makes links usable from a chat client as well as the dashboard. The same tab lists files for download. It is local framework storage; any storage integration is optional tool code, not part of the installation.
 
 ![A note created by the Content example](docs/images/file-storage.png)
 

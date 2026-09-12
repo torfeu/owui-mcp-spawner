@@ -1,6 +1,6 @@
 # Spawner reference
 
-Start with the [fresh-installation guide](../README.md). This reference covers optional features, API routes, deployment and tool development. The getting-started examples in the README do not require Nextcloud, OpenHAB or other external services.
+Start with the [fresh-installation guide](../README.md). This reference covers optional features, API routes, deployment and tool development. The getting-started examples in the README do not require OpenHAB or other external services.
 
 ## Dashboard
 
