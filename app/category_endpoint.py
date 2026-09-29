@@ -464,7 +464,8 @@ def _authorised(scope) -> bool:
             break
     provided = raw[7:].strip() if raw.lower().startswith("bearer ") else ""
     import hmac
-    if hmac.compare_digest(provided, token):
+    # As bytes — a str with a non-ASCII character makes compare_digest raise.
+    if hmac.compare_digest(provided.encode("utf-8"), token.encode("utf-8")):
         return True
     return agent_identity.identify(provided) is not None
 

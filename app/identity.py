@@ -48,6 +48,7 @@ import contextvars
 import hashlib
 import hmac
 import json
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -200,9 +201,16 @@ def verify_user_jwt(token: str, secret: Optional[str] = None, *, now: Optional[i
     if header.get("alg") != "HS256":
         raise IdentityError(f"unsupported algorithm {header.get('alg')!r} (only HS256 is accepted)")
 
+    try:
+        signed_part = f"{header_b64}.{payload_b64}".encode("ascii")
+    except UnicodeEncodeError:
+        # base64url is ASCII by definition. Anything else is a malformed token
+        # and has to be refused as one — an escaping UnicodeEncodeError is not
+        # an IdentityError, and nothing upstream catches it.
+        raise IdentityError("malformed token (non-ASCII characters)") from None
     expected_signature = hmac.new(
         secret.encode("utf-8"),
-        f"{header_b64}.{payload_b64}".encode("ascii"),
+        signed_part,
         hashlib.sha256,
     ).digest()
     if not hmac.compare_digest(expected_signature, _b64url_decode(signature_b64)):
@@ -226,14 +234,18 @@ def verify_user_jwt(token: str, secret: Optional[str] = None, *, now: Optional[i
     now = int(time.time()) if now is None else now
 
     expires_at = claims.get("exp")
-    if not isinstance(expires_at, (int, float)):
+    # json.loads accepts Infinity and NaN, and int() of either raises
+    # something that is not an IdentityError. bool is an int too, and no date.
+    if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool) \
+            or not math.isfinite(expires_at):
         raise IdentityError("token has no usable 'exp'")
     if now > int(expires_at) + CLOCK_SKEW_LEEWAY:
         raise IdentityError("token has expired")
 
     issued_at = claims.get("iat")
     if issued_at is not None:
-        if not isinstance(issued_at, (int, float)):
+        if not isinstance(issued_at, (int, float)) or isinstance(issued_at, bool) \
+                or not math.isfinite(issued_at):
             raise IdentityError("token has an unusable 'iat'")
         if int(issued_at) > now + CLOCK_SKEW_LEEWAY:
             raise IdentityError("token is issued in the future — check the clocks")

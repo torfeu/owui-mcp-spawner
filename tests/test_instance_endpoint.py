@@ -85,7 +85,10 @@ class FakeClient:
         self.built = []
 
     def build_request(self, method, url, headers=None, content=None):
-        self.built.append({"method": method, "url": url, "headers": dict(headers or [])})
+        # Through httpx.Headers, as the real client does: the proxy hands the
+        # headers on as raw bytes, and this is what httpx makes of them.
+        self.built.append({"method": method, "url": url,
+                           "headers": dict(httpx.Headers(headers or []))})
         return ("request", method, url)
 
     async def send(self, request, stream=False):
@@ -885,6 +888,18 @@ class InstanceTransportTests(unittest.IsolatedAsyncioTestCase):
                                         json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         # The 401 was written by the runner, not here — the proxy forwards the
         # header and lets the instance decide, exactly as on a direct connection.
+        self.assertEqual(401, refused.status_code, refused.text)
+
+    async def test_a_non_ascii_token_is_refused_not_crashed_on(self):
+        """hmac.compare_digest refuses a str with anything but ASCII in it. The
+        runner compared two str, so "Bearer grüß" answered 500 — a server
+        error for what is simply a wrong credential."""
+        import httpx2
+
+        url = f"http://127.0.0.1:{self.port}/mcp/gesetze"
+        async with httpx2.AsyncClient(timeout=10) as client:
+            refused = await client.post(url, headers={"Authorization": b"Bearer gr\xfc\xdf"},
+                                        json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         self.assertEqual(401, refused.status_code, refused.text)
 
     async def test_an_unknown_id_is_answered_at_the_socket(self):

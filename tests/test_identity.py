@@ -130,6 +130,22 @@ class TokenVerificationTests(unittest.TestCase):
             with self.subTest(token=junk), self.assertRaises(IdentityError):
                 verify_user_jwt(junk, SECRET)
 
+    def test_non_ascii_is_a_refusal_and_not_a_crash(self):
+        """Only IdentityError is caught upstream. A UnicodeEncodeError out of
+        here took the whole call down instead of refusing the token."""
+        header, payload, signature = mint().split(".")
+        with self.assertRaises(IdentityError):
+            verify_user_jwt(f"{header}.{payload}ü.{signature}", SECRET)
+
+    def test_an_expiry_that_is_not_a_date_is_rejected(self):
+        # json.loads accepts Infinity and NaN; int() of either raises something
+        # that is not an IdentityError. A bool is an int to isinstance.
+        for exp in (float("inf"), float("nan"), True):
+            with self.subTest(exp=exp), self.assertRaises(IdentityError):
+                verify_user_jwt(mint(exp=exp), SECRET)
+        with self.assertRaises(IdentityError):
+            verify_user_jwt(mint(iat=float("inf")), SECRET)
+
     def test_without_a_configured_secret_nothing_verifies(self):
         """An unset secret must not turn into "everything is fine"."""
         with patch.dict("os.environ", {}, clear=False):

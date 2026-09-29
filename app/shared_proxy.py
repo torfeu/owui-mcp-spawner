@@ -252,7 +252,11 @@ async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
     try:
         req = client.build_request(
             scope["method"], target,
-            headers=[(k.decode("latin-1"), v.decode("latin-1")) for k, v in headers],
+            # Passed on as the bytes they arrived as. Decoded to str, httpx
+            # re-encodes them as ASCII, and one umlaut in any header — a
+            # mistyped token, a display name — was a 500 from the proxy
+            # instead of whatever the instance would have answered.
+            headers=list(headers),
             content=request_body(),
         )
         resp = await client.send(req, stream=True)

@@ -466,7 +466,9 @@ async def run_server(config_path: str, host_override: str | None = None) -> None
             # would mean every agent still has to carry the shared token too.
             # Which of the two arrived is decided again per call, in
             # _resolve_identity: this gate only answers "may you talk to me".
-            if (not hmac.compare_digest(provided, mcp_auth_token)
+            # Compared as bytes: compare_digest refuses a str with anything but
+            # ASCII in it, and an umlaut in a header then answered 500, not 401.
+            if (not hmac.compare_digest(provided.encode("utf-8"), mcp_auth_token.encode("utf-8"))
                     and agent_identity.identify(provided) is None):
                 from starlette.responses import Response
                 await Response(

@@ -374,6 +374,14 @@ class AuthorisationTests(unittest.TestCase):
         self.assertFalse(ce._authorised(self._scope()))
         self.assertFalse(ce._authorised(self._scope("Basic secret")))
 
+    def test_a_non_ascii_token_is_refused_not_crashed_on(self):
+        # A str with non-ASCII in it makes compare_digest raise — which
+        # surfaced as a 500 instead of the 401 a wrong token is.
+        os.environ["MCP_BEARER_TOKEN"] = "secret"
+        scope = {"type": "http", "path": "/mcp/category/Recht",
+                 "headers": [(b"authorization", b"Bearer gr\xfc\xdf")]}
+        self.assertFalse(ce._authorised(scope))
+
     def test_an_agents_own_token_opens_it_too(self):
         # Refusing it here would mean every agent has to carry the shared token
         # as well; which of the two arrived is decided again upstream, per call.
