@@ -177,6 +177,31 @@ class RoleTests(PolicyTestCase):
         self.assertTrue(policy.is_tool_allowed(anna, "inst", "read_item"))
         self.assertFalse(policy.is_tool_allowed(anna, "inst", "delete_item"))
 
+    def test_a_role_for_every_instance_survives_a_personal_entry(self):
+        """The role grants all instances ("*"), the personal entry names one.
+        The merge used to keep only the named one — a rule for Nextcloud took
+        an admin's access to everything else away."""
+        self.write({
+            "roles": {"admin": {"instances": "*"}},
+            "users": {ANNA.sub: {"account": "anna", "instances": {"nextcloud": ["send"]}}},
+        })
+        anna = Identity(sub=ANNA.sub, role="admin")
+        other_admin = Identity(sub="whoever", role="admin")
+        self.assertTrue(policy.is_tool_allowed(other_admin, "law_db", "search"))
+        self.assertTrue(policy.is_tool_allowed(anna, "law_db", "search"))
+        # The instance she is named for follows her entry, as everywhere else.
+        self.assertTrue(policy.is_tool_allowed(anna, "nextcloud", "send"))
+        self.assertFalse(policy.is_tool_allowed(anna, "nextcloud", "delete"))
+        self.assertEqual(["search"], policy.visible_tools(anna, "law_db", ["search"]))
+
+    def test_the_marker_cannot_be_smuggled_in_through_the_file(self):
+        """Only rules_for() sets it; a user entry carrying the key itself must
+        not turn into access to every instance."""
+        self.write({"users": {ANNA.sub: {policy._REST_FROM_ROLE: True,
+                                         "instances": {"inst": ["read_item"]}}}})
+        anna = Identity(sub=ANNA.sub, role="user")
+        self.assertFalse(policy.is_tool_allowed(anna, "other", "anything"))
+
     def test_an_explicit_deny_beats_the_role(self):
         self.write({
             "roles": {"admin": {"instances": {"inst": "*"}}},

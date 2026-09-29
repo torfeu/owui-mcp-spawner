@@ -57,6 +57,10 @@ BASE_DIR = Path(__file__).parent.parent
 DEFAULT_POLICY_PATH = BASE_DIR / "runtime" / "identity_policy.json"
 
 ALL_TOOLS = "*"
+# Set by rules_for() only, never read from the file: "instances the personal
+# entry does not name are all granted by the role". Not a policy-file key, so
+# the file format stays what save_policy() validates.
+_REST_FROM_ROLE = "__all_other_instances_from_role"
 
 _cache: Optional[dict] = None
 _cache_key: Optional[tuple] = None
@@ -204,6 +208,11 @@ def rules_for(identity: Optional[Identity]) -> Optional[dict]:
     entry = _user_entry(policy, users, identity)
     if entry is not None and entry.get("deny") is True:
         return None
+    # The marker below is ours alone; a file that carries it is not believed.
+    if entry is not None and _REST_FROM_ROLE in entry:
+        entry = {k: v for k, v in entry.items() if k != _REST_FROM_ROLE}
+    if role_entry is not None and _REST_FROM_ROLE in role_entry:
+        role_entry = {k: v for k, v in role_entry.items() if k != _REST_FROM_ROLE}
     if entry is None:
         return role_entry
     if role_entry is None:
@@ -213,6 +222,14 @@ def rules_for(identity: Optional[Identity]) -> Optional[dict]:
     base, extra = role_entry.get("instances"), entry.get("instances")
     if isinstance(base, dict) and isinstance(extra, dict):
         merged["instances"] = {**base, **extra}
+    elif base in (ALL_TOOLS, True) and isinstance(extra, dict):
+        # The role grants every instance, the personal entry names a few. The
+        # named ones follow the personal entry — same rule as above — and every
+        # other instance still comes from the role. A plain dict merge cannot
+        # say "and all the rest", and dropping it took an admin's access to
+        # everything away the moment they got a rule of their own.
+        merged["instances"] = dict(extra)
+        merged[_REST_FROM_ROLE] = True
     return merged
 
 
@@ -297,7 +314,7 @@ def allowed_tools(identity: Optional[Identity], instance_id: str) -> Optional[se
 
     entry = instances.get(instance_id)
     if entry is None:
-        return None
+        return ALL_TOOLS if rules.get(_REST_FROM_ROLE) else None
     if entry in (ALL_TOOLS, True):
         return ALL_TOOLS
     if isinstance(entry, str):
