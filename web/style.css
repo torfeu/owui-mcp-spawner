@@ -278,8 +278,23 @@ tbody tr:last-child td {
 .store-id { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .store-desc { font-size: 13px; margin-top: 6px; }
 
-/* Says "there is a note — hover the name". The text itself is the cell's title. */
-.note-mark { color: var(--text-muted); font-size: 11px; cursor: help; }
+/* The ⓘ behind a name: hover shows the note at once, click opens it. */
+.note-mark { position: relative; color: var(--primary); font-size: 12px; cursor: pointer; }
+.note-mark:hover::after, .note-mark:focus-visible::after {
+  content: attr(data-note);
+  position: absolute; left: 0; top: calc(100% + 6px); z-index: 50;
+  width: max-content; max-width: 320px; white-space: pre-wrap;
+  padding: 6px 9px; border-radius: 6px; font-size: 12px; font-weight: 400;
+  color: var(--text); background: var(--surface2); border: 1px solid var(--border);
+  box-shadow: 0 4px 14px rgba(0,0,0,.35); pointer-events: none;
+}
+.note-popover {
+  position: absolute; z-index: 1000; max-width: 360px; white-space: pre-wrap;
+  padding: 10px 12px; border-radius: 8px; font-size: 13px;
+  color: var(--text); background: var(--surface2); border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0,0,0,.4);
+}
+.note-popover-title { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 
 .version-badge {
   font-family: var(--mono);

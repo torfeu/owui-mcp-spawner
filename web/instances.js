@@ -288,7 +288,7 @@ function togglePortColumn(rows) {
   tbody.innerHTML = pageRows.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
-      <td${nameTitle(inst)}>${esc(inst.name)}${inst.note ? ' <span class="note-mark" aria-hidden="true">ⓘ</span>' : ''}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
+      <td${nameTitle(inst)}>${esc(inst.name)}${noteMark(inst)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}${startedCell(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
@@ -319,6 +319,61 @@ function nameTitle(inst) {
   const text = [inst.note, inst.description].filter(t => (t || "").trim()).join("\n\n");
   return text ? ` title="${esc(text)}"` : "";
 }
+
+/** The ⓘ behind the name. Hovering it shows the note at once (CSS, from
+ * data-note); clicking it opens the note in a popover outside the table. The
+ * browser's own title tooltip was not enough: it waits a second before it
+ * appears, and the four-second poll rebuilds the row under it. */
+function noteMark(inst) {
+  if (!inst.note) return "";
+  return ` <span class="note-mark" role="button" tabindex="0" aria-label="Note"` +
+         ` data-note="${esc(inst.note)}" data-id="${esc(inst.id)}">ⓘ</span>`;
+}
+
+// The popover lives on <body>, not in the row: the poll replaces the table
+// body every few seconds, and anything inside it would vanish with it.
+let notePopover = null;
+
+function closeNote() {
+  notePopover?.remove();
+  notePopover = null;
+}
+
+function openNote(mark) {
+  closeNote();
+  notePopover = document.createElement("div");
+  notePopover.className = "note-popover";
+  notePopover.setAttribute("role", "dialog");
+  const title = document.createElement("div");
+  title.className = "note-popover-title";
+  title.textContent = `Note · ${mark.dataset.id}`;
+  const body = document.createElement("div");
+  body.textContent = mark.dataset.note;   // text, never HTML
+  notePopover.append(title, body);
+  document.body.append(notePopover);
+  const r = mark.getBoundingClientRect();
+  const left = Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - notePopover.offsetWidth - 12);
+  notePopover.style.left = `${Math.max(8, left)}px`;
+  notePopover.style.top = `${r.bottom + window.scrollY + 6}px`;
+}
+
+document.addEventListener("click", event => {
+  const mark = event.target.closest(".note-mark");
+  if (mark) {
+    event.stopPropagation();
+    openNote(mark);
+  } else if (notePopover && !notePopover.contains(event.target)) {
+    closeNote();
+  }
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeNote();
+  const mark = event.target.closest?.(".note-mark");
+  if (mark && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    openNote(mark);
+  }
+});
 
 function bundledMark(inst) {
   if (!inst.bundled_update) return "";
