@@ -9,6 +9,7 @@ import { bindLogs, openLogs } from "./logs.js";
 import { bindPermissions } from "./permissions.js";
 import { bindStats } from "./stats.js";
 import { bindUpload } from "./upload.js";
+import { bindStore } from "./store.js";
 import { refreshUpdateBadge } from "./settings.js";
 
 configureInstanceActions({ openEdit, openEditorForInstance, openLogs, openInfo });
@@ -86,6 +87,7 @@ document.getElementById("about-backdrop").addEventListener("click", () => toggle
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindUpload();
+  bindStore();
   bindEdit();
   bindLogs();
   bindInfo();

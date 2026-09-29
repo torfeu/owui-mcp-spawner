@@ -17,6 +17,7 @@
     <div class="header-create">
       <button class="btn btn-ghost" id="editor-btn">+ New Tool</button>
       <button class="btn btn-primary" id="upload-btn">+ Upload JSON</button>
+      <button class="btn btn-ghost" id="store-btn" title="Tools that ship with this spawner">Store</button>
     </div>
     <div class="header-actions">
       <button class="btn btn-ghost" id="perm-btn" title="Users &amp; permissions">Permissions</button>
@@ -84,6 +85,18 @@
   </main>
 
   <!-- Upload Modal -->
+  <div id="store-modal" class="modal hidden">
+    <div class="modal-backdrop" id="store-backdrop"></div>
+    <div class="modal-content modal-wide">
+      <h2>Store</h2>
+      <p class="modal-hint">Tools that ship with this spawner in <code>examples/</code>. Installing one works like uploading its JSON: dependencies, validation, then a new instance that you start yourself.</p>
+      <div id="store-list" class="store-list"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="store-close">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="upload-modal" class="modal hidden">
     <div class="modal-backdrop" id="upload-backdrop"></div>
     <div class="modal-content">

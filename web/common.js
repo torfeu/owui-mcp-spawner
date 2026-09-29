@@ -12,6 +12,9 @@ export function applyEditMode() {
   const hideNewTool = state.editMode !== "full" || state.guestMode;
   document.getElementById("upload-btn").classList.toggle("hidden", hideUpload);
   document.getElementById("editor-btn").classList.toggle("hidden", hideNewTool);
+  // Guests do not get the list (the route needs a login); read-only mode
+  // still shows what ships, the cards then simply offer no Install.
+  document.getElementById("store-btn").classList.toggle("hidden", state.guestMode);
   document.getElementById("settings-btn").classList.toggle("hidden", state.guestMode);
   document.getElementById("stats-btn").classList.toggle("hidden", state.guestMode);
   document.getElementById("perm-btn").classList.toggle("hidden", state.guestMode);

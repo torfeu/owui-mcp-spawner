@@ -103,6 +103,8 @@ EXPECTED_API_ROUTES = {
     ("DELETE", "/api/content/{instance_id}"),
     ("DELETE", "/api/content/{instance_id}/{filename}"),
     ("GET", "/api/system/stats"),
+    ("GET", "/api/store"),
+    ("POST", "/api/store/{tool_id}/install"),
 }
 
 
@@ -558,6 +560,9 @@ class ReadTokenTests(unittest.TestCase):
         # Which categories exist and what is in them. The URL it names is
         # public knowledge; the token that opens it is not in the payload.
         "/api/categories",
+        # What ships in examples/ and whether it is installed — the same
+        # names and versions the dashboard already shows per instance.
+        "/api/store",
     }
     # Hand out a credential verbatim — password only, even though they are GETs.
     ADMIN_ONLY = {
@@ -600,7 +605,8 @@ class ReadTokenTests(unittest.TestCase):
     def _fill(path):
         return (path.replace("{instance_id}", "no-such-instance")
                     .replace("{name}", "no-such-venv")
-                    .replace("{sub}", "no-such-user"))
+                    .replace("{sub}", "no-such-user")
+                    .replace("{tool_id}", "no-such-tool"))
 
     def test_every_get_route_is_classified(self):
         actual = {
@@ -789,7 +795,11 @@ class AgentTokenTests(unittest.TestCase):
 
     @staticmethod
     def _fill(path):
-        return path.replace("{instance_id}", "no-such-instance").replace("{name}", "no-such-venv")
+        # {tool_id}: the store installs only what examples/ holds, so an id
+        # that is not there is a 404 before anything is installed — a real
+        # one would put an instance on the running installation.
+        return (path.replace("{instance_id}", "no-such-instance").replace("{name}", "no-such-venv")
+                    .replace("{tool_id}", "no-such-tool"))
 
     def test_agent_token_opens_every_route_except_the_admin_ones(self):
         # Restart, update-check and the content deletions are patched: they
