@@ -227,3 +227,70 @@ class ForwardedCredentialTests(unittest.TestCase):
     def test_nobody_identified_means_the_routers_own_bearer_alone(self):
         headers = self._headers(None)
         self.assertEqual({"Authorization": "Bearer the-shared-token"}, headers)
+
+
+class ErrorAnswerTests(unittest.TestCase):
+    """A failed call comes back with the schema attached — also when the
+    runner words the failure as text rather than flagging is_error.
+
+    The runner deliberately does not set is_error (a model has to *read* the
+    reason), so a wrong parameter name reached the model without the schema
+    that would have fixed it. Seen live: six attempts through the router at
+    external_mcp_bridge.call_tool before the model found the right shape.
+    """
+
+    SPEC = {"name": "search", "description": "Search the thing.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}},
+                           "required": ["query"]}}
+    INST = {"id": "demo", "url": "http://127.0.0.1:8101/mcp", "note": ""}
+
+    def invoke(self, text, is_error=False):
+        import asyncio
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+
+        tools = load_router()
+
+        @asynccontextmanager
+        async def streams(url, headers, timeout):
+            yield None, None
+
+        class Session:
+            def __init__(self, read, write):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def initialize(self):
+                return SimpleNamespace(server_info=SimpleNamespace(name="demo"))
+
+            async def call_tool(self, name, arguments):
+                return SimpleNamespace(content=[SimpleNamespace(text=text)], is_error=is_error)
+
+        glob = type(tools)._invoke.__globals__
+        with unittest.mock.patch.dict(glob, {"_mcp_streams": streams}), \
+                unittest.mock.patch("mcp.ClientSession", Session):
+            return asyncio.run(tools._invoke(self.INST, self.SPEC, "demo.search", {"q": "x"}))
+
+    def test_a_runner_error_gets_the_schema(self):
+        answer = self.invoke("Error: 'q' is not a parameter of 'search' — did you mean 'query'?")
+        self.assertIn("reported an error", answer)
+        self.assertIn("query (string, required)", answer)
+
+    def test_also_behind_the_storage_warning(self):
+        answer = self.invoke("Note: the file storage of this server is nearly full (9.0 of 10.0 MB). "
+                             "Tell the user to delete old files or contact the administrator.\n\n"
+                             "Error: something broke")
+        self.assertIn("query (string, required)", answer)
+
+    def test_an_is_error_result_still_gets_it(self):
+        self.assertIn("query (string, required)", self.invoke("upstream said no", is_error=True))
+
+    def test_a_normal_result_mentioning_an_error_is_left_alone(self):
+        # Only the runner's own wording counts — a result *about* errors is a result.
+        answer = self.invoke("Found 3 entries. Error: rate is 2 %.")
+        self.assertEqual("Found 3 entries. Error: rate is 2 %.", answer)
