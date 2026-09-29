@@ -1,4 +1,4 @@
-import { apiFetch, esc, showAlert, state } from "./common.js";
+import { API, apiFetch, esc, showAlert, state } from "./common.js";
 import { loadInstances, updateFromExample } from "./instances.js";
 
 // The tools in examples/, one card each. Installing goes through the same
@@ -53,6 +53,11 @@ function card(entry) {
   } else {
     action = `<span class="store-state">installed${entry.installed_version ? " · " + esc(entry.installed_version) : ""}</span>`;
   }
+  // Installed already — a further copy under an id of its own. One bridge per
+  // external MCP server is the reason this exists.
+  if (entry.installed && canWrite) {
+    action += ` <button class="btn btn-ghost btn-sm" data-copy="${esc(entry.id)}">Add another</button>`;
+  }
   return `
     <div class="store-card">
       <div class="store-head">
@@ -66,16 +71,42 @@ function card(entry) {
     </div>`;
 }
 
+/** A free id for the next copy: foo_2, foo_3, … — only a suggestion, the
+ * server refuses a taken one anyway. Asked of the API, not read off the
+ * table: a filter or the pagination hides rows, and a hidden id is taken too. */
+async function suggestId(base) {
+  const rows = await apiFetch(API).catch(() => []);
+  const taken = new Set(rows.map(r => r.id));
+  for (let n = 2; ; n++) {
+    if (!taken.has(`${base}_${n}`)) return `${base}_${n}`;
+  }
+}
+
 async function onAction(event) {
   const install = event.target.closest("[data-install]");
+  const copy = event.target.closest("[data-copy]");
   const update = event.target.closest("[data-update]");
-  if (install) {
-    const id = install.dataset.install;
-    install.disabled = true;
-    install.textContent = "Installing…";
+  if (install || copy) {
+    const button = install || copy;
+    const shipped = install ? install.dataset.install : copy.dataset.copy;
+    const body = {};
+    if (copy) {
+      const id = prompt(
+        `ID for the new instance of ${shipped} — letters, digits, _ and - only.\n` +
+        `Give it a note afterwards (Edit → Note) so the copies can be told apart.`,
+        await suggestId(shipped));
+      if (id === null) return;
+      if (!/^[A-Za-z0-9_-]+$/.test(id.trim())) {
+        showAlert("error", `"${id}" is not a usable ID — letters, digits, _ and - only`);
+        return;
+      }
+      body.id = id.trim();
+    }
+    button.disabled = true;
+    button.textContent = "Installing…";
     try {
-      const res = await apiFetch(`/api/store/${encodeURIComponent(id)}/install`, {
-        method: "POST", body: JSON.stringify({}),
+      const res = await apiFetch(`/api/store/${encodeURIComponent(shipped)}/install`, {
+        method: "POST", body: JSON.stringify(body),
       });
       showAlert("success", `Installed: ${res.id} on port ${res.port} — start it from the dashboard.`);
       (res.warnings || []).forEach(w => showAlert("info", w));

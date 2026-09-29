@@ -143,6 +143,26 @@ class StoreInstallTests(StoreTestCase):
         cfg = json.loads((self.configs / "demo_probe.json").read_text())
         self.assertEqual("Tests", cfg["category"])
 
+    def test_a_further_copy_goes_in_under_its_own_id(self):
+        """One bridge per external MCP server: the shipped tool installed
+        again, next to the first, under an id of the caller's choosing."""
+        self.install("demo_router")
+        response = self.install("demo_router", id="demo_router_2")
+        self.assertEqual(200, response.status_code, response.text)
+        copy = json.loads((self.configs / "demo_router_2.json").read_text())
+        self.assertEqual("demo_router_2", copy["id"])
+        self.assertTrue((self.tools / "demo_router_2.json").exists())
+        # The original is untouched, and the shipped file still describes itself.
+        self.assertTrue((self.configs / "demo_router.json").exists())
+        self.assertEqual("demo_router", json.loads((self.examples / "router.json").read_text())[0]["id"])
+        self.addCleanup(lambda: config_store._state.pop("demo_router_2", None))
+
+    def test_a_copy_needs_a_usable_free_id(self):
+        self.install("demo_router")
+        self.assertEqual(409, self.install("demo_probe", id="demo_router").status_code)
+        self.assertEqual(400, self.install("demo_router", id="../x").status_code)
+        self.assertEqual(400, self.install("demo_router", id="example").status_code)  # reserved
+
     def test_a_bad_venv_name_is_refused(self):
         self.assertEqual(400, self.install("demo_probe", venv="../x").status_code)
 

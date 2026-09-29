@@ -90,12 +90,21 @@ async def list_store() -> list[dict]:
 @router.post("/api/store/{tool_id}/install",
              dependencies=[Depends(require_auth), Depends(require_upload_or_edit)])
 async def install_from_store(tool_id: str, body: dict | None = None) -> dict:
-    """Install one shipped tool as a new instance under its own id.
+    """Install one shipped tool as a new instance.
+
+    Under the tool's own id by default. `{"id": "…"}` in the body installs a
+    further copy under another id — the case the bridge exists for: one
+    instance per external MCP server, each with its own target in its values.
 
     Same pipeline, same answers as an upload of that file: 409 when the id is
-    taken (the store then says "installed" and offers the update instead),
-    422 with the pip or validation errors when it cannot be installed. The
-    instance is not started — that stays a deliberate click, as after upload.
+    taken, 422 with the pip or validation errors when it cannot be installed.
+    The instance is not started — that stays a deliberate click, as after
+    upload.
+
+    A copy under another id is not matched to its shipped file afterwards:
+    that matching goes by id (see _bundled_version_info), so the copy gets no
+    update badge. Accepted rather than guessed at — the same trade-off as for
+    any tool uploaded under a name of its own.
     """
     path = _examples_by_id().get(tool_id)
     if not path:
@@ -109,9 +118,14 @@ async def install_from_store(tool_id: str, body: dict | None = None) -> dict:
     category = str_field(body.get("category"))
     if not re.fullmatch(r"[a-zA-Z0-9_\-]+", venv):
         raise HTTPException(400, f"Invalid venv name '{venv}': letters, digits, _ and - only")
+    instance_id = str_field(body.get("id")) or tool_id
+    if not re.fullmatch(r"[a-zA-Z0-9_\-]+", instance_id):
+        raise HTTPException(400, f"Invalid id '{instance_id}': letters, digits, _ and - only")
 
     # A copy: the importer may add fields to what it is handed, and the index
     # cache must keep describing the file on disk.
-    result = await _import_openwebui_tool(dict(tool), venv=venv, category=category)
-    logger.info(f"Installed '{tool_id}' from the store ({path})")
+    raw = dict(tool)
+    raw["id"] = instance_id
+    result = await _import_openwebui_tool(raw, venv=venv, category=category)
+    logger.info(f"Installed '{instance_id}' from the store ({path})")
     return result
