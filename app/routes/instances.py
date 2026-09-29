@@ -18,6 +18,8 @@ from ..venv_manager import DEFAULT_VENV
 router = APIRouter()
 logger = get_manager_logger()
 _GUEST_FIELDS = ("id", "name", "description", "category", "status", "version")
+# A note, not a document: enough for "Wikidata, no auth, URL …" and a line or two more.
+NOTE_MAX_CHARS = 2000
 def _guest_view(d: dict) -> dict:
     return {k: d[k] for k in _GUEST_FIELDS if k in d}
 
@@ -35,6 +37,8 @@ def _config_fields(cfg) -> dict:
         "identity_mode": cfg.identity_mode.value if cfg else IdentityMode.off.value,
         "forward_agent_token": bool(cfg.forward_agent_token) if cfg else False,
         "content_enabled": cfg.content.enabled if cfg else False,
+        # Not in _GUEST_FIELDS, so an anonymous visitor never gets it.
+        "note": cfg.note if cfg else "",
     }
 
 @router.get("/api/instances")
@@ -163,6 +167,13 @@ async def _update_config(instance_id: str, body: dict) -> dict:
         cfg.description = str(body["description"])
     if "category" in body:
         cfg.category = str(body["category"]).strip()
+    if "note" in body:
+        note = body["note"]
+        if not isinstance(note, str):
+            raise HTTPException(422, "'note' must be text")
+        if len(note) > NOTE_MAX_CHARS:
+            raise HTTPException(422, f"'note' is limited to {NOTE_MAX_CHARS} characters")
+        cfg.note = note.strip()
     if "server" in body:
         s = body["server"]
         new_port = s.get("port", cfg.server.port)
@@ -317,7 +328,7 @@ async def _update_config(instance_id: str, body: dict) -> dict:
             "Try again."
         ))
     old_server = (fresh.server.host, fresh.server.port, fresh.server.endpoint)
-    for field in ("name", "description", "category", "server", "install",
+    for field in ("name", "description", "category", "note", "server", "install",
                   "lifecycle", "content", "identity_mode", "forward_agent_token",
                   "venv"):
         if field in body:
@@ -345,6 +356,9 @@ async def _update_config(instance_id: str, body: dict) -> dict:
     restarted, restart_error = False, ""
     if inst:
         inst.name = cfg.name
+        # Written back like the name, or a changed description stays stale in
+        # the dashboard until the manager restarts.
+        inst.description = cfg.description
         inst.category = cfg.category
         if needs_restart and inst.status == MCPStatus.running:
             if cfg.lifecycle.restart_on_change or venv_changed or deps_changed:

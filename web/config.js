@@ -27,6 +27,7 @@ export async function openEdit(id) {
   document.getElementById("edit-title").textContent = cfg.name;
   document.getElementById("edit-name").value = cfg.name;
   document.getElementById("edit-category").value = cfg.category || "";
+  document.getElementById("edit-note").value = cfg.note || "";
   document.getElementById("edit-host").value = cfg.server.host;
   document.getElementById("edit-port").value = cfg.server.port;
   document.getElementById("edit-endpoint").value = cfg.server.endpoint;
@@ -136,6 +137,7 @@ async function saveEdit(restart) {
   const body = {
     name: document.getElementById("edit-name").value,
     category: document.getElementById("edit-category").value.trim(),
+    note: document.getElementById("edit-note").value.trim(),
     server,
     lifecycle: { auto_start: document.getElementById("edit-autostart").checked },
     values,

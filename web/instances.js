@@ -173,7 +173,7 @@ function filteredInstances() {
     if (cat && (inst.category || "").trim() !== cat) return false;
     if (status && inst.status !== status) return false;
     if (!q) return true;
-    return [inst.id, inst.name, inst.description, inst.category]
+    return [inst.id, inst.name, inst.description, inst.category, inst.note]
       .some(f => (f || "").toLowerCase().includes(q));
   });
 }
@@ -288,7 +288,7 @@ function togglePortColumn(rows) {
   tbody.innerHTML = pageRows.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
-      <td>${esc(inst.name)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
+      <td${nameTitle(inst)}>${esc(inst.name)}${inst.note ? ' <span class="note-mark" aria-hidden="true">ⓘ</span>' : ''}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}${startedCell(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
@@ -313,6 +313,13 @@ function togglePortColumn(rows) {
 //
 // Clickable unless the instance is locked or the edit mode forbids writing —
 // a button that only ever answers 403 is worse than no button.
+/** Hover text for the name: the private note first, since that is what tells
+ * two bridges apart, then the description. Guests never receive a note. */
+function nameTitle(inst) {
+  const text = [inst.note, inst.description].filter(t => (t || "").trim()).join("\n\n");
+  return text ? ` title="${esc(text)}"` : "";
+}
+
 function bundledMark(inst) {
   if (!inst.bundled_update) return "";
   const canUpdate = state.editMode !== "readonly" && !inst.locked && !state.guestMode;

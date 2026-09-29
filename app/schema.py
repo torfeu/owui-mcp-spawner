@@ -117,6 +117,11 @@ class MCPConfig(BaseModel):
     description: str = ""
     # UI-only grouping label; never part of OpenWebUI tool JSON import/export
     category: str = ""
+    # The operator's note — "which external MCP does this bridge point at".
+    # Unlike `description` it is not in the OpenWebUI export, the tool JSON or
+    # the guest view. It *is* read by models through the router and the control
+    # tool (both authenticated), so it is not a place for secrets.
+    note: str = ""
     locked: bool = False
     server: ServerConfig
     install: InstallConfig = InstallConfig()

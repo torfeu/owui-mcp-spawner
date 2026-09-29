@@ -4,6 +4,14 @@ All notable changes to owui-mcp-spawner. The newest version is at the top.
 Released versions are also tagged on GitHub; an in-progress section is kept up to
 date as work lands, so it is never reconstructed from memory at release time.
 
+## v0.2.3 (in progress)
+
+**New**
+- **A note per instance, for people and for models** — several instances can look identical: two `external_mcp_bridge` copies carry the same name, and which external MCP each one points at was only visible inside its values. **Edit → Note** takes a line or two of free text; the dashboard shows it when hovering the instance name (a small ⓘ says there is one), and the search box finds it. A model choosing between look-alike instances needs it just as much, so the **tool router (v0.0.10)** prints its first line under the instance in `find_tools`, lets a search match it, and gives the whole note (capped at 400 characters) in `describe_tools` — and on a failed call, where the schema is attached anyway. The **control tool (v0.0.16)** adds the first line to each row of `list_instances`; `get_instance` carries all of it. It is deliberately *not* the description: the description goes into the OpenWebUI export and is part of the guest view, the note goes neither place — anonymous visitors never receive it, and the export does not carry it. Models do read it, so it is no place for a secret. Up to 2000 characters. A router talking to an older manager simply finds no notes and behaves as before.
+
+**Fixed**
+- **A changed description stayed stale in the dashboard until the manager restarted** — saving a config wrote the new name and category back into the in-memory state the dashboard reads, but not the description.
+
 ## v0.2.2
 
 **New**
