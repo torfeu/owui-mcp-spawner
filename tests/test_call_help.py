@@ -176,6 +176,31 @@ class ValveAutofillTests(unittest.TestCase):
                 self.tool(), {"manager_url": "http://elsewhere:9000"})
         self.assertEqual("http://elsewhere:9000", instance.valves.manager_url)
 
+    def test_it_is_filled_in_after_a_real_install_too(self):
+        """An install stores the valve defaults in the config, so the runner
+        never gets `{}` — it gets `manager_url: http://127.0.0.1:7860`. The two
+        tests above passed with an empty dict while every installed router
+        stayed on 7860."""
+        from app.tool_editor import validate_tool_code
+        stored = validate_tool_code(TOOL_WITH_VALVES)["valves"]   # what _provision_new_tool saves
+        self.assertEqual("http://127.0.0.1:7860", stored["manager_url"])
+        with patch.dict(os.environ, {"MCP_RUNNER_HOST": "0.0.0.0", "MCP_MANAGER_PORT": "7871"}):
+            instance = tool_loader.create_tools_instance(self.tool(), stored)
+        self.assertEqual("http://127.0.0.1:7871", instance.valves.manager_url)
+
+    def test_the_shipped_router_finds_a_manager_on_another_port(self):
+        """The same, end to end with the tool that exposed it."""
+        import json
+        from pathlib import Path
+        from app.tool_editor import validate_tool_code
+        exported = json.loads((Path(__file__).resolve().parents[1]
+                               / "examples" / "mcp-tool-router.json").read_text())[0]
+        stored = validate_tool_code(exported["content"])["valves"]
+        tool = tool_loader.OpenWebUITool(exported)
+        with patch.dict(os.environ, {"MCP_RUNNER_HOST": "127.0.0.1", "MCP_MANAGER_PORT": "7999"}):
+            instance = tool_loader.create_tools_instance(tool, stored)
+        self.assertEqual("http://127.0.0.1:7999", instance.valves.manager_url)
+
     def test_a_tool_without_that_valve_is_untouched(self):
         tool = tool_loader.OpenWebUITool({
             "id": "demo", "name": "demo",

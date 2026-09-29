@@ -294,6 +294,18 @@ class ValveAutofillTests(unittest.TestCase):
         valves = self.instance({"api_key": "abc"}).valves
         self.assertEqual("abc", valves.api_key)
 
+    def test_a_default_that_points_somewhere_is_still_replaced(self):
+        """A tool written for OpenWebUI ships its own path as the default, and
+        an install copies that default into the config. It is not a choice
+        anybody made, and in the runner the path does not exist."""
+        code = self.CODE.replace("output_dir: str = ''",
+                                 "output_dir: str = '/app/backend/data/cache/files'")
+        tool = OpenWebUITool({"content": code, "specs": []})
+        stored = {"docx_export_dir": "", "output_dir": "/app/backend/data/cache/files",
+                  "api_key": ""}                     # = Valves().model_dump()
+        valves = create_tools_instance(tool, stored, "/srv/content/demo").valves
+        self.assertEqual("/srv/content/demo", valves.output_dir)
+
     def test_without_the_store_switched_on_nothing_is_filled(self):
         valves = self.instance({}, content_dir=None).valves
         self.assertEqual("", valves.docx_export_dir)

@@ -133,6 +133,33 @@ def content_valve_names(instance: Any) -> list[str]:
     return sorted(f for f in fields if is_content_valve(f))
 
 
+def _valve_defaults(instance: Any) -> dict[str, Any]:
+    """The valve values of a freshly constructed Tools instance."""
+    valves = getattr(instance, "valves", None)
+    if valves is None:
+        return {}
+    try:
+        return valves.model_dump()
+    except Exception:
+        return {k: v for k, v in vars(valves).items() if not k.startswith("_")}
+
+
+def _set_by_user(values: dict[str, Any], defaults: dict[str, Any], name: str) -> bool:
+    """Whether the config holds a value for *name* that somebody chose.
+
+    Empty is not a choice, and neither is the tool's own default: the config
+    carries the defaults as well, and treating them as deliberate is what kept
+    the router on `http://127.0.0.1:7860` on every manager that runs elsewhere.
+    Somebody who types exactly the default loses nothing by this — for the
+    manager URL the filled-in address is the right one anyway, and a tool's
+    built-in output path is the one that does not exist in the runner.
+    """
+    value = values.get(name)
+    if not str(value if value is not None else "").strip():
+        return False
+    return name not in defaults or value != defaults[name]
+
+
 def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
                           content_dir: Optional[str] = None) -> Any:
     """
@@ -154,6 +181,11 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
         if ToolsClass is None:
             return None
         instance = ToolsClass()
+        # What the tool itself ships, read before anything is applied. The
+        # config holds these defaults too — every install and every code save
+        # copies them in so they are editable — so a value in the config is
+        # only the user's own choice when it differs from them.
+        defaults = _valve_defaults(instance)
         if hasattr(instance, "valves") and values:
             for k, v in values.items():
                 if hasattr(instance.valves, k):
@@ -163,7 +195,7 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
                         pass
         if content_dir:
             for name in content_valve_names(instance):
-                if str(values.get(name, "")).strip():
+                if _set_by_user(values, defaults, name):
                     continue  # the user pointed this one somewhere on purpose
                 try:
                     setattr(instance.valves, name, content_dir)
@@ -173,7 +205,7 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
         # Same rule, not a second one: filled from what the manager knows, and
         # a value the user set themselves always wins.
         if hasattr(getattr(instance, "valves", None), _MANAGER_VALVE) \
-                and not str(values.get(_MANAGER_VALVE, "")).strip():
+                and not _set_by_user(values, defaults, _MANAGER_VALVE):
             try:
                 setattr(instance.valves, _MANAGER_VALVE, manager_url())
                 logger.info(f"Valve '{_MANAGER_VALVE}' set to {manager_url()}")
