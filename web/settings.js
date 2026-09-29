@@ -1094,6 +1094,10 @@ function renderRestoreReport(report) {
   list("Port taken, moved", report.ports_reassigned, r => `${r.id}: ${r.was} → ${r.now}`);
   list("Settings added", report.settings_restored);
   list("Settings kept", report.settings_skipped);
+  list("Active now", report.settings_applied || []);
+  if ((report.listener_errors || []).length) {
+    lines.push(`<div class="backup-line"><span class="backup-label">MCP port</span>${esc(report.listener_errors.join("; "))}</div>`);
+  }
   list("Agents added", report.agents_restored);
   list("Agents kept", report.agents_skipped);
   list("Rules added for", report.policy_users_restored);
@@ -1127,5 +1131,14 @@ function renderRestoreReport(report) {
   const warn = (!report.contains_secrets && report.instances_restored.length)
     ? '<p class="modal-hint">This backup carried no credentials, so any instance that needs an API key has to be given it in <em>Edit → Config</em> before it will run.</p>'
     : "";
-  return head + lines.join("") + tail + warn;
+  // The one restored setting that changes what happens on the next click.
+  const applied = report.settings_applied || [];
+  const login = (!report.dry_run && applied.includes("password_hash"))
+    ? '<p class="modal-hint">The restored admin password is active now — the next request asks for it.</p>'
+    : "";
+  // Runners read the MCP token and the user secret when they start.
+  const runners = (!report.dry_run && applied.some(k => ["mcp_bearer_token", "user_jwt_secret", "user_trust_headers"].includes(k)))
+    ? '<p class="modal-hint">Instances that are already running keep their previous MCP token and user secret until they are restarted.</p>'
+    : "";
+  return head + lines.join("") + tail + warn + login + runners;
 }

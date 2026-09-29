@@ -504,5 +504,83 @@ class BackupRouteTests(IsolatedStateTestCase):
         self.assertEqual(before, (self.configs / "demo.json").read_text())
 
 
+class RestoredSettingsTakeEffectTests(IsolatedStateTestCase):
+    """A restore onto a fresh machine used to say "Restored." and leave it open.
+
+    The password, the API tokens, the MCP token and the user secret are read
+    into memory when the manager starts. The restore wrote them to the file
+    only, so until somebody restarted the manager there was no password, and
+    every instance started in between ran without the MCP token.
+    """
+
+    PASSWORD = "restored-password"
+    CREDENTIAL_ENV = ("MCP_MANAGER_PASSWORD", "MCP_MANAGER_PASSWORD_HASH",
+                      "MCP_MANAGER_READ_TOKEN", "MCP_MANAGER_AGENT_TOKEN",
+                      "MCP_BEARER_TOKEN", "MCP_USER_JWT_SECRET", "MCP_USER_TRUST_HEADERS",
+                      "MCP_EDIT_MODE", "MCP_EDIT_MODE_LOCKED")
+
+    def setUp(self):
+        super().setUp()
+        # The base class patched os.environ as a whole, so what is popped here
+        # comes back after the test — whatever this machine's shell exports.
+        for name in self.CREDENTIAL_ENV:
+            os.environ.pop(name, None)
+        original = auth._password_hash
+        auth._password_hash = None                      # a fresh machine
+        self.addCleanup(lambda: setattr(auth, "_password_hash", original))
+        # A listener test has no business binding ports on this machine.
+        sync = patch("app.shared_proxy.sync_listeners", return_value=[])
+        sync.start()
+        self.addCleanup(sync.stop)
+        self.client = TestClient(app)
+
+    def archive(self, **settings):
+        return {"format": backup.FORMAT, "format_version": backup.FORMAT_VERSION,
+                "contains_secrets": True, "instances": [], "settings": settings}
+
+    def restore(self, **settings):
+        return self.client.post("/api/backup/restore", json=self.archive(**settings)).json()
+
+    def test_a_restored_password_guards_the_next_request(self):
+        self.assertEqual(200, self.client.get("/api/settings").status_code)   # open before
+        report = self.restore(password_hash=hashlib.sha256(self.PASSWORD.encode()).hexdigest())
+        self.assertIn("password_hash", report["settings_applied"])
+        self.assertEqual(401, self.client.get("/api/settings").status_code)
+        ok = self.client.get("/api/settings",
+                             headers={"Authorization": f"Bearer {self.PASSWORD}"})
+        self.assertEqual(200, ok.status_code)
+
+    def test_tokens_and_secrets_reach_the_process(self):
+        report = self.restore(mcp_bearer_token="restored-mcp-token",
+                              user_jwt_secret="s" * 32, read_token="restored-read",
+                              agent_token="restored-agent")
+        self.assertEqual("restored-mcp-token", auth.mcp_bearer_token())
+        self.assertEqual("s" * 32, auth.user_jwt_secret())
+        self.assertEqual("restored-read", auth.read_token())
+        self.assertEqual("restored-agent", auth.agent_token())
+        self.assertEqual({"mcp_bearer_token", "user_jwt_secret", "read_token", "agent_token"},
+                         set(report["settings_applied"]))
+
+    def test_a_value_from_the_environment_still_wins(self):
+        """The precedence manager.py applies at start: the environment (or a
+        CLI flag, which it puts there) beats the file."""
+        os.environ["MCP_BEARER_TOKEN"] = "from-the-cli"
+        report = self.restore(mcp_bearer_token="restored-mcp-token")
+        self.assertEqual("from-the-cli", auth.mcp_bearer_token())
+        self.assertNotIn("mcp_bearer_token", report["settings_applied"])
+
+    def test_a_locked_edit_mode_is_not_lifted(self):
+        os.environ["MCP_EDIT_MODE"] = "upload"
+        os.environ["MCP_EDIT_MODE_LOCKED"] = "1"
+        self.restore(edit_mode="readonly")
+        self.assertEqual("upload", auth.edit_mode())
+
+    def test_a_dry_run_applies_nothing(self):
+        body = {**self.archive(mcp_bearer_token="restored-mcp-token"), "dry_run": True}
+        report = self.client.post("/api/backup/restore", json=body).json()
+        self.assertEqual([], report["settings_applied"])
+        self.assertIsNone(auth.mcp_bearer_token())
+
+
 if __name__ == "__main__":
     unittest.main()

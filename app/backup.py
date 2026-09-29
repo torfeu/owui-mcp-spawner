@@ -203,6 +203,7 @@ def restore(payload: dict, dry_run: bool = False) -> dict:
         "contains_secrets": bool(payload.get("contains_secrets")),
         "instances_restored": [], "instances_skipped": [], "instances_failed": [],
         "ports_reassigned": [], "settings_restored": [], "settings_skipped": [],
+        "settings_applied": [],
         "agents_restored": [], "agents_skipped": [],
         "policy_users_restored": [], "policy_users_skipped": [],
         "policy_roles_restored": [], "policy_roles_skipped": [],
@@ -300,6 +301,58 @@ def _restore_settings(settings, report: dict, dry_run: bool) -> None:
     if incoming and not dry_run:
         from .settings_store import save_settings
         save_settings(incoming)
+        report["settings_applied"] = _apply_settings(incoming)
+
+
+# Settings the manager copies into its process environment once, at start
+# (app/manager.py). Everything else is read from the file on every use.
+_ENV_SETTINGS = {
+    "mcp_bearer_token": "MCP_BEARER_TOKEN",
+    "user_jwt_secret": "MCP_USER_JWT_SECRET",
+}
+
+
+def _apply_settings(restored: dict) -> list[str]:
+    """Make restored settings take effect now, not at the next manager start.
+
+    Writing them to the file was not enough: the password, the tokens and the
+    secrets are read into memory when the manager starts. A restore onto a
+    fresh machine — the case this exists for — reported "Restored." and left
+    the server without a password until somebody restarted it, and every
+    instance started in between ran without the MCP token.
+
+    Same precedence as at start-up: a value that came from the environment or
+    a CLI flag is not replaced, exactly as `manager.py` would not replace it.
+    Returns the keys that took effect.
+    """
+    import os
+    from . import auth
+
+    applied = []
+    if "password_hash" in restored:
+        auth.configure_auth()
+        # A password from the environment still wins; then the restored hash
+        # sits in the file and is not what guards the door.
+        if auth._password_hash == restored["password_hash"]:
+            applied.append("password_hash")
+    for key in ("read_token", "agent_token"):
+        env = "MCP_MANAGER_READ_TOKEN" if key == "read_token" else "MCP_MANAGER_AGENT_TOKEN"
+        if key in restored and not os.environ.get(env):
+            applied.append(key)
+    auth.configure_api_tokens()
+    for key, env in _ENV_SETTINGS.items():
+        if restored.get(key) and not os.environ.get(env):
+            os.environ[env] = str(restored[key])
+            applied.append(key)
+    if restored.get("user_trust_headers") and not os.environ.get("MCP_USER_TRUST_HEADERS"):
+        os.environ["MCP_USER_TRUST_HEADERS"] = "1"
+        applied.append("user_trust_headers")
+    mode = restored.get("edit_mode")
+    if mode in ("upload", "readonly") and not auth.edit_mode_locked() \
+            and auth.edit_mode() == "full":
+        os.environ["MCP_EDIT_MODE"] = mode
+        applied.append("edit_mode")
+    return applied
 
 
 def _restore_agents(records, report: dict, dry_run: bool) -> None:

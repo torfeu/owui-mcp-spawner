@@ -15,8 +15,8 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .. import backup
-from ..api_helpers import require_token_edit, require_upload_or_edit
+from .. import backup, shared_proxy
+from ..api_helpers import _rebind_running_instances, require_token_edit, require_upload_or_edit
 from ..auth import require_admin_auth, require_auth
 from ..logger import get_manager_logger
 
@@ -67,10 +67,19 @@ async def restore_backup(request: Request) -> dict:
         raise HTTPException(422, "Not a backup file (expected a JSON object)")
 
     dry_run = bool(payload.pop("dry_run", False))
+    bound_localhost_before = shared_proxy.instances_localhost_only()
     try:
         report = backup.restore(payload, dry_run=dry_run)
     except backup.BackupError as e:
         raise HTTPException(422, str(e))
+
+    if not dry_run and report["settings_restored"]:
+        # The port listeners and the runners' bind address follow the settings
+        # file only when somebody says "make it so" — the settings route does,
+        # and a restore that brings those settings has to as well.
+        report["listener_errors"] = await shared_proxy.sync_listeners()
+        if shared_proxy.instances_localhost_only() != bound_localhost_before:
+            _rebind_running_instances()
 
     if not dry_run:
         logger.warning(
