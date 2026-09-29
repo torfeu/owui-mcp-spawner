@@ -98,10 +98,19 @@ def forget(instance_id: str) -> None:
 # ── the probe ────────────────────────────────────────────────────────────────
 
 def _probe_url(inst) -> str:
-    # Same rule as the process manager's port check: a runner bound to 0.0.0.0
-    # is reached over the loopback, not over the wildcard address.
-    host = "127.0.0.1" if inst.host in ("0.0.0.0", "::", "") else inst.host
-    return f"http://{host}:{inst.port}{inst.endpoint}"
+    """Where the instance's own listener answers — the address the proxy dials.
+
+    Not the config host: the runner binds what `MCP_RUNNER_HOST` said at its
+    start, and loopback whenever a way in through the manager is on. Reading
+    the config instead probed `127.0.0.1` on a manager started with a LAN
+    address, called every instance unhealthy and — with auto-restart on —
+    restarted healthy ones. The category endpoint and the test call use this
+    too, so all three went wrong together; one answer, `_target_host`, now
+    serves the proxy and them alike, IPv6 brackets included.
+    """
+    # Imported here: shared_proxy imports category_endpoint, which imports this.
+    from .shared_proxy import _target_host
+    return f"http://{_target_host(inst)}:{inst.port}{inst.endpoint}"
 
 
 def _reason(exc: BaseException) -> str:

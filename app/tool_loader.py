@@ -114,7 +114,8 @@ def manager_url() -> str:
     if host in ("0.0.0.0", "::", ""):
         host = "127.0.0.1"
     port = os.environ.get("MCP_MANAGER_PORT") or "7860"
-    return f"http://{host}:{port}"
+    # "http://::1:7860" is not a URL — the port would be read into the address.
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
 def is_content_valve(name: str) -> bool:

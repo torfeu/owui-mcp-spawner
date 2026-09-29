@@ -26,6 +26,25 @@ def run(coro):
 
 
 class ProbeTargetTests(unittest.TestCase):
+    """The probe dials where the runner listens, not where its config says.
+
+    Settings and `MCP_RUNNER_HOST` are pinned per test: both decide the answer,
+    and a suite that read this machine's own settings file would pass or fail
+    by what happens to be switched on here.
+    """
+
+    def setUp(self):
+        import app.shared_proxy as sp
+        self.settings = {}
+        patcher = patch.object(sp, "load_settings", lambda: dict(self.settings))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = patch.dict("os.environ")
+        env.start()
+        self.addCleanup(env.stop)
+        import os
+        os.environ.pop("MCP_RUNNER_HOST", None)
+
     def test_a_wildcard_bind_is_probed_over_the_loopback(self):
         # Connecting to 0.0.0.0 is not portable; the process manager's own port
         # check makes the same substitution.
@@ -35,6 +54,33 @@ class ProbeTargetTests(unittest.TestCase):
     def test_a_real_host_is_kept(self):
         self.assertEqual("http://192.168.1.100:8101/mcp",
                          health._probe_url(instance(host="192.168.1.100")))
+
+    def test_the_runner_host_the_manager_was_started_with_wins(self):
+        """`manager.py --host 192.168.1.10`: the runner binds that address, the
+        config still says 127.0.0.1 — and nothing answers there."""
+        import os
+        os.environ["MCP_RUNNER_HOST"] = "192.168.1.10"
+        self.assertEqual("http://192.168.1.10:8101/mcp",
+                         health._probe_url(instance(host="127.0.0.1")))
+
+    def test_loopback_while_a_way_in_through_the_manager_is_on(self):
+        self.settings = {"instance_endpoints_enabled": True}
+        self.assertEqual("http://127.0.0.1:8101/mcp",
+                         health._probe_url(instance(host="192.168.1.10")))
+
+    def test_an_ipv6_host_makes_a_url_that_parses(self):
+        import httpx
+        url = httpx.URL(health._probe_url(instance(host="::1")))
+        self.assertEqual(("::1", 8101), (url.host, url.port))
+
+    def test_the_category_endpoint_and_the_test_call_dial_the_same(self):
+        import os
+        import app.category_endpoint as category_endpoint
+        import app.tool_call as tool_call
+        os.environ["MCP_RUNNER_HOST"] = "192.168.1.10"
+        inst = instance(host="127.0.0.1")
+        self.assertEqual(health._probe_url(inst), category_endpoint.instance_url(inst))
+        self.assertIs(tool_call._probe_url, health._probe_url)
 
 
 class ReasonTests(unittest.TestCase):

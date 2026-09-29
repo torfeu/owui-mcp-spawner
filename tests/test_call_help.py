@@ -137,6 +137,10 @@ class ManagerUrlTests(unittest.TestCase):
         self.assertEqual("http://127.0.0.1:7871",
                          self.url(MCP_RUNNER_HOST="127.0.0.1", MCP_MANAGER_PORT="7871"))
 
+    def test_an_ipv6_manager_gets_brackets(self):
+        self.assertEqual("http://[::1]:7860",
+                         self.url(MCP_RUNNER_HOST="::1", MCP_MANAGER_PORT="7860"))
+
     def test_an_unset_environment_falls_back_to_the_documented_default(self):
         self.assertEqual("http://127.0.0.1:7860", self.url())
 
