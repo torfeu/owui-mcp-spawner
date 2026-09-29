@@ -74,12 +74,20 @@ function card(entry) {
 /** A free id for the next copy: foo_2, foo_3, … — only a suggestion, the
  * server refuses a taken one anyway. Asked of the API, not read off the
  * table: a filter or the pagination hides rows, and a hidden id is taken too. */
-async function suggestId(base) {
-  const rows = await apiFetch(API).catch(() => []);
+function suggestId(base, rows) {
   const taken = new Set(rows.map(r => r.id));
   for (let n = 2; ; n++) {
     if (!taken.has(`${base}_${n}`)) return `${base}_${n}`;
   }
+}
+
+/** The instances that came from this shipped tool, as far as the ids tell:
+ * the tool's own id and the copies named <id>_2, <id>_3, … the store suggests.
+ * A copy renamed to something else is not recognised — the question below is
+ * a reminder, not an inventory. */
+function existingCopies(base, rows) {
+  const copy = new RegExp(`^${base.replace(/[-]/g, "\\-")}_\\d+$`);
+  return rows.filter(r => r.id === base || copy.test(r.id)).map(r => r.id);
 }
 
 async function onAction(event) {
@@ -91,10 +99,20 @@ async function onAction(event) {
     const shipped = install ? install.dataset.install : copy.dataset.copy;
     const body = {};
     if (copy) {
+      // Asked first, before the id: a second instance of the same tool is a
+      // deliberate choice, and "Add another" sits right next to the status of
+      // the one that already exists.
+      const rows = await apiFetch(API).catch(() => []);
+      const existing = existingCopies(shipped, rows);
+      const list = existing.length ? existing.join(", ") : shipped;
+      if (!confirm(
+        `${shipped} is already installed (${list}).\n\n` +
+        `Really install another instance of it?`
+      )) return;
       const id = prompt(
         `ID for the new instance of ${shipped} — letters, digits, _ and - only.\n` +
         `Give it a note afterwards (Edit → Note) so the copies can be told apart.`,
-        await suggestId(shipped));
+        suggestId(shipped, rows));
       if (id === null) return;
       if (!/^[A-Za-z0-9_-]+$/.test(id.trim())) {
         showAlert("error", `"${id}" is not a usable ID — letters, digits, _ and - only`);
