@@ -288,7 +288,7 @@ function togglePortColumn(rows) {
   tbody.innerHTML = pageRows.map(inst => `
     <tr data-id="${inst.id}">
       <td class="id-cell">${esc(inst.id)}</td>
-      <td${nameTitle(inst)}>${esc(inst.name)}${noteMark(inst)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
+      <td>${nameCell(inst)}${noteMark(inst)}${inst.version ? ` <span class="version-badge">${esc(inst.version)}</span>` : ''}${bundledMark(inst)}</td>
       <td>${inst.category ? `<span class="category-badge">${esc(inst.category)}</span>` : '<span class="cell-muted">—</span>'}</td>
       <td class="status-cell">${statusBadge(inst.status, inst.error)}${healthDot(inst)}${startedCell(inst)}</td>
       <td class="admin-col cell-muted mem-cell">${memoryCell(inst)}</td>
@@ -313,65 +313,71 @@ function togglePortColumn(rows) {
 //
 // Clickable unless the instance is locked or the edit mode forbids writing —
 // a button that only ever answers 403 is worse than no button.
-/** Hover text for the name: the private note first, since that is what tells
- * two bridges apart, then the description. Guests never receive a note. */
-function nameTitle(inst) {
-  const text = [inst.note, inst.description].filter(t => (t || "").trim()).join("\n\n");
-  return text ? ` title="${esc(text)}"` : "";
+/** The name, clickable when there is a description to show. A click, not a
+ * hover: the browser's title tooltip waits a second before it appears, and
+ * the four-second poll rebuilds the row under it, so it was rarely seen. */
+function nameCell(inst) {
+  const name = esc(inst.name);
+  if (!(inst.description || "").trim()) return name;
+  return `<span class="popover-trigger name-trigger" role="button" tabindex="0"` +
+         ` data-popover-title="Description · ${esc(inst.id)}"` +
+         ` data-popover-text="${esc(inst.description)}">${name}</span>`;
 }
 
-/** The ⓘ behind the name. Hovering it shows the note at once (CSS, from
- * data-note); clicking it opens the note in a popover outside the table. The
- * browser's own title tooltip was not enough: it waits a second before it
- * appears, and the four-second poll rebuilds the row under it. */
+/** The ⓘ behind the name: the operator's note, opened by a click. Guests
+ * never receive a note, so they never see the mark either. */
 function noteMark(inst) {
   if (!inst.note) return "";
-  return ` <span class="note-mark" role="button" tabindex="0" aria-label="Note"` +
-         ` data-note="${esc(inst.note)}" data-id="${esc(inst.id)}">ⓘ</span>`;
+  return ` <span class="popover-trigger note-mark" role="button" tabindex="0" aria-label="Note"` +
+         ` data-popover-title="Note · ${esc(inst.id)}"` +
+         ` data-popover-text="${esc(inst.note)}">ⓘ</span>`;
 }
 
-// The popover lives on <body>, not in the row: the poll replaces the table
-// body every few seconds, and anything inside it would vanish with it.
-let notePopover = null;
+// One popover for both. It lives on <body>, not in the row: the poll replaces
+// the table body every few seconds, and anything inside it would vanish.
+let popover = null;
 
-function closeNote() {
-  notePopover?.remove();
-  notePopover = null;
+function closePopover() {
+  popover?.remove();
+  popover = null;
 }
 
-function openNote(mark) {
-  closeNote();
-  notePopover = document.createElement("div");
-  notePopover.className = "note-popover";
-  notePopover.setAttribute("role", "dialog");
+function openPopover(trigger) {
+  closePopover();
+  popover = document.createElement("div");
+  popover.className = "note-popover";
+  popover.setAttribute("role", "dialog");
   const title = document.createElement("div");
   title.className = "note-popover-title";
-  title.textContent = `Note · ${mark.dataset.id}`;
+  title.textContent = trigger.dataset.popoverTitle;
   const body = document.createElement("div");
-  body.textContent = mark.dataset.note;   // text, never HTML
-  notePopover.append(title, body);
-  document.body.append(notePopover);
-  const r = mark.getBoundingClientRect();
-  const left = Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - notePopover.offsetWidth - 12);
-  notePopover.style.left = `${Math.max(8, left)}px`;
-  notePopover.style.top = `${r.bottom + window.scrollY + 6}px`;
+  body.textContent = trigger.dataset.popoverText;   // text, never HTML
+  popover.append(title, body);
+  document.body.append(popover);
+  // Below the whole cell, not below the trigger: under the name it covered
+  // the ⓘ, and the click meant for the note landed in the description.
+  const r = trigger.getBoundingClientRect();
+  const cell = (trigger.closest("td") || trigger).getBoundingClientRect();
+  const left = Math.min(r.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - popover.offsetWidth - 12);
+  popover.style.left = `${Math.max(8, left)}px`;
+  popover.style.top = `${cell.bottom + window.scrollY + 4}px`;
 }
 
 document.addEventListener("click", event => {
-  const mark = event.target.closest(".note-mark");
-  if (mark) {
+  const trigger = event.target.closest(".popover-trigger");
+  if (trigger) {
     event.stopPropagation();
-    openNote(mark);
-  } else if (notePopover && !notePopover.contains(event.target)) {
-    closeNote();
+    openPopover(trigger);
+  } else if (popover && !popover.contains(event.target)) {
+    closePopover();
   }
 });
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape") closeNote();
-  const mark = event.target.closest?.(".note-mark");
-  if (mark && (event.key === "Enter" || event.key === " ")) {
+  if (event.key === "Escape") closePopover();
+  const trigger = event.target.closest?.(".popover-trigger");
+  if (trigger && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
-    openNote(mark);
+    openPopover(trigger);
   }
 });
 
