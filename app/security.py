@@ -91,11 +91,9 @@ def mask_secrets(value):
     secret name is different: it brings its own keys, and those are the better
     evidence, so the rule stops there and judges the leaves by their own names.
 
-    That does mean `{"keywords": ["birds"]}` comes back masked, because
-    `is_secret_field` matches on substrings and "key" fires on "keywords". Not
-    lovely — but `{"keywords": "birds"}` has been masked that way since the
-    first version of this function, so masking the list is what *agrees* with
-    the rest, and the write-back below puts the value straight back.
+    Names are judged as words (`secret_words`), so `{"keywords": ["birds"]}`
+    stays in the clear while `{"api_keys": [...]}` is masked. Whatever is
+    masked, the write-back below puts straight back.
     """
     if isinstance(value, dict):
         return {k: (_mask_named_secret(v) if is_secret_field(k) else mask_secrets(v))

@@ -172,6 +172,16 @@ class LinkRewriteTests(unittest.TestCase):
         text = "[x](/cache/files/../../etc/passwd)"
         self.assertEqual(text, self.rewrite(text))
 
+    def test_a_full_stop_after_the_link_is_the_sentences_not_the_files(self):
+        out = self.rewrite("Saved as /cache/files/spike_db4cbd.docx. Done!")
+        expected = content_store.file_url("docs", "spike_db4cbd.docx")
+        self.assertEqual(f"Saved as {expected}. Done!", out)
+
+    def test_a_file_whose_name_really_ends_in_a_dot_still_wins(self):
+        write_file(self.root, "docs", "notes.")
+        out = self.rewrite("see /cache/files/notes.")
+        self.assertTrue(out.endswith(content_store.file_url("docs", "notes.")), out)
+
     def test_without_a_base_url_the_link_is_relative(self):
         with patch.object(content_store, "base_url", return_value=""):
             out = self.rewrite("[Report](/cache/files/spike_db4cbd.docx)")

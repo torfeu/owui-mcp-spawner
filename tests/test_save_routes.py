@@ -495,3 +495,23 @@ class ShippedExampleTests(SaveRouteTestCase):
             response = self.client.delete("/api/instances/demo", headers=self.headers())
         self.assertEqual(200, response.status_code, response.text)
         self.assertFalse((self.configs / "demo.json").exists())
+
+
+class SnapshotTests(SaveRouteTestCase):
+    """Every save keeps the version before it, even two saves in one second."""
+
+    def test_two_saves_in_one_second_keep_both_previous_versions(self):
+        # Names were stamped to the second: the second snapshot overwrote the
+        # first — and the first was the version before *both* saves.
+        tool_path = self.tool_file
+        tool_path.write_text("v1")
+        api_helpers._backup_tool_file(tool_path, "demo")
+        tool_path.write_text("v2")
+        api_helpers._backup_tool_file(tool_path, "demo")
+        history = pathlib.Path(self.tmp.name) / "history" / "demo"
+        kept = sorted(p.read_text() for p in history.glob("*.json"))
+        self.assertEqual(["v1", "v2"], kept)
+        # Names still sort in the order the snapshots were taken — that is how
+        # the oldest ones are pruned.
+        ordered = [p.read_text() for p in sorted(history.glob("*.json"))]
+        self.assertEqual(["v1", "v2"], ordered)

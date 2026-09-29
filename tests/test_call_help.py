@@ -205,6 +205,26 @@ class ValveAutofillTests(unittest.TestCase):
             instance = tool_loader.create_tools_instance(tool, stored)
         self.assertEqual("http://127.0.0.1:7999", instance.valves.manager_url)
 
+    def test_the_code_runs_once_per_runner_start(self):
+        """The runner builds the instance and then the schemas from the same
+        tool object. Each used to exec the code on its own, so import-time side
+        effects — a model load, a connection pool — happened twice."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            counter = os.path.join(tmp, "count")
+            code = (f"open({counter!r}, 'a').write('x')\n"
+                    "class Tools:\n    def hi(self) -> str:\n        \"\"\"Hi.\"\"\"\n        return 'hi'\n")
+            tool = tool_loader.OpenWebUITool({"content": code})
+            self.assertIsNotNone(tool_loader.create_tools_instance(tool, {}))   # mcp_runner, first
+            self.assertEqual(["hi"], [d["name"] for d in tool.get_mcp_tool_defs()])  # then this
+            with open(counter) as f:
+                self.assertEqual("x", f.read())
+
+    def test_broken_code_is_still_reported_by_both(self):
+        tool = tool_loader.OpenWebUITool({"content": "raise RuntimeError('boom')\n"})
+        self.assertIsNone(tool_loader.create_tools_instance(tool, {}))
+        self.assertEqual([], tool.get_mcp_tool_defs())
+
     def test_a_tool_without_that_valve_is_untouched(self):
         tool = tool_loader.OpenWebUITool({
             "id": "demo", "name": "demo",

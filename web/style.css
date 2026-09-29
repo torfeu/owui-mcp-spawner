@@ -1283,7 +1283,7 @@ button.update-badge { font-family: inherit; cursor: pointer; }
   margin-bottom: 0.75rem;
   box-sizing: border-box;
 }
-#login-password:focus { outline: none; border-color: var(--accent); }
+#login-password:focus { outline: none; border-color: var(--primary); }
 
 .login-error {
   color: #ff5555;

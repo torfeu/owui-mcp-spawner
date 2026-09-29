@@ -65,8 +65,9 @@ FORMAT = "owui-mcp-spawner-backup"
 FORMAT_VERSION = 1
 
 # The settings that are credentials. Listed rather than detected: `is_secret_field`
-# matches on substrings, and a silent miss here would put a token into a file
-# somebody was told is safe to keep in a cloud folder.
+# guesses from a name, and a guess that misses here would put a token into a
+# file somebody was told is safe to keep in a cloud folder — `password_hash`
+# and `user_jwt_secret` happen to match, a future name may not.
 SECRET_SETTINGS = ("mcp_bearer_token", "read_token", "agent_token",
                    "user_jwt_secret", "password_hash")
 

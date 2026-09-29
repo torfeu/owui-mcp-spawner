@@ -399,22 +399,36 @@ def rewrite_links(text: str, instance_id: str, prefix: str) -> str:
         return text
     pattern = re.compile(re.escape(prefix) + _LINK_TAIL)
 
+    def _link_for(filename: str) -> Optional[str]:
+        path = resolve_file(instance_id, filename)
+        if path is not None and path.is_file():
+            return file_url(instance_id, filename)
+        # A tool that URL-encodes its own link ("Q3%20Report.docx") names the
+        # same file on disk as the decoded form — try that before giving up,
+        # or every name with a space stays a dead link. The decoded name goes
+        # through the same resolve_file gate, so %2F buys no traversal.
+        decoded = unquote(filename)
+        if decoded != filename:
+            path = resolve_file(instance_id, decoded)
+            if path is not None and path.is_file():
+                return file_url(instance_id, decoded)
+        return None
+
     def _replace(match: "re.Match") -> str:
         filename = match.group(1)
-        path = resolve_file(instance_id, filename)
-        if path is None or not path.is_file():
-            # A tool that URL-encodes its own link ("Q3%20Report.docx") names
-            # the same file on disk as the decoded form — try that before
-            # giving up, or every name with a space stays a dead link. The
-            # decoded name goes through the same resolve_file gate, so %2F
-            # buys no traversal.
-            decoded = unquote(filename)
-            if decoded != filename:
-                path = resolve_file(instance_id, decoded)
-                if path is not None and path.is_file():
-                    return file_url(instance_id, decoded)
-            return match.group(0)
-        return file_url(instance_id, filename)
+        link = _link_for(filename)
+        if link:
+            return link
+        # "Saved as /cache/files/report.docx." — the sentence's full stop is
+        # not part of the name. Only tried once the whole match found nothing,
+        # so a file that really ends in a dot still wins; the punctuation is
+        # put back after the link.
+        trimmed = filename.rstrip(".,;:!?")
+        if trimmed and trimmed != filename:
+            link = _link_for(trimmed)
+            if link:
+                return link + filename[len(trimmed):]
+        return match.group(0)
 
     return pattern.sub(_replace, text)
 

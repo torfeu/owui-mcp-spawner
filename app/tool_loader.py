@@ -27,17 +27,37 @@ class OpenWebUITool:
     def __init__(self, raw: dict):
         self.content: str = raw.get("content", "")
         self.specs: list[dict] = raw.get("specs", [])
+        self._ns: Optional[dict] = None
+        self._exec_error: Optional[Exception] = None
+
+    def namespace(self) -> dict:
+        """The module namespace of the tool code, executed once per object.
+
+        The runner needs the code twice — once to build the Tools instance,
+        once for the schemas — and used to exec it twice, so a tool's
+        import-time side effects (model loads, connection pools, a log line)
+        ran twice per start while the comment here promised once. Both now
+        share this. Raises what the exec raised, every time it is asked.
+        """
+        if self._exec_error is not None:
+            raise self._exec_error
+        if self._ns is None:
+            ns: dict = {}
+            try:
+                exec(self.content, ns)  # noqa: S102
+            except Exception as e:
+                self._exec_error = e
+                raise
+            self._ns = ns
+        return self._ns
 
     def get_mcp_tool_defs(self) -> list[dict]:
         """Return MCP tool definitions built from the live Python code."""
-        # Exec once to get the real class and method objects — the method names
-        # come from the same namespace, so the tool's import-time side effects
-        # (model loads, connection pools) run once per start, not twice.
         exec_ns: dict = {}
         ToolsClass = None
         if self.content:
             try:
-                exec(self.content, exec_ns)  # noqa: S102
+                exec_ns = self.namespace()
                 ToolsClass = exec_ns.get("Tools")
             except Exception as e:
                 logger.warning(f"Could not exec tool code for schema generation: {e}")
@@ -176,9 +196,7 @@ def create_tools_instance(tool: OpenWebUITool, values: dict[str, Any],
     if not tool.content:
         return None
     try:
-        ns: dict = {}
-        exec(tool.content, ns)  # noqa: S102
-        ToolsClass = ns.get("Tools")
+        ToolsClass = tool.namespace().get("Tools")
         if ToolsClass is None:
             return None
         instance = ToolsClass()

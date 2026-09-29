@@ -378,7 +378,11 @@ def _backup_tool_file(tool_path, instance_id: str) -> None:
     try:
         dest_dir = HISTORY_DIR / instance_id
         dest_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        # Microseconds too: two saves within one second — the update button
+        # right after a manual save — otherwise wrote the same name, and the
+        # second snapshot replaced the first, which was the one worth keeping.
+        now = time.time()
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f"-{int(now * 1e6) % 1_000_000:06d}"
         (dest_dir / f"{stamp}.json").write_text(tool_path.read_text())
         backups = sorted(dest_dir.glob("*.json"))
         for old in backups[:-HISTORY_KEEP]:
