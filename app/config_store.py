@@ -111,6 +111,11 @@ def save_config(cfg: MCPConfig) -> None:
 
 
 def delete_config(config_id: str) -> bool:
+    # configs/example.json is shipped documentation, not an instance — every
+    # reader here skips it, and so must the one call that deletes. Without
+    # this, DELETE /api/instances/example answered ok and removed it.
+    if config_id == "example":
+        return False
     path = CONFIGS_DIR / f"{config_id}.json"
     if path.exists():
         path.unlink()

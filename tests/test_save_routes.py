@@ -467,3 +467,31 @@ class ConcurrentCommitTests(SaveRouteTestCase):
         self.assertEqual(409, result["status"], "the save wrote through a lock")
         self.assertTrue(json.loads((self.configs / "demo.json").read_text())["locked"],
                         "the lock was cleared by the save")
+
+
+class ShippedExampleTests(SaveRouteTestCase):
+    """configs/example.json is documentation that ships with the code.
+
+    Every reader skips it; the delete route did not. `DELETE
+    /api/instances/example` answered `{"ok": true}` and removed a file that
+    belongs to the repository — on the server that is a dirty checkout, and
+    the next rsync puts it back only if nobody excluded configs/.
+    """
+
+    def test_the_delete_route_leaves_it_alone(self):
+        example = self.configs / "example.json"
+        example.write_text(json.dumps({**config(), "id": "my_tool", "name": "My Tool"}))
+        response = self.client.delete("/api/instances/example", headers=self.headers())
+        self.assertEqual(404, response.status_code, response.text)
+        self.assertTrue(example.exists())
+
+    def test_a_real_instance_is_still_deletable(self):
+        # The route also forgets usage rows and the content folder — those live
+        # in the real runtime/usage.db and content/, which a test never touches.
+        with patch.object(instances_route, "stop_instance", lambda _id: (True, "")), \
+                patch.object(instances_route, "forget_usage", lambda _id: None), \
+                patch.object(instances_route, "forget_content", lambda _id: None):
+            config_store._state["demo"].status = MCPStatus.stopped
+            response = self.client.delete("/api/instances/demo", headers=self.headers())
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertFalse((self.configs / "demo.json").exists())
