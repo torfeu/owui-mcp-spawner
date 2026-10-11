@@ -113,11 +113,12 @@ See the [complete control-tool function list and permissions](docs/reference.md#
 
 ## One connection for all tools (MCP tool router)
 
-The **MCP Tool Router** gives your client one MCP connection across the running tool instances. The model initially sees just **three meta-tools**. It discovers a function, loads that function's parameter schema and then calls it. This reduces the schemas included up front; the actual context savings depend on the installed tools and client.
+The **MCP Tool Router** gives your client one MCP connection across the running tool instances. The model initially sees just **four meta-tools**. It discovers a function, loads that function's parameter schema and then calls it. This reduces the schemas included up front; the actual context savings depend on the installed tools and client.
 
 | Meta-tool | Purpose |
 |---|---|
 | `find_tools(query_words, category, mode)` | Discover available functions by keyword or category. Without filters, list the allowed running catalog up to `max_results` (default: 60). |
+| `find_functions(tool, query_words)` | Look inside one instance: every function name, nothing cut off — or, with words, only the matching ones with descriptions; three or fewer come with schema and an example call. |
 | `describe_tools(tools=["instance.action"])` | Load the complete parameter schemas for the selected function handles. |
 | `call_tool(tool="instance.action", arguments={...})` | Invoke a selected function through MCP and return its result. |
 
