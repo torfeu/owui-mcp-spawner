@@ -548,3 +548,79 @@ class BridgeExpansionTests(unittest.TestCase):
         tools.valves.expand_bridges = False
         self.assertIn("wd.call_tool", self.run_(tools.find_tools(["wikidata"])))
         self.assertEqual([], tools._run.calls)
+
+
+class MixedUpCallTests(unittest.TestCase):
+    """What Nova sent on 16.10. with OpenWebUI's tool search on: its call_tool
+    shape (tool_name/params) at the router, the target's parameters next to
+    `tool`, describe_tools(handles=…). Taken as meant, or answered with the
+    call to copy — and none of it shows up in the schema."""
+
+    def router(self):
+        tools = cached_router(NEXTCLOUD, LAWS)
+        tools._run = FakeRun({"get_paragraph": ("§ 823 text", False)})
+        return tools
+
+    def run_(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    def test_openwebuis_tool_name_and_params_string_are_taken(self):
+        tools = self.router()
+        result = self.run_(tools.call_tool(tool_name="laws.get_paragraph",
+                                           params='{"law": "bgb", "paragraph": "823"}'))
+        self.assertEqual("§ 823 text", result)
+        self.assertEqual(("laws", "get_paragraph", {"law": "bgb", "paragraph": "823"}), tools._run.calls[-1])
+
+    def test_arguments_written_out_as_json_are_taken(self):
+        tools = self.router()
+        self.run_(tools.call_tool("laws.get_paragraph", '{"law": "bgb", "paragraph": "1"}'))
+        self.assertEqual({"law": "bgb", "paragraph": "1"}, tools._run.calls[-1][2])
+
+    def test_parameters_next_to_the_handle_are_moved_into_arguments(self):
+        tools = self.router()
+        self.run_(tools.call_tool(tool="laws.get_paragraph", law="bgb", paragraph="823"))
+        self.assertEqual({"law": "bgb", "paragraph": "823"}, tools._run.calls[-1][2])
+
+    def test_explicit_arguments_win_over_stray_ones(self):
+        tools = self.router()
+        self.run_(tools.call_tool(tool="laws.get_paragraph", arguments={"law": "bgb", "paragraph": "1"},
+                                  paragraph="2"))
+        self.assertEqual("1", tools._run.calls[-1][2]["paragraph"])
+
+    def test_no_handle_names_the_stray_values_and_the_function_they_fit(self):
+        tools = self.router()
+        answer = self.run_(tools.call_tool(law="bgb", paragraph="823"))
+        self.assertTrue(answer.startswith("Error: call_tool needs `tool`"))
+        self.assertIn("You passed law, paragraph directly", answer)
+        self.assertIn('call_tool(tool="laws.get_paragraph", arguments={"law": "bgb", "paragraph": "823"})', answer)
+        self.assertEqual([], tools._run.calls)   # nothing guessed, nothing run
+
+    def test_no_handle_and_nothing_fits_points_at_find_tools(self):
+        answer = self.run_(self.router().call_tool(sparql="SELECT ?x"))
+        self.assertIn('call_tool(tool="<instance.action>", arguments={"sparql": "SELECT ?x"})', answer)
+        self.assertIn("find_tools()", answer)
+
+    def test_arguments_that_are_not_an_object_are_refused_plainly(self):
+        answer = self.run_(self.router().call_tool("laws.get_paragraph", "bgb 823"))
+        self.assertIn("`arguments` must be an object", answer)
+
+    def test_describe_takes_handles_and_a_single_string(self):
+        tools = self.router()
+        self.assertTrue(self.run_(tools.describe_tools(handles=["laws.get_paragraph"])).startswith("laws.get_paragraph"))
+        self.assertTrue(self.run_(tools.describe_tools(tools="laws.get_paragraph")).startswith("laws.get_paragraph"))
+        self.assertTrue(self.run_(tools.describe_tools('["laws.get_paragraph"]')).startswith("laws.get_paragraph"))
+
+    def test_describe_without_handles_shows_how(self):
+        answer = self.run_(self.router().describe_tools())
+        self.assertIn('describe_tools(tools=["', answer)
+
+    def test_the_schema_shows_none_of_it(self):
+        # The aliases are taken, not advertised: one required handle and one
+        # object, as before — anything more would sit in every prompt.
+        exported = json.loads(ROUTER_PATH.read_text())[0]
+        specs = {s["name"]: s["parameters"] for s in exported["specs"]}
+        self.assertEqual({"tool", "arguments"}, set(specs["call_tool"]["properties"]))
+        self.assertEqual(["tool"], specs["call_tool"]["required"])
+        self.assertEqual({"tools"}, set(specs["describe_tools"]["properties"]))
+        self.assertEqual(["tools"], specs["describe_tools"]["required"])
