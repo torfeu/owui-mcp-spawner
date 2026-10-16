@@ -624,3 +624,45 @@ class MixedUpCallTests(unittest.TestCase):
         self.assertEqual(["tool"], specs["call_tool"]["required"])
         self.assertEqual({"tools"}, set(specs["describe_tools"]["properties"]))
         self.assertEqual(["tools"], specs["describe_tools"]["required"])
+
+
+class EmptyArrivalTests(unittest.TestCase):
+    """OpenWebUI drops every field a function does not declare. A call made in
+    another shape therefore arrives empty, and "tool is missing" alone sent
+    Nova off to try the same thing again (16.10.)."""
+
+    def router(self, *catalog, answers=None):
+        tools = cached_router(*(catalog or (NEXTCLOUD, LAWS)))
+        tools._run = FakeRun(answers or {})
+        return tools
+
+    def run_(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    def test_an_empty_call_says_which_two_fields_arrive(self):
+        answer = self.run_(self.router().call_tool())
+        self.assertIn("call_tool arrived empty", answer)
+        self.assertIn("not tool_name or params", answer)
+        self.assertIn('call_tool(tool="<instance.action>"', answer)
+
+    def test_empty_arguments_for_required_parameters_are_not_sent(self):
+        tools = self.router()
+        answer = self.run_(tools.call_tool("laws.get_paragraph"))
+        self.assertEqual([], tools._run.calls)
+        self.assertIn("`arguments` arrived empty, but laws.get_paragraph needs law, paragraph", answer)
+        self.assertIn("Put them inside `arguments`", answer)
+        self.assertIn('call_tool(tool="laws.get_paragraph", arguments={"law": "<law>", "paragraph": "<paragraph>"})',
+                      answer)
+
+    def test_a_function_without_required_parameters_still_runs_empty(self):
+        tools = self.router(answers={"get_mail_account_list": ("two accounts", False)})
+        self.assertEqual("two accounts", self.run_(tools.call_tool("nextcloud.get_mail_account_list")))
+
+    def test_behind_a_bridge_the_schema_is_fetched_first(self):
+        tools = self.router(BRIDGE, answers={"list_tools": (LIST_TEXT, False),
+                                             "describe_tool": (DESCRIBE_TEXT, False)})
+        self.run_(tools.find_tools())
+        answer = self.run_(tools.call_tool("wd.search_items", {}))
+        self.assertIn("needs query", answer)
+        self.assertNotIn("call_tool", [c[1] for c in tools._run.calls])
