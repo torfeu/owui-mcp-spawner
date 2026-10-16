@@ -97,6 +97,20 @@ class FakeClient:
         return self.response
 
 
+def uvicorn_receive(hung_up=None):
+    """A `receive` that behaves like uvicorn's: the body first, then nothing
+    until the caller hangs up — which here is when *hung_up* is set, or never."""
+    asked = []
+
+    async def receive():
+        asked.append(1)
+        if len(asked) == 1:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await (hung_up or asyncio.Event()).wait()
+        return {"type": "http.disconnect"}
+    return receive
+
+
 def call(path, client, method="POST", headers=(), query=b""):
     """Drive `_forward` once and collect the ASGI messages it sends back."""
     sent = []
@@ -104,8 +118,7 @@ def call(path, client, method="POST", headers=(), query=b""):
     async def send(message):
         sent.append(message)
 
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = uvicorn_receive()
 
     scope = {"type": "http", "path": path, "method": method,
              "headers": list(headers), "query_string": query}
@@ -258,6 +271,61 @@ class ForwardingTests(unittest.TestCase):
         self.assertEqual(b"application/json", headers[b"content-type"])
         # Length and framing belong to the connection this manager answers on.
         self.assertNotIn(b"content-length", headers)
+
+    def test_a_caller_that_leaves_an_idle_stream_frees_the_upstream_connection(self):
+        # The leak behind the 16.10.: Hermes and OpenWebUI dropped sessions
+        # without a DELETE, the instance never wrote on the open SSE stream,
+        # and the proxy held each connection until the pool of 100 was full.
+        fake_state(self, instance())
+
+        class IdleStream(FakeResponse):
+            async def aiter_raw(self):
+                yield b": open\n\n"
+                await asyncio.Event().wait()   # an SSE stream with nothing to say
+
+        response = IdleStream(headers={"content-type": "text/event-stream"})
+
+        async def scenario():
+            hung_up = asyncio.Event()
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            scope = {"type": "http", "path": "/mcp/gesetze", "method": "GET",
+                     "headers": [], "query_string": b""}
+            forwarding = asyncio.ensure_future(sp._forward(
+                scope, uvicorn_receive(hung_up), send, FakeClient(response=response)))
+            await asyncio.sleep(0.05)
+            self.assertFalse(forwarding.done())   # a live stream stays open
+            hung_up.set()
+            await asyncio.wait_for(forwarding, timeout=2)
+            return sent
+
+        with self.assertLogs(sp.logger, "INFO") as logs:
+            sent = run(scenario())
+        self.assertTrue(response.closed)
+        self.assertEqual(200, sent[0]["status"])
+        self.assertIn("went away", "\n".join(logs.output))
+
+    def test_a_full_pool_is_a_502_and_a_line_in_the_manager_log(self):
+        # Health checks dial the instances directly and stay green, so the
+        # log is the only place a full pool can show up.
+        fake_state(self, instance())
+        client = FakeClient(error=httpx.PoolTimeout("no connection available"))
+        with self.assertLogs(sp.logger, "WARNING") as logs:
+            status, body, _ = call("/mcp/gesetze", client)
+        self.assertEqual(502, status)
+        self.assertIn("in use", body)
+        self.assertIn("gesetze", logs.output[0])
+        self.assertIn(str(sp.POOL_SIZE), logs.output[0])
+
+    def test_an_unreachable_instance_is_logged_too(self):
+        fake_state(self, instance())
+        client = FakeClient(error=httpx.ConnectError("connection refused"))
+        with self.assertLogs(sp.logger, "WARNING") as logs:
+            call("/mcp/gesetze", client)
+        self.assertIn("ConnectError", logs.output[0])
 
 
 class DispatchClientTests(unittest.IsolatedAsyncioTestCase):

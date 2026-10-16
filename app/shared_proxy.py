@@ -156,11 +156,14 @@ def manager_port_enabled() -> bool:
     return bool(load_settings().get("instance_endpoints_enabled", False))
 
 
+POOL_SIZE = 100
+
+
 def _new_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         # read=None: SSE streams stay open indefinitely
         timeout=httpx.Timeout(connect=5.0, read=None, write=30.0, pool=5.0),
-        limits=httpx.Limits(max_connections=100),
+        limits=httpx.Limits(max_connections=POOL_SIZE),
     )
 
 
@@ -260,7 +263,17 @@ async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
             content=request_body(),
         )
         resp = await client.send(req, stream=True)
+    except httpx.PoolTimeout:
+        # Every connection of the client is taken. Health checks dial the
+        # instances directly, so without this line the instance list stays
+        # green while every caller through this proxy is turned away.
+        logger.warning(f"Proxy: no free connection for '{instance_id}' — all "
+                       f"{POOL_SIZE} upstream connections are in use; answered 502")
+        await _send_error(send, 502, f"Upstream MCP instance unreachable: "
+                                     f"all {POOL_SIZE} proxy connections are in use")
+        return
     except httpx.HTTPError as e:
+        logger.warning(f"Proxy: '{instance_id}' unreachable ({type(e).__name__}: {e}); answered 502")
         await _send_error(send, 502, f"Upstream MCP instance unreachable: {e}")
         return
     except RuntimeError:
@@ -269,7 +282,7 @@ async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
         await _send_error(send, 503, "MCP proxy is shutting down")
         return
 
-    try:
+    async def stream_through():
         await send({
             "type": "http.response.start",
             "status": resp.status_code,
@@ -282,9 +295,29 @@ async def _forward(scope, receive, send, client: httpx.AsyncClient) -> None:
         async for chunk in resp.aiter_raw():
             await send({"type": "http.response.body", "body": chunk, "more_body": True})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
-    except Exception:
-        pass  # client disconnected mid-stream — nothing to salvage
+
+    async def caller_gone():
+        # The request body is read by now; the server answers receive() only
+        # once more, when the caller hangs up.
+        while (await receive())["type"] != "http.disconnect":
+            pass
+
+    # An idle SSE stream sends nothing, so a send() that fails is no way to
+    # notice that the caller left: a client that drops its session without a
+    # DELETE would keep this upstream connection forever. Twenty such streams
+    # per instance filled the pool on the UM880 until nothing got through.
+    streaming = asyncio.ensure_future(stream_through())
+    watching = asyncio.ensure_future(caller_gone())
+    try:
+        await asyncio.wait({streaming, watching}, return_when=asyncio.FIRST_COMPLETED)
+        if watching.done() and not streaming.done():
+            logger.info(f"Proxy: caller of '{instance_id}' went away — closing the upstream stream")
     finally:
+        for task in (streaming, watching):
+            task.cancel()
+        # Their outcome is of no interest: a caller that left mid-stream makes
+        # send() fail, and there is nothing to salvage then.
+        await asyncio.gather(streaming, watching, return_exceptions=True)
         await resp.aclose()
 
 
