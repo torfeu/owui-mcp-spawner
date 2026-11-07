@@ -69,7 +69,11 @@ The content example stores files in `content/<instance-id>/`. Under **Settings �
 
 ![A note created by the Content example](docs/images/file-storage.png)
 
-The shipped [Identity Probe](examples/identity-probe.json) is an optional JSON tool for diagnosing caller identity.
+### The Store
+
+The **Store** button in the header installs the JSON tools that ship in `examples/` with one click: the [tool router](#one-connection-for-all-tools-mcp-tool-router), the [control tool](#managing-the-spawner-over-mcp-control-tool), the [Identity Probe](examples/identity-probe.json) for diagnosing caller identity, and the [External MCP Bridge](examples/external-mcp-bridge.json), which proxies one external MCP server (Streamable HTTP or SSE) with its URL and credential set in the instance's values. Installing works like an upload and does not start the instance. When the shipped copy is newer than the installed one, the card offers an update; **Add another** installs a further copy under a new id, for example one bridge per external server.
+
+To tell such copies apart, give each a **note** under **Edit → Note**. The ⓘ next to the name opens it, and the tool router shows it to models; it is not exported and not shown to guests.
 
 ## Connect an MCP client
 
@@ -99,8 +103,8 @@ The **MCP Control Tool** lets an agent operate the framework through MCP. It exp
 
 ### Set up the control tool
 
-1. Use **+ Upload JSON** with [examples/mcp-manager-control.json](examples/mcp-manager-control.json). Its instance ID is `mcp_manager_control`.
-2. Open **Edit → Values**. Set `manager_url` to the manager's address **as reachable from the control instance**, normally `http://127.0.0.1:7860`. Use the actual manager port if you changed it.
+1. Click **Store** and install **MCP Manager Control** (or use **+ Upload JSON** with [examples/mcp-manager-control.json](examples/mcp-manager-control.json)). Its instance ID is `mcp_manager_control`.
+2. Open **Edit → Values**. `manager_url` is filled in automatically with the address of the manager that started the instance, including a non-default port; change it only if the control instance must reach the manager by another address.
 3. Set `auth_token` to a manager **agent token** for management tasks, or a **read token** for read-only use. Configure these in **Settings → Security**; see [API tokens](docs/reference.md#api-tokens).
 4. Review the `allow_*` Valves and save. **Most actions, including code changes and start/stop, are enabled by default.** Only `allow_delete`, `allow_manager_restart` and `allow_content_delete` default to `false`. Turn off actions the agent should not use.
 5. Start the instance and copy its MCP URL from the dashboard into your client. If MCP authentication is enabled, the client also needs the **MCP Bearer token**.
@@ -124,8 +128,8 @@ The **MCP Tool Router** gives your client one MCP connection across the running 
 
 ### Set up the router
 
-1. Use **+ Upload JSON** with [examples/mcp-tool-router.json](examples/mcp-tool-router.json). Its instance ID is `mcp_tool_router`.
-2. In **Edit → Values**, set `manager_url` to the manager's reachable address, normally `http://127.0.0.1:7860`.
+1. Click **Store** and install **MCP Tool Router** (or use **+ Upload JSON** with [examples/mcp-tool-router.json](examples/mcp-tool-router.json)). Its instance ID is `mcp_tool_router`.
+2. `manager_url` is filled in automatically, as for the control tool; change it under **Edit → Values** only for a different network setup.
 3. For a protected manager, set `auth_token` to a manager **read token** so the router can fetch the catalog. If the target MCP endpoints require authentication, set `mcp_token` to their **MCP Bearer token**. These credentials have different purposes.
 4. Keep or adjust `deny_instances` (default: `mcp_manager_control`). Optionally restrict discovery and calls using the comma-separated `allow_categories` list.
 5. Save and start the router. Add its MCP URL to your client, supplying the MCP Bearer token if required. For the routed tools, use the router connection instead of also registering every instance directly; duplicate connections would still expose their schemas up front.
@@ -198,7 +202,7 @@ Run tests in a disposable checkout, not in an active deployment:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-See [tests/README.md](tests/README.md) for coverage, isolation requirements and integration-test prerequisites. Some tests require local ports and a prepared runner environment. The fresh-installation run did not finish fully green; the report below records which sweeps errored and why.
+See [tests/README.md](tests/README.md) for coverage, isolation requirements and integration-test prerequisites. Some tests require local ports and a prepared runner environment. In the fresh-installation check for 0.2.3 all 888 tests passed; the report below also records the sweeps that failed on an earlier FastAPI release and why.
 
 The screenshots above were captured from a separate installation with newly created manager and runner environments. Only the example tools shown were added; no production configuration, credentials or private service integrations were copied. See the [fresh-installation test report](docs/fresh-installation.md) for the exact checks and results.
 

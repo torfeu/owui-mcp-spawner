@@ -6,6 +6,12 @@ For a new installation, use the [README](../README.md). These notes apply only t
 2. Stop the manager, update the source checkout, then run `.venv/bin/python -m pip install -e .`.
 3. Read the [changelog](../CHANGELOG.md) for changes affecting your version, restart the manager and check the instance logs and health status.
 
+## Shipped tools are not updated by the source update
+
+Updating the checkout replaces `examples/`, not the instances installed from it. An installed tool router or control tool whose shipped copy is newer shows an orange `↑ x.y.z` marker in the instance table; click it (or **Update** in the **Store**) to apply the new code. Valve values are kept and the previous code is saved in `runtime/history/`. Clients that are connected to that instance need a new session afterwards to see changed functions.
+
+From 0.2.3 on, a `manager_url` that still holds the tool's default is replaced at start with the address of the manager. A value you set by hand stays as it is.
+
 ## Existing runner environments
 
 The current runner uses MCP SDK 2.x. Base packages are installed when a named environment is first created; updating the manager does not automatically upgrade every existing environment. An environment containing MCP 1.x needs an SDK upgrade before its runner can start:

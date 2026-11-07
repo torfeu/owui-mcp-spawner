@@ -18,6 +18,8 @@ The instance table is the main view. Next to ID, name, status, **RAM**, port, ve
 
   Read only at install time and only when no category was given — the shipped control tool and tool router declare `System` this way, so a fresh install sorts them out of the way without anyone setting it by hand.
 - **Version** — read from the tool's `version:` docstring line (or `meta.manifest.version`). If the tool was installed from `examples/` and the spawner ships a newer copy, an orange `↑ x.y.z` marker sits next to it; the Info dialog spells out which file to copy from (see *Info view*).
+- **Description and note** — a click on the instance name opens its description (the name is underlined with dots only when there is one). A small **ⓘ** next to it says the instance has a **note** and opens it on a click; nothing depends on hovering. The note is free text under **Edit → Note**, up to 2000 characters — for telling look-alike instances apart, such as two `external_mcp_bridge` copies pointing at different servers. The search box finds it. Unlike the description it is not part of the OpenWebUI export and never reaches guests; the tool router and the control tool do show it to models, so it is no place for a secret.
+- **Store** (header button) — installs the tools shipped in `examples/` with one click (see *Store* below)
 - **Permissions** (header button) — who may run which tools, assigned from a list of the people who have actually called (see *Per-user identity*)
 - **User identity** — in **Edit** a dropdown decides whether this instance cares who is calling: `off`, `optional` or `required` (see *Per-user identity*). It warns right there when no shared secret and no trusted headers are configured, because that combination fails silently later. Changing it restarts the instance, like a changed port or venv.
 
@@ -103,6 +105,16 @@ Instances in the **System** category (the control tool, a tool router) are shown
 
 Data comes from `GET /api/usage?days=N`, fetched when the dialog opens — never in the polling cycle. Hidden in guest mode.
 
+### Store
+
+The **Store** button in the header lists the tools that ship in `examples/` as JSON — the tool router, the control tool, the identity probe and the external MCP bridge — with name, version, category and description. **Install** runs exactly the pipeline of an upload: dependencies, validation in the venv, Valve defaults, the category from the tool's own header. The instance is not started, as after an upload.
+
+A tool that is already installed shows its version. When the shipped copy is newer, the card offers **Update**, which is the same forward-only update-from-example as the badge in the instance table. **Add another** installs a further instance of the same tool under an id of your choosing (suggested: `<id>_2`, `_3`, …), after asking whether you really want a second one. That is what the bridge needs: one instance per external MCP server, each with its own target in its values and a note saying which. A copy under another id gets no update badge later, because shipped files are matched by id.
+
+Deliberately not a marketplace: the list is this server's own `examples/` and nothing else, and the id in the URL is only ever looked up in that index, never turned into a path. Hidden in guest mode; in read-only mode the list stays visible without the install and update buttons.
+
+Tools installed this way need no hand-set `manager_url`: a runner fills in the address of the manager that started it, unless the value was changed from the tool's own default (see the router and control-tool sections below).
+
 > Function schemas are derived from the tool source, including uploaded OpenWebUI JSONs. See [Upgrading](upgrading.md) for existing installations.
 
 ---
@@ -169,6 +181,7 @@ Notes:
 - The MCP Bearer token keeps working unchanged (headers are passed through to the instance).
 - Instances bind to localhost only as soon as **either** way in is on — a port of its own or the manager port. That is the point of both: one way in, not one more. Instances that are already running are restarted when the switch is saved, so the change takes effect at once.
 - The proxy answers `503` for stopped instances and `404` for unknown IDs.
+- When a caller goes away without ending its session (no `DELETE`, as OpenWebUI and other clients do on a restart), the proxy notices the disconnect and closes the connection to the instance at once. Before 0.2.3 such idle streams stayed open, and on a long-running installation they filled the connection pool until every call through the proxy failed. A full pool and an unreachable instance are logged as `Proxy:` warnings in `manager.log`. The health check dials the instances directly, so it stays green in that case — the log is where to look.
 
 ### Where they answer
 
@@ -651,7 +664,9 @@ Both are optional and independent — unset means "password only", exactly as be
 | `GET` | `/api/instances/{id}/logs/runtime` | Runtime log |
 | `POST` | `/api/instances/upload` | Upload & install a new tool; accepts optional `category`, `venv` and `port` form fields. Category is stored in the MCP config without modifying the uploaded tool JSON *(blocked by `--no-edit`)* |
 | `POST` | `/api/tools/create` | Create & install a new tool from raw Python code in one step; accepts optional `category` (installs deps, validates in the venv, fills values) *(blocked by `--no-edit`)* |
-| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts), `identity_mode`, `content` (storage on/off and link prefix). `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
+| `GET` | `/api/store` | The tools shipped in `examples/` — `id`, `name`, `description`, `version`, `category`, plus `installed`, `installed_version` and `update_available` for this server. The read token is enough |
+| `POST` | `/api/store/{id}/install` | Install one shipped tool as a new instance, under its own id or under `{"id": "…"}` from the body. Same pipeline and answers as an upload: `409` when the id is taken, `422` with the pip or validation errors. Not started *(blocked by `--no-edit`)* |
+| `PUT` | `/api/instances/{id}` | Edit config — `name`, `category`, `note` (up to 2000 characters), `server`, `values`, `install.dependencies`, `lifecycle`, `venv` (moving venv reinstalls deps + restarts), `identity_mode`, `content` (storage on/off and link prefix). `values` entries equal to the secret mask `********` are ignored, so echoing back a fetched config never overwrites real secrets *(blocked by `--no-edit`)* |
 | `PUT` | `/api/instances/{id}/tool-code` | Save edited tool code; installs newly declared `requirements:` and syncs Valve values *(blocked by `--no-code-edit`)* |
 | `GET` | `/api/venvs` | List virtual environments with instance counts |
 | `POST` | `/api/venvs` | Create a virtual environment *(blocked by `--no-edit`)* |
@@ -848,7 +863,7 @@ The spawner inspects the actual Python code to build accurate MCP tool schemas:
 
 The definition lives in `examples/mcp-manager-control.json` (instance id `mcp_manager_control`). Set it up like any other tool, then point your MCP client at it:
 
-1. Upload `examples/mcp-manager-control.json` using **Upload JSON** to create and install the `mcp_manager_control` instance, then start it.
+1. Install **MCP Manager Control** from the **Store** (or upload `examples/mcp-manager-control.json` using **Upload JSON**) to create the `mcp_manager_control` instance, then start it. `manager_url` is filled in by the runner with the address of the manager that started it; set it by hand only when the control tool has to reach the manager by another address.
 2. In your client add it as an MCP server at `http://<host>:<port>/mcp`, with the Bearer token if MCP auth is enabled.
 
 **Available tools (33):** `list_instances`, `get_instance`, `start_instance`, `stop_instance`, `restart_instance`, `reinstall_instance`, `get_install_log`, `get_runtime_log`, `get_instance_config`, `get_settings`, `list_categories`, `list_agent_identities`, `check_backup`, `get_instance_specs`, `get_usage_stats`, `get_system_stats`, `get_tool_code`, `save_tool_code`, `validate_tool_code`, `export_tool`, `delete_instance`, `restart_manager`, `get_tool_template`, `upload_tool`, `create_tool`, `update_instance_category`, `update_instance_values`, `update_instance_lifecycle`, `update_instance_dependencies`, `update_instance_venv`, `list_content`, `read_content`, `delete_content`.
@@ -877,8 +892,8 @@ The model finds a tool, fetches its schema, then calls it. A short name (`list_m
 
 **Setup**
 
-1. Upload `examples/mcp-tool-router.json` and start the instance.
-2. In **Edit → Values**, set `manager_url` to the manager address (default `http://127.0.0.1:7860`). For a protected manager, set `auth_token` to its [read token](#api-tokens). Independently, set `mcp_token` if the target MCP endpoints require a Bearer token. Read-only manager access does not prevent calls to tools that write data.
+1. Install **MCP Tool Router** from the **Store** (or upload `examples/mcp-tool-router.json`) and start the instance.
+2. `manager_url` needs no setting: as long as it holds the tool's default, the runner replaces it with the address of the manager that started it, on whatever port that is. A value you changed is kept. For a protected manager, set `auth_token` to its [read token](#api-tokens). Independently, set `mcp_token` if the target MCP endpoints require a Bearer token. Read-only manager access does not prevent calls to tools that write data.
 3. In OpenWebUI, connect *only* the router and remove the direct tool connections — otherwise the model keeps the full schema list anyway.
 
 **Works with and without the shared port.** The router takes each instance's address from the catalog the manager already returns, so `/mcp/<id>` behind a shared port and one-port-per-instance both work with the same code path. `mcp_base_url` exists only as an override for a router running on another machine.
@@ -888,6 +903,8 @@ The model finds a tool, fetches its schema, then calls it. A short name (`list_m
 **Read-only manager access and routing restrictions.** The router uses one GET on the manager API plus MCP calls — no process management, no writing endpoints, so it works unchanged under `--no-edit`. `deny_instances` (default: `mcp_manager_control`) is enforced in `find_tools` **and** in `call_tool`, because `tool` is free text and a model that guesses a name must not slip past the directory. It never routes into itself: its own ID is excluded, and so is any instance offering `find_tools`, `describe_tools` and `call_tool` — a copy under a different ID cannot create a loop either.
 
 **Built to be understood by smaller models.** Errors carry the answer with them: a wrong argument comes back with the tool's schema attached, a list of what to change (`'paragraf' — did you mean 'paragraph'?`, a stray value paired with the one required slot left empty, a second nesting level unwrapped) and a corrected `call_tool(...)` built from the model's own values — suggested, never sent on its own, since the tool may write data; an unknown handle with "did you mean" suggestions, a stopped instance with "call find_tools again" instead of a raw connection error. A search that matches nothing returns the whole catalog rather than an empty result — it is a filter, never a gate. When `find_tools` has to cut its listing at `max_results`, it says which instances lost how many lines and points at `find_functions` for each. Umlauts are normalised (`Küche` → `kueche`), since German and English descriptions sit side by side in one installation. Every call is logged as one line in the instance's runtime log, so you can see whether a model follows the sequence.
+
+**Mixed-up and empty calls.** A model that also knows OpenWebUI's own tool search writes calls in its shape. The router takes `tool_name`/`params` as `tool`/`arguments`, `arguments` written out as a JSON string, the target's parameters put next to `tool` instead of inside `arguments` (moved in; explicit `arguments` win) and `describe_tools(handles=…)`. None of this shows in the schema, and it only helps with clients that pass undeclared fields through. **OpenWebUI drops every field a function does not declare** before the call, so those shapes arrive there as an empty call. The router then answers that the client drops undeclared fields, that the two fields are `tool` and `arguments`, and gives the call to copy. A call with empty `arguments` to a function that has required parameters is not sent; the answer says the values belong inside `arguments`, with the schema. A call without a handle never runs anything. See the README for why the router and OpenWebUI's tool search should not both be on.
 
 **External MCP servers behind a bridge.** An instance offering `list_tools`, `describe_tool` and `call_tool` — the shipped `external_mcp_bridge` — is opened up: the router reads its tool list and shows the external tools as functions of their own (`external_mcp_bridge.search_items`), searchable like any other. `describe_tools` fetches the schema from the bridge when it is first needed; `call_tool` wraps the arguments into the bridge's `name` + `arguments` itself, so the model nests once, like everywhere else (the old double nesting still arrives correctly). The list is kept for `bridge_cache_ttl` (600 s) — it comes from an external server. A bridge that cannot answer shows its own three functions and is asked again after a minute; those three stay callable either way. The valve `expand_bridges` switches this off.
 
