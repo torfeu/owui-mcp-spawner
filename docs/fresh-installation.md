@@ -1,6 +1,6 @@
 # Fresh installation and documentation check
 
-Checked on 2026-09-06, using framework source `1b03fc5` (version 0.2.2), plus the new standalone calculator example.
+Checked on 2026-09-06, using framework source `1b03fc5` (version 0.2.2), plus the new standalone calculator example. Repeated on 2026-11-07 for version 0.2.3 (source `8f0cbec`) with the package versions in the table below; the results were the same, and the router installed from the new **Store** found the manager on its non-default port by itself.
 
 ## Installation method
 
@@ -19,11 +19,11 @@ The first tool installation built `runtime/venvs/default` through the normal app
 | Component | Installed version |
 |---|---|
 | Python | 3.11.14 |
-| Framework | 0.2.2 |
-| FastAPI | 0.141.1 |
-| Starlette | 1.6.0 |
-| MCP SDK | 2.1.1 |
-| Pydantic | 2.13.5 |
+| Framework | 0.2.3 |
+| FastAPI | 0.162.0 |
+| Starlette | 1.10.0 |
+| MCP SDK | 2.3.0 |
+| Pydantic | 2.14.3 |
 | psutil | 7.2.2 |
 
 `pip check` passed in the manager environment and in both runner environments. These are observed versions, not a lockfile or a promise about future package resolution.
@@ -55,7 +55,7 @@ The call endpoint used by these checks performs real MCP communication with the 
 
 The repository suite was also run in another disposable copy, using the freshly installed manager packages and a copy of the freshly built default runner environment.
 
-**787 tests ran, all green**, in 17.5 seconds — checked again on 2026-09-12 with FastAPI 0.141.1 and MCP SDK 2.2.0.
+**888 tests ran, all green**, in 19.4 seconds, on 2026-11-07 for version 0.2.3 with FastAPI 0.162.0 and MCP SDK 2.3.0. (For 0.2.2: 787 green on 2026-09-12 with FastAPI 0.141.1 and MCP SDK 2.2.0.)
 
 The first run of this fresh installation was not green: five contract and permission sweeps in `tests/test_api.py` errored with
 
